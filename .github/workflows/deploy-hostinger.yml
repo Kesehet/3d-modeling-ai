@@ -232,7 +232,7 @@ jobs:
           BASE_URL="https://$THREED_HOSTNAME"
           JOB_JSON=$(curl --fail --silent --show-error \
             -H "Content-Type: application/json" \
-            -d '{"prompt":"Create a compact retro desk lamp with a round base, angled neck and dome shade","intended_use":"rendering"}' \
+            -d '{"prompt":"Create a complex retro-futuristic quadruped exploration robot: armored rectangular torso, four articulated two-segment legs with round joints and feet, offset camera head, twin side sensor pods, top antenna mast, rear battery pack, and one asymmetric tool arm. Use a white, dark gray and safety-orange color scheme.","intended_use":"rendering"}' \
             "$BASE_URL/dashboard/jobs")
           JOB_ID=$(echo "$JOB_JSON" | jq -r '.job_id')
           test -n "$JOB_ID"
@@ -248,6 +248,7 @@ jobs:
           test "$HTTP_CODE" -lt 300
           jq -e '.status.stage == "generic_rendered_v1"' /tmp/generic-result.json >/dev/null
           jq -e '.renders | length == 9' /tmp/generic-result.json >/dev/null
+          jq -e '.spec.objects | length >= 8' /tmp/generic-result.json >/dev/null
 
           curl --fail --silent --show-error --max-time 30 \
             "$BASE_URL/dashboard/renders/$JOB_ID/model-v1-front.png" \

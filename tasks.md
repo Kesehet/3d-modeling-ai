@@ -43,7 +43,7 @@ A new deployment must create a job, execute Blender through MCP, save a .blend, 
 - [x] Multi-angle rendering.
 - [x] Deterministic Pikachu benchmark builder.
 - [x] Keep benchmark runtime under 90 seconds on the current VPS (live benchmark ~10.3 seconds including 9 renders + exports).
-- [ ] Add at least two non-character regression subjects.
+- [ ] Add at least two non-character regression subjects. Complex quadruped robot live benchmark added as first quality regression.
 
 ### Acceptance
 At least three known benchmark prompts produce recognizable, repeatable results and downloadable source files.
@@ -387,7 +387,7 @@ The first deployed benchmark produced 23 mesh objects, 12 non-manifold edges and
 ## Sprint C — Generalization
 - [x] Add first reusable safe declarative primitive scene builder (sphere/cube/cylinder/cone/torus, materials, transforms, cameras, exports).
 - [ ] Build a second character benchmark.
-- [ ] Build and live-verify a hard-surface product benchmark using the generic SceneSpec engine.
+- [ ] Build and live-verify a hard-surface product benchmark using the generic SceneSpec engine. A complex hard-surface quadruped robot quality regression is now wired into deploy validation.
 - [ ] Replace subject-specific tuning with general edit operations.
 
 ---
@@ -416,7 +416,7 @@ The first deployed benchmark produced 23 mesh objects, 12 non-manifold edges and
 
 - [x] Add reference-image upload endpoint with size/type limits.
 - [x] Store image metadata and SHA-256 hashes.
-- [ ] Add job cancellation and deletion.
+- [ ] Add job cancellation. [x] Add permanent job deletion for non-running jobs.
 - [x] Add artifact listing/download endpoints.
 - [x] Add structured job/event history.
 - [ ] Add concurrency lock so one worker cannot mutate the same scene twice.

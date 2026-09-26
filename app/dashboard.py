@@ -150,7 +150,7 @@ def dashboard_page() -> HTMLResponse:
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 Inter,system-ui,-apple-system,"Segoe UI",sans-serif}
 button,input,select,textarea{font:inherit}button{cursor:pointer}.wrap{max-width:1280px;margin:auto;padding:24px}
 header{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:24px}.brand h1{margin:0;font-size:24px}.brand p{margin:3px 0 0;color:var(--muted)}
-.btn{border:1px solid var(--line);background:#fff;color:var(--text);border-radius:9px;padding:9px 13px;font-weight:650}.btn:hover{background:#f8fafc}.btn.primary{background:var(--blue);color:#fff;border-color:var(--blue)}
+.btn{border:1px solid var(--line);background:#fff;color:var(--text);border-radius:9px;padding:9px 13px;font-weight:650}.btn:hover{background:#f8fafc}.btn.primary{background:var(--blue);color:#fff;border-color:var(--blue)}.btn.danger{border-color:#fecaca;color:#b42318;background:#fff5f5}.btn.danger:hover{background:#fee2e2}
 .gallery{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:18px}.job-card{background:var(--card);border:1px solid var(--line);border-radius:14px;overflow:hidden;box-shadow:var(--shadow);cursor:pointer;transition:.15s}.job-card:hover{transform:translateY(-2px)}
 .thumb{aspect-ratio:1;background:#eef1f5;position:relative;overflow:hidden}.thumb img{width:100%;height:100%;object-fit:cover;display:block}.empty-thumb{width:100%;height:100%;display:grid;place-items:center;color:#98a2b3;font-weight:650}
 .card-body{padding:13px}.prompt{font-weight:700;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;min-height:42px}.meta{display:flex;justify-content:space-between;gap:8px;color:var(--muted);font-size:12px;margin-top:8px}.status{font-weight:700}.ready{color:var(--green)}.failed{color:var(--red)}.running{color:#b54708}
@@ -171,7 +171,7 @@ header{display:flex;align-items:center;justify-content:space-between;gap:16px;ma
 <section class="detail" id="detailView">
   <div class="detail-head">
     <div><button class="btn" id="backBtn">← Gallery</button><h2 id="detailTitle">Job</h2><p id="detailMeta"></p></div>
-    <button class="btn" id="improveBtn">Improve model</button>
+    <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn" id="improveBtn">Improve model</button><button class="btn danger" id="deleteBtn">Delete job</button></div>
   </div>
   <div class="render-grid" id="renderGrid"></div>
   <div class="downloads"><h3>Downloads</h3><div class="file-list" id="fileList"></div></div>
@@ -198,7 +198,7 @@ const els={
   title:byId("detailTitle"),meta:byId("detailMeta"),renders:byId("renderGrid"),files:byId("fileList"),json:byId("detailJson"),
   newBtn:byId("newJobBtn"),dialog:byId("newJobDialog"),cancel:byId("cancelNew"),create:byId("createModel"),
   prompt:byId("jobPrompt"),use:byId("jobUse"),width:byId("jobWidth"),notice:byId("newNotice"),
-  back:byId("backBtn"),improve:byId("improveBtn")
+  back:byId("backBtn"),improve:byId("improveBtn"),deleteBtn:byId("deleteBtn")
 };
 let data=null;
 let currentJob=null;
@@ -244,6 +244,7 @@ function renderDetail(job){
     : '<span style="color:var(--muted)">No downloadable model files yet.</span>';
   els.json.textContent=JSON.stringify({status:{state:job.state,stage:job.stage},qa:job.qa,history:job.history},null,2);
   els.improve.disabled=busy||!scene.length;
+  els.deleteBtn.disabled=busy||job.state==="running";
 }
 async function refresh(){
   try{
@@ -284,12 +285,26 @@ async function improve(){
   }catch(error){alert("Improve failed: "+error.message)}
   finally{busy=false;els.improve.textContent="Improve model";render()}
 }
+async function deleteCurrentJob(){
+  if(!currentJob||busy)return;
+  const prompt=currentJob.prompt||"this job";
+  if(!confirm('Delete "'+prompt+'"?\n\nThis permanently removes all renders, model files, exports, references, logs and history for this job.'))return;
+  busy=true;els.deleteBtn.disabled=true;els.deleteBtn.textContent="Deleting...";
+  try{
+    const response=await fetch("/dashboard/jobs/"+encodeURIComponent(currentJob.job_id),{method:"DELETE"});
+    if(!response.ok)throw new Error(await response.text());
+    goHome();
+    await refresh();
+  }catch(error){alert("Delete failed: "+error.message)}
+  finally{busy=false;els.deleteBtn.textContent="Delete job";render()}
+}
 els.newBtn.addEventListener("click",()=>{els.notice.textContent="";els.dialog.classList.add("show");els.prompt.focus()});
 els.cancel.addEventListener("click",()=>els.dialog.classList.remove("show"));
 els.dialog.addEventListener("click",event=>{if(event.target===els.dialog)els.dialog.classList.remove("show")});
 els.create.addEventListener("click",createModel);
 els.back.addEventListener("click",goHome);
 els.improve.addEventListener("click",improve);
+els.deleteBtn.addEventListener("click",deleteCurrentJob);
 window.addEventListener("hashchange",route);
 refresh();
 setInterval(refresh,3000);

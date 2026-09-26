@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import shutil
 import uuid
 from datetime import UTC, datetime
 from io import BytesIO
@@ -363,6 +364,11 @@ async def dashboard_improve_generic(job_id: str, request: GenericRefineRequest) 
     return await refine_generic_scene(job_id, request)
 
 
+@app.delete("/dashboard/jobs/{job_id}", include_in_schema=False)
+async def dashboard_delete_job(job_id: str) -> dict:
+    return await delete_job(job_id)
+
+
 @app.post("/dashboard/jobs/{job_id}/refine-pikachu", include_in_schema=False)
 async def dashboard_refine_pikachu(job_id: str, request: PikachuRefineRequest) -> dict:
     return await refine_pikachu(job_id, request)
@@ -421,8 +427,41 @@ async def capabilities() -> dict:
             "experimental-voxel-print-repair",
             "safe-declarative-generic-scene-builder",
             "generic-prompt-to-primitive-blockout",
+            "generic-visual-refinement",
+            "permanent-job-delete",
         ],
     }
+
+
+async def delete_job(job_id: str) -> dict:
+    root = _require_job(job_id)
+    status_path = root / "status.json"
+    status: dict = {}
+    if status_path.exists():
+        try:
+            status = json.loads(status_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            status = {}
+    if status.get("state") == "running":
+        raise HTTPException(
+            status_code=409,
+            detail="This job is still running. Wait for it to finish before deleting it.",
+        )
+
+    file_count = sum(1 for path in root.rglob("*") if path.is_file())
+    byte_count = sum(path.stat().st_size for path in root.rglob("*") if path.is_file())
+    shutil.rmtree(root)
+    return {
+        "job_id": job_id,
+        "deleted": True,
+        "files_deleted": file_count,
+        "bytes_deleted": byte_count,
+    }
+
+
+@app.delete("/v1/jobs/{job_id}", dependencies=[Depends(require_api_token)])
+async def delete_job_api(job_id: str) -> dict:
+    return await delete_job(job_id)
 
 
 @app.post("/v1/jobs", dependencies=[Depends(require_api_token)])
@@ -916,7 +955,7 @@ async def refine_generic_scene(job_id: str, request: GenericRefineRequest) -> di
                 stage="generic_visual_refinement",
                 include_references=True,
                 include_renders=True,
-                max_images=16,
+                max_images=10,
                 instruction=(
                     "Critique the newest generic model renders against the references and prompt. "
                     "Prioritize silhouette, proportions, missing major parts, relative placement, and colors. "

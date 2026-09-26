@@ -15,6 +15,7 @@ from fastapi.responses import FileResponse
 from PIL import Image, UnidentifiedImageError
 from pydantic import BaseModel, Field, ValidationError
 
+from .builders import pikachu_script
 from .config import (
     JOBS_ROOT,
     OLLAMA_PROXY_BASE_URL,
@@ -413,6 +414,54 @@ async def build_plan(job_id: str, request: PlanRequest) -> dict:
     (root / "plan.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
     _write_status(root, state="ready", stage="planned", latest_plan_log=log_name)
     return payload
+
+
+@app.post("/v1/jobs/{job_id}/tests/pikachu", dependencies=[Depends(require_api_token)])
+async def generate_pikachu_test(job_id: str) -> dict:
+    """Generate the first recognizable multi-view character through Blender MCP."""
+    root = _require_job(job_id)
+    blend_path = str(root / "scene" / "pikachu-v1.blend")
+    render_dir = str(root / "renders")
+
+    _write_status(root, state="running", stage="pikachu_build")
+    request_payload = {
+        "tool": "blender_python_exec",
+        "arguments": {
+            "code": pikachu_script(),
+            "args": {"blend_path": blend_path, "output_dir": render_dir},
+            "transport": "headless",
+            "factory_startup": True,
+            "timeout_seconds": 420,
+        },
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=480) as client:
+            response = await client.post(f"{WORKER_URL}/v1/mcp/call", json=request_payload)
+            response.raise_for_status()
+            result = response.json()
+    except (httpx.HTTPError, ValueError) as exc:
+        _write_status(root, state="failed", stage="pikachu_build", error=str(exc))
+        raise HTTPException(status_code=502, detail=f"Pikachu Blender build failed: {exc}") from exc
+
+    expected = [
+        "pikachu-front.png",
+        "pikachu-left.png",
+        "pikachu-back.png",
+        "pikachu-iso.png",
+    ]
+    missing = [name for name in expected if not (root / "renders" / name).is_file()]
+    if missing or not (root / "scene" / "pikachu-v1.blend").is_file():
+        _write_status(root, state="failed", stage="pikachu_build", error=f"Missing artifacts: {missing}")
+        raise HTTPException(status_code=502, detail=f"Blender completed but expected artifacts are missing: {missing}")
+
+    status = _write_status(
+        root,
+        state="ready",
+        stage="pikachu_rendered",
+        pikachu={"blend": "pikachu-v1.blend", "renders": expected},
+    )
+    return {"job_id": job_id, "status": status, "worker_result": result, "renders": expected}
 
 
 @app.post("/v1/jobs/{job_id}/smoke-test", dependencies=[Depends(require_api_token)])

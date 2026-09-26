@@ -10,6 +10,33 @@ This file is the working definition of "done" for the project. A level is only c
 
 ---
 
+## P0 — STOP-THE-LINE: quality regression recovery
+
+**Status: ACTIVE.** Do not promote additional capability-level work until the generic generation/refinement path stops making models worse.
+
+### Observed regression
+- Generic `v2` can be materially worse than `v1` while still ending in `generic_refinement_complete`.
+- The Pikachu regression can collapse into a few blob primitives and antenna-like rods instead of retaining defining character parts.
+- The desk-lamp regression can collapse into disconnected stacked primitives instead of a round base + connected angled neck + dome shade.
+- Current live regression mainly proves that files/renders exist; it does not prove that the candidate is visually or structurally better.
+
+### P0 recovery tasks
+- [ ] Freeze new roadmap feature work until the quality regression gate passes.
+- [ ] Preserve the last known-good SceneSpec/version as the active model; a refinement candidate must not replace it automatically.
+- [ ] Add a structural regression guard that rejects destructive SceneSpec rewrites (major object-count collapse / loss of semantic parts).
+- [ ] Strengthen generic planning so every requested major part is explicitly represented instead of optimizing for the fewest primitives.
+- [ ] Require connected/contact-aware blockouts: necks, limbs, handles, stems, antennas and similar parts must touch/overlap their parent geometry instead of floating.
+- [ ] Make refinement surgical: fix the 1–3 highest-priority defects while preserving unaffected geometry instead of rewriting the whole model.
+- [ ] Ensure visual QA evaluates the newest candidate render set with references and does not accidentally mix stale iterations as the "current" model.
+- [ ] Compare candidate `vN` against the previous accepted version and roll back/reject the candidate when quality regresses.
+- [ ] Add quality regression subjects: stylized Pikachu, articulated retro desk lamp, sneaker, office chair, and a complex creature/robot.
+- [ ] Make deploy quality regression fail on structural/visual degradation, not merely successful HTTP responses and generated files.
+
+### P0 acceptance
+A refinement may only become the accepted/latest model when it preserves required parts and does not regress visibly or structurally from the previous accepted version. The Pikachu and articulated desk-lamp benchmarks must remain recognizable from front, side, rear and isometric views.
+
+---
+
 ## Level 0 — Reliable infrastructure
 
 **Goal:** the end-to-end service can execute Blender work reliably.

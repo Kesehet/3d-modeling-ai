@@ -194,9 +194,14 @@ scene.camera = camera
 target = Vector((0, 0, 2.55))
 views = {
     "front": (0, -9.5, 3.2),
-    "left": (-8.5, -0.4, 3.1),
+    "front-left": (-6.8, -7.0, 4.2),
+    "left": (-9.0, 0.0, 3.2),
+    "back-left": (-6.8, 7.0, 4.2),
     "back": (0, 9.5, 3.2),
-    "iso": (6.8, -7.0, 4.8),
+    "back-right": (6.8, 7.0, 4.2),
+    "right": (9.0, 0.0, 3.2),
+    "front-right": (6.8, -7.0, 4.2),
+    "top": (0.0, -0.2, 11.5),
 }
 rendered = []
 for name, position in views.items():

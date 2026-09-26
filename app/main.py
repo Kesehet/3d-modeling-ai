@@ -16,7 +16,6 @@ from PIL import Image, UnidentifiedImageError
 from pydantic import BaseModel, Field, ValidationError
 
 from .builders import pikachu_script
-from .dashboard import dashboard_page, jobs_snapshot, public_render
 from .config import (
     JOBS_ROOT,
     OLLAMA_PROXY_BASE_URL,
@@ -24,6 +23,7 @@ from .config import (
     VISION_MODEL,
     WORKER_URL,
 )
+from .dashboard import dashboard_page, jobs_snapshot, public_render
 from .ollama import OllamaProxyClient, OllamaProxyError
 from .security import require_api_token
 
@@ -462,9 +462,14 @@ async def generate_pikachu_test(job_id: str) -> dict:
 
     expected = [
         "pikachu-front.png",
+        "pikachu-front-left.png",
         "pikachu-left.png",
+        "pikachu-back-left.png",
         "pikachu-back.png",
-        "pikachu-iso.png",
+        "pikachu-back-right.png",
+        "pikachu-right.png",
+        "pikachu-front-right.png",
+        "pikachu-top.png",
     ]
     missing = [name for name in expected if not (root / "renders" / name).is_file()]
     if missing or not (root / "scene" / "pikachu-v1.blend").is_file():

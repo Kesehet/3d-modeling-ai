@@ -56,7 +56,24 @@ def material_for(hex_color):
 def add_object(item):
     shape = item.get("shape", "cube")
     location = tuple(item.get("location", [0, 0, 0]))
-    if shape == "sphere":
+    if shape == "rod":
+        start = Vector(item.get("start") or location)
+        end = Vector(item.get("end") or [location[0], location[1], location[2] + 1.0])
+        delta = end - start
+        if delta.length < 0.02:
+            delta = Vector((0, 0, 0.02))
+            end = start + delta
+        radius = max(0.02, min(5.0, float(item.get("radius") or 0.2)))
+        bpy.ops.mesh.primitive_cylinder_add(
+            vertices=48,
+            radius=radius,
+            depth=delta.length,
+            location=(start + end) / 2,
+        )
+        obj = bpy.context.object
+        obj.rotation_euler = delta.to_track_quat("Z", "Y").to_euler()
+        bpy.ops.object.transform_apply(location=False, rotation=False, scale=True)
+    elif shape == "sphere":
         bpy.ops.mesh.primitive_uv_sphere_add(segments=40, ring_count=20, location=location)
     elif shape == "cylinder":
         bpy.ops.mesh.primitive_cylinder_add(vertices=48, radius=1, depth=2, location=location)
@@ -75,11 +92,12 @@ def add_object(item):
 
     obj = bpy.context.object
     obj.name = str(item.get("name") or shape)[:80]
-    scale = item.get("scale", [1, 1, 1])
-    obj.scale = tuple(max(0.03, min(20.0, float(value))) for value in scale)
-    rotation = item.get("rotation_deg", [0, 0, 0])
-    obj.rotation_euler = tuple(math.radians(float(value)) for value in rotation)
-    bpy.ops.object.transform_apply(location=False, rotation=False, scale=True)
+    if shape != "rod":
+        scale = item.get("scale", [1, 1, 1])
+        obj.scale = tuple(max(0.03, min(20.0, float(value))) for value in scale)
+        rotation = item.get("rotation_deg", [0, 0, 0])
+        obj.rotation_euler = tuple(math.radians(float(value)) for value in rotation)
+        bpy.ops.object.transform_apply(location=False, rotation=False, scale=True)
     obj.data.materials.append(material_for(item.get("color", "#808080")))
 
     if item.get("bevel", True):

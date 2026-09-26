@@ -275,10 +275,13 @@ class GenericRefineRequest(BaseModel):
 
 class SceneObjectSpec(BaseModel):
     name: str = Field(min_length=1, max_length=80)
-    shape: Literal["sphere", "cube", "cylinder", "cone", "torus"]
+    shape: Literal["sphere", "cube", "cylinder", "cone", "torus", "rod"]
     location: list[float] = Field(min_length=3, max_length=3)
     scale: list[float] = Field(min_length=3, max_length=3)
     rotation_deg: list[float] = Field(default_factory=lambda: [0.0, 0.0, 0.0], min_length=3, max_length=3)
+    start: list[float] | None = Field(default=None, min_length=3, max_length=3)
+    end: list[float] | None = Field(default=None, min_length=3, max_length=3)
+    radius: float | None = Field(default=None, gt=0.01, le=5.0)
     color: str = Field(default="#808080", pattern=r"^#[0-9A-Fa-f]{6}$")
     bevel: bool = True
     smooth: bool = True
@@ -300,7 +303,7 @@ def _normalize_scene_spec_payload(data: object, fallback_title: str) -> dict:
     normalized.setdefault("rationale", "")
     normalized.setdefault("presentation_base", True)
 
-    allowed_shapes = {"sphere", "cube", "cylinder", "cone", "torus"}
+    allowed_shapes = {"sphere", "cube", "cylinder", "cone", "torus", "rod"}
     shape_aliases = {
         "ellipsoid": "sphere",
         "ball": "sphere",
@@ -310,6 +313,10 @@ def _normalize_scene_spec_payload(data: object, fallback_title: str) -> dict:
         "disk": "cylinder",
         "tube": "cylinder",
         "ring": "torus",
+        "strut": "rod",
+        "beam": "rod",
+        "limb": "rod",
+        "bar": "rod",
     }
 
     raw_objects = normalized.get("objects")
@@ -381,6 +388,21 @@ def _normalize_scene_spec_payload(data: object, fallback_title: str) -> dict:
                 "location": vec3(location, [0.0, 0.0, 0.0]),
                 "scale": vec3(scale, [1.0, 1.0, 1.0]),
                 "rotation_deg": vec3(rotation, [0.0, 0.0, 0.0]),
+                "start": (
+                    vec3(item.get("start"), [0.0, 0.0, 0.0])
+                    if item.get("start") is not None
+                    else None
+                ),
+                "end": (
+                    vec3(item.get("end"), [0.0, 0.0, 1.0])
+                    if item.get("end") is not None
+                    else None
+                ),
+                "radius": (
+                    max(0.02, min(5.0, float(item.get("radius"))))
+                    if item.get("radius") is not None
+                    else None
+                ),
                 "color": color_hex(item.get("color", "#808080")),
                 "bevel": bool(item.get("bevel", True)),
                 "smooth": bool(item.get("smooth", True)),
@@ -1004,7 +1026,9 @@ async def _build_generic_scene_spec(job_id: str, auto_research: bool) -> Generic
     system = (
         "You are a 3D blockout planner. Return a safe declarative scene made only from the allowed "
         "primitive types in the supplied JSON schema. Use the exact keys title, objects, name, shape, "
-        "location, scale, rotation_deg, color, bevel, and smooth. Do not output Python. Build a recognizable model "
+        "location, scale, rotation_deg, start, end, radius, color, bevel, and smooth. Use shape='rod' "
+        "with start/end/radius for limbs, handles, struts, antennas, and connectors because it aligns "
+        "itself between two points. Do not output Python. Build a recognizable model "
         "using as few primitives as practical while preserving silhouette and major parts. Coordinates "
         "should normally stay within -8..8. Place the subject around the origin and keep its lowest major "
         "geometry near Z=0. Use meaningful semantic object names and realistic relative proportions."
@@ -1197,7 +1221,8 @@ async def refine_generic_scene(job_id: str, request: GenericRefineRequest) -> di
         system = (
             "Revise a safe declarative 3D SceneSpec using the visual critique. Return JSON only matching "
             "the supplied schema. You may add, remove, resize, rotate, recolor, or reposition objects, but "
-            "you may only use the schema's allowed primitive shapes. Preserve good geometry and make the "
+            "you may only use the schema's allowed primitive shapes. Prefer rod objects for articulated limbs, "
+            "struts and connectors when two endpoints are known. Preserve good geometry and make the "
             "smallest changes that address the critique. Do not output Python."
         )
         prompt = (

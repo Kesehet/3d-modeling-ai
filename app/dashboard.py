@@ -53,6 +53,9 @@ def jobs_snapshot() -> dict:
             except (OSError, json.JSONDecodeError):
                 continue
 
+            if request.get("prompt") == "Deployment MCP smoke test cube":
+                continue
+
             artifacts = {category: _artifact_rows(root, category) for category in PUBLIC_ARTIFACT_CATEGORIES}
             renders = [
                 item

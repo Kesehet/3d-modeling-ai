@@ -24,7 +24,7 @@ This file is the working definition of "done" for the project. A level is only c
 - [x] Deployment smoke test creates a Blender file and PNG.
 - [x] Traditional tabbed dashboard: Overview / New Job / Gallery / Files / Jobs.
 - [x] VPS CPU limits match the actual 2-vCPU host.
-- [ ] Add a deploy regression that always validates the current benchmark, not only the cube.
+- [x] Add a deploy regression that validates a complex quadruped robot through v1 + visual critique + v2, while retaining the cube only as a hidden infrastructure heartbeat.
 - [ ] Add automatic rollback to the previous healthy image when deployment smoke tests fail.
 
 ### Acceptance
@@ -101,6 +101,7 @@ Given only a prompt, the system creates a traceable reference pack and includes 
 - [x] Independent left/right body parts.
 - [ ] Improve tail topology and attachment.
 - [ ] Bent/tapered appendage helper.
+- [x] Safe rod-between-two-points helper for straight limbs, handles, struts, antennas and connectors.
 - [ ] Pose-aware asymmetry.
 - [ ] General curve-to-mesh appendage helper.
 - [ ] Benchmark horns, wings, handles, cables, and branches.
@@ -247,7 +248,7 @@ Known broken test meshes are detected correctly and at least common manifold/nor
 **Goal:** render, inspect, change, and re-render autonomously.
 
 ### Capabilities
-- [x] Structured Qwen3-VL critique schema.
+- [x] Structured multimodal visual critique pipeline (Gemma 4 primary with model fallbacks and schema normalization).
 - [x] Persist vision reports.
 - [x] Keep uploaded/researched references in critique cycles.
 - [x] Parameter schema for benchmark corrections.
@@ -258,7 +259,7 @@ Known broken test meshes are detected correctly and at least common manifold/nor
 - [ ] Detect regressions and rollback.
 - [x] Detect a basic stalled loop when the revised generic SceneSpec is unchanged; broader semantic stall detection remains future work.
 - [ ] Strategy switch when repeated edits do not improve.
-- [x] Generalize visual correction beyond Pikachu: Qwen3-VL critique can now drive a full revised safe SceneSpec and re-render a generic v2.
+- [x] Generalize visual correction beyond Pikachu: multimodal critique can drive a full revised safe SceneSpec and re-render a generic v2.
 
 ### Acceptance
 Iteration N+1 must make a measurable/visible correction requested by vision QA, with complete history of critique → parameters → renders.

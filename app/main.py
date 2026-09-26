@@ -77,6 +77,163 @@ class VisionReport(BaseModel):
     priority_actions: list[str] = Field(default_factory=list)
 
 
+def _normalize_vision_report_payload(data: object) -> dict:
+    if not isinstance(data, dict):
+        raise TypeError("Vision response is not a JSON object.")
+
+    def text_value(value: object) -> str:
+        if isinstance(value, str):
+            return value.strip()
+        if isinstance(value, list):
+            return "; ".join(text_value(item) for item in value if text_value(item))
+        if isinstance(value, dict):
+            return "; ".join(
+                f"{key}: {text_value(item)}"
+                for key, item in value.items()
+                if text_value(item)
+            )
+        if value is None:
+            return ""
+        return str(value)
+
+    observations: list[str] = []
+    raw_observations = data.get("observations")
+    if isinstance(raw_observations, list):
+        observations.extend(text_value(item) for item in raw_observations if text_value(item))
+
+    analysis = data.get("analysis")
+    if isinstance(analysis, dict):
+        for key, value in analysis.items():
+            if key in {"issues", "priority_actions", "recommendations"}:
+                continue
+            text = text_value(value)
+            if text:
+                observations.append(f"{str(key).replace('_', ' ')}: {text}")
+    elif analysis:
+        text = text_value(analysis)
+        if text:
+            observations.append(text)
+
+    raw_issues = data.get("issues")
+    if not isinstance(raw_issues, list) and isinstance(analysis, dict):
+        raw_issues = analysis.get("issues")
+    if not isinstance(raw_issues, list):
+        raw_issues = []
+
+    issues: list[dict] = []
+    severity_aliases = {
+        "critical": "high",
+        "major": "high",
+        "high": "high",
+        "moderate": "medium",
+        "medium": "medium",
+        "minor": "low",
+        "low": "low",
+        "info": "low",
+    }
+    for raw in raw_issues[:30]:
+        if isinstance(raw, str):
+            issue_text = raw.strip()
+            if issue_text:
+                issues.append(
+                    {
+                        "object": "",
+                        "issue": issue_text,
+                        "severity": "medium",
+                        "suggested_change": issue_text,
+                    }
+                )
+            continue
+        if not isinstance(raw, dict):
+            continue
+        issue_text = text_value(
+            raw.get("issue")
+            or raw.get("problem")
+            or raw.get("description")
+            or raw.get("finding")
+        )
+        if not issue_text:
+            continue
+        severity_key = str(raw.get("severity") or raw.get("priority") or "medium").lower()
+        suggestion = text_value(
+            raw.get("suggested_change")
+            or raw.get("recommendation")
+            or raw.get("fix")
+            or raw.get("action")
+        ) or issue_text
+        issues.append(
+            {
+                "object": text_value(raw.get("object") or raw.get("part") or raw.get("area")),
+                "issue": issue_text,
+                "severity": severity_aliases.get(severity_key, "medium"),
+                "suggested_change": suggestion,
+            }
+        )
+
+    # Some multimodal models return prose grouped by visual category instead of an issue array.
+    # Preserve that critique as actionable medium-priority issues rather than discarding it.
+    if not issues and isinstance(analysis, dict):
+        for key in (
+            "geometry",
+            "silhouette",
+            "proportions",
+            "spatial_relationships",
+            "missing_features",
+            "placement",
+            "colors",
+            "materials",
+            "accuracy",
+            "problems",
+            "recommendations",
+        ):
+            text = text_value(analysis.get(key))
+            if not text:
+                continue
+            issues.append(
+                {
+                    "object": str(key).replace("_", " "),
+                    "issue": text,
+                    "severity": "medium",
+                    "suggested_change": text,
+                }
+            )
+
+    priority_actions: list[str] = []
+    raw_actions = data.get("priority_actions") or data.get("recommendations")
+    if isinstance(raw_actions, list):
+        priority_actions.extend(text_value(item) for item in raw_actions if text_value(item))
+    elif raw_actions:
+        action_text = text_value(raw_actions)
+        if action_text:
+            priority_actions.append(action_text)
+    if not priority_actions:
+        priority_actions = [item["suggested_change"] for item in issues[:6]]
+
+    summary = text_value(data.get("summary") or data.get("overall_summary"))
+    if not summary:
+        summary = " ".join(observations[:3]).strip()[:1800] or "Visual analysis completed."
+
+    strategy_raw = str(
+        data.get("recommended_modeling_strategy")
+        or data.get("modeling_strategy")
+        or "procedural"
+    ).lower()
+    if "hybrid" in strategy_raw:
+        strategy = "hybrid"
+    elif "base" in strategy_raw or "sculpt" in strategy_raw:
+        strategy = "base_mesh"
+    else:
+        strategy = "procedural"
+
+    return {
+        "summary": summary,
+        "recommended_modeling_strategy": strategy,
+        "observations": observations[:30],
+        "issues": issues[:30],
+        "priority_actions": priority_actions[:10],
+    }
+
+
 class PlanRequest(BaseModel):
     instruction: str | None = Field(default=None, max_length=4000)
 
@@ -704,8 +861,9 @@ async def analyze_vision(job_id: str, request: VisionAnalyzeRequest) -> dict:
                 schema=VisionReport.model_json_schema(),
                 temperature=0.1,
             )
-            candidate_report = VisionReport.model_validate(candidate_result.data)
-        except (OllamaProxyError, httpx.HTTPError, ValidationError, ValueError) as exc:
+            normalized_report = _normalize_vision_report_payload(candidate_result.data)
+            candidate_report = VisionReport.model_validate(normalized_report)
+        except (OllamaProxyError, httpx.HTTPError, ValidationError, ValueError, TypeError) as exc:
             errors.append(f"{candidate_model}: {exc}")
             continue
         ollama_result = candidate_result

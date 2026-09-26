@@ -1,7 +1,5 @@
 FROM ubuntu:24.04
 
-ARG BLENDER_MCP_COMMIT=428f60cdb819c55c69d67eef681f0318e464e0e9
-
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -16,7 +14,6 @@ RUN apt-get update \
         blender \
         ca-certificates \
         curl \
-        git \
         python3 \
         python3-pip \
         python3-venv \
@@ -25,12 +22,10 @@ RUN apt-get update \
 RUN python3 -m venv /opt/venv \
     && /opt/venv/bin/pip install --upgrade pip setuptools wheel
 
-# "Fork" the selected upstream into the runtime in a reproducible way.
-# We intentionally pin the exact commit instead of following upstream main.
-RUN git clone https://github.com/djeada/blender-mcp-server.git /opt/blender-mcp \
-    && cd /opt/blender-mcp \
-    && git checkout "$BLENDER_MCP_COMMIT" \
-    && /opt/venv/bin/pip install .
+# Vendored practical fork of djeada/blender-mcp-server.
+# Provenance and pinned revision are documented in vendor/UPSTREAM.md.
+COPY vendor/blender-mcp-server /opt/blender-mcp
+RUN /opt/venv/bin/pip install /opt/blender-mcp
 
 WORKDIR /app
 COPY pyproject.toml ./

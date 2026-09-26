@@ -176,9 +176,9 @@ rim.data.size = 3.0
 rim.rotation_euler = (math.radians(-35), 0, math.radians(180))
 
 scene = bpy.context.scene
-scene.render.engine = "BLENDER_EEVEE" if bpy.app.version >= (5, 0, 0) else "BLENDER_EEVEE_NEXT"
-scene.render.resolution_x = 640
-scene.render.resolution_y = 640
+scene.render.engine = "BLENDER_WORKBENCH"\nscene.display.shading.light = "STUDIO"\nscene.display.shading.color_type = "MATERIAL"\nscene.display.shading.show_shadows = True\nscene.display.shading.show_cavity = True
+scene.render.resolution_x = 512
+scene.render.resolution_y = 512
 scene.render.resolution_percentage = 100
 scene.render.image_settings.file_format = "PNG"
 scene.render.film_transparent = False

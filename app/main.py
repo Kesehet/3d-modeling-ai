@@ -11,11 +11,12 @@ from typing import Annotated, Literal
 
 import httpx
 from fastapi import Depends, FastAPI, File, HTTPException, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse
 from PIL import Image, UnidentifiedImageError
 from pydantic import BaseModel, Field, ValidationError
 
 from .builders import pikachu_script
+from .dashboard import dashboard_page, jobs_snapshot, public_render
 from .config import (
     JOBS_ROOT,
     OLLAMA_PROXY_BASE_URL,
@@ -163,6 +164,21 @@ def _collect_images(root: Path, request: VisionAnalyzeRequest) -> tuple[list[str
     encoded = [base64.b64encode(path.read_bytes()).decode("ascii") for path in image_paths]
     labels = [f"{path.parent.name}/{path.name}" for path in image_paths]
     return encoded, labels
+
+
+@app.get("/", response_class=HTMLResponse, include_in_schema=False)
+async def dashboard() -> HTMLResponse:
+    return dashboard_page()
+
+
+@app.get("/dashboard/api", include_in_schema=False)
+async def dashboard_api() -> dict:
+    return jobs_snapshot()
+
+
+@app.get("/dashboard/renders/{job_id}/{filename}", include_in_schema=False)
+async def dashboard_render(job_id: str, filename: str) -> FileResponse:
+    return FileResponse(public_render(job_id, filename))
 
 
 @app.get("/health")

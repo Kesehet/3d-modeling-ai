@@ -106,61 +106,228 @@ def public_render(job_id: str, filename: str) -> Path:
 def dashboard_page() -> HTMLResponse:
     return HTMLResponse(
         """<!doctype html>
-<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>3D Modeling AI // Observation Deck</title>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>3D Modeling AI</title>
 <style>
-:root{--bg:#05080d;--panel:#09131e;--line:#173b52;--cyan:#42e8ff;--green:#61ffb0;--muted:#718da1;--text:#daf5ff;--red:#ff5577;--amber:#ffc85a}
-*{box-sizing:border-box}body{margin:0;min-height:100vh;background:radial-gradient(circle at 50% -20%,#12334a 0,#07111a 34%,var(--bg) 70%);color:var(--text);font:14px ui-monospace,SFMono-Regular,Menlo,monospace}
-body:after{content:"";position:fixed;inset:0;pointer-events:none;background:repeating-linear-gradient(0deg,transparent 0 3px,rgba(66,232,255,.022) 4px);z-index:99}
-.wrap{max-width:1500px;margin:auto;padding:28px}.top{display:flex;justify-content:space-between;gap:20px;align-items:flex-end;border-bottom:1px solid var(--line);padding-bottom:18px}
-.brand{font-size:clamp(24px,4vw,42px);font-weight:900;letter-spacing:.08em}.brand b,h2{color:var(--cyan);text-shadow:0 0 16px #42e8ff66}.sub,.muted{color:var(--muted)}
-.pulse{display:inline-block;width:9px;height:9px;border-radius:50%;background:var(--green);box-shadow:0 0 14px var(--green);margin-right:8px}.grid{display:grid;grid-template-columns:1.5fr .75fr;gap:18px;margin-top:20px}
-.panel{background:linear-gradient(145deg,rgba(11,25,38,.96),rgba(5,11,18,.97));border:1px solid var(--line);padding:18px;box-shadow:inset 0 0 30px #0a263622}
-h2{font-size:12px;letter-spacing:.17em;margin:0 0 14px;text-transform:uppercase}.hero{font-size:22px;font-weight:800;margin:4px 0 9px}.stage{color:var(--green);text-transform:uppercase}
-.stats{display:grid;grid-template-columns:repeat(3,1fr);gap:9px}.stat{border:1px solid #16374d;padding:13px;background:#07111b}.num{font-size:25px;color:var(--cyan)}
-.renders{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}.shot{position:relative;aspect-ratio:1;background:#020609;border:1px solid #19445d;overflow:hidden}.shot img{width:100%;height:100%;object-fit:cover;transition:.2s}.shot:hover img{transform:scale(1.03)}
-.shot .cap{position:absolute;bottom:0;left:0;right:0;padding:7px;background:#02060be6;color:#a6f0ff;font-size:10px}.shot .cap a{float:right;color:var(--green);text-decoration:none}
-.wide{grid-column:1/-1}.job{padding:11px;border:1px solid transparent;border-bottom-color:#142b3a;cursor:pointer}.job:hover,.job.selected{border-color:#23506a;background:#07131f}.state{float:right;color:var(--green)}.failed .state{color:var(--red)}
-.empty{padding:35px;text-align:center;color:#547184;border:1px dashed #19445d}.formgrid{display:grid;grid-template-columns:2fr 1fr 1fr;gap:10px}.field label{display:block;color:var(--muted);font-size:10px;letter-spacing:.12em;margin-bottom:6px}
-input,select,textarea{width:100%;background:#040b12;border:1px solid #1b425a;color:var(--text);padding:11px;font:inherit;outline:none}textarea{min-height:74px;resize:vertical}input:focus,select:focus,textarea:focus{border-color:var(--cyan);box-shadow:0 0 0 1px #42e8ff33}
-.actions{display:flex;gap:9px;flex-wrap:wrap;margin-top:12px}.btn{border:1px solid #24627c;background:#092032;color:var(--cyan);padding:10px 14px;font:inherit;font-weight:800;cursor:pointer;letter-spacing:.05em}.btn:hover{background:#0c2a40}.btn.primary{color:#031118;background:var(--cyan);border-color:var(--cyan)}.btn.green{color:#03140d;background:var(--green);border-color:var(--green)}.btn:disabled{opacity:.45;cursor:not-allowed}
-.artgroups{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}.artgroup{border:1px solid #16364a;background:#06101a;padding:12px}.artgroup h3{font-size:11px;color:var(--cyan);letter-spacing:.12em}.artifact{display:flex;justify-content:space-between;gap:8px;padding:8px 0;border-top:1px solid #102838}.artifact a{color:var(--green);text-decoration:none}.notice{margin-top:10px;min-height:18px;color:var(--amber)}
-footer{margin-top:18px;color:#46677c;font-size:11px}@media(max-width:850px){.grid{grid-template-columns:1fr}.renders{grid-template-columns:repeat(2,1fr)}.artgroups,.formgrid{grid-template-columns:1fr}.wrap{padding:15px}}
-</style></head><body><div class="wrap">
-<div class="top"><div><div class="brand">3D MODELING <b>AI</b></div><div class="sub">AUTONOMOUS BLENDER // OBSERVATION DECK</div></div><div><span class="pulse"></span>LIVE TELEMETRY</div></div>
-<div class="grid">
-<section class="panel wide"><h2>New fabrication job</h2>
-<div class="formgrid"><div class="field"><label>PROMPT</label><textarea id="prompt" placeholder="Describe the 3D object you want to create...">Create a stylized Pikachu test model</textarea></div>
-<div class="field"><label>INTENDED USE</label><select id="intended"><option value="rendering">Rendering</option><option value="3d_printing">3D printing</option><option value="game_asset">Game asset</option></select></div>
-<div class="field"><label>TARGET WIDTH MM (OPTIONAL)</label><input id="width" type="number" min="0.01" max="10000" step="0.1" placeholder="e.g. 120"></div></div>
-<div class="actions"><button class="btn primary" id="create">CREATE JOB</button><button class="btn green" id="pikachu">CREATE + RUN PIKACHU TEST</button><button class="btn" id="rerun" disabled>RUN PIKACHU ON SELECTED JOB</button></div><div class="notice" id="notice"></div></section>
+:root{
+  --bg:#f4f6f8;--surface:#ffffff;--surface-2:#f8fafc;--border:#dfe3e8;
+  --text:#182230;--muted:#667085;--primary:#2563eb;--primary-dark:#1d4ed8;
+  --success:#15803d;--success-bg:#dcfce7;--danger:#b42318;--danger-bg:#fee4e2;
+  --warning:#b54708;--warning-bg:#fef0c7;--shadow:0 1px 2px rgba(16,24,40,.06),0 1px 3px rgba(16,24,40,.1)
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+button,input,select,textarea{font:inherit}
+a{color:var(--primary)}
+.app{max-width:1440px;margin:0 auto;min-height:100vh}
+.header{height:68px;background:var(--surface);border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;padding:0 24px;position:sticky;top:0;z-index:20}
+.brand{display:flex;align-items:center;gap:12px}.logo{width:36px;height:36px;border-radius:9px;background:var(--primary);color:white;display:grid;place-items:center;font-weight:800;font-size:16px}.brand h1{font-size:18px;margin:0}.brand p{margin:1px 0 0;color:var(--muted);font-size:12px}
+.header-right{display:flex;align-items:center;gap:10px}.live{display:flex;align-items:center;gap:7px;color:var(--success);font-weight:600;font-size:12px}.live-dot{width:8px;height:8px;border-radius:50%;background:#22c55e}.selected-chip{max-width:360px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;border:1px solid var(--border);border-radius:8px;padding:7px 10px;background:var(--surface-2);color:var(--muted);font-size:12px}
+.nav{background:var(--surface);border-bottom:1px solid var(--border);display:flex;gap:4px;padding:0 24px;overflow:auto;position:sticky;top:68px;z-index:19}
+.tab-btn{appearance:none;border:0;background:transparent;color:var(--muted);padding:14px 14px 12px;border-bottom:2px solid transparent;font-weight:600;cursor:pointer;white-space:nowrap}.tab-btn:hover{color:var(--text)}.tab-btn.active{color:var(--primary);border-bottom-color:var(--primary)}
+.main{padding:24px}.tab{display:none}.tab.active{display:block}
+.page-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;margin-bottom:18px}.page-head h2{font-size:22px;margin:0 0 4px}.page-head p{margin:0;color:var(--muted)}
+.grid{display:grid;gap:16px}.grid-4{grid-template-columns:repeat(4,minmax(0,1fr))}.grid-2{grid-template-columns:repeat(2,minmax(0,1fr))}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:12px;box-shadow:var(--shadow);padding:18px}.card h3{font-size:14px;margin:0 0 12px}
+.stat-label{color:var(--muted);font-size:12px}.stat-value{font-size:28px;font-weight:700;margin-top:4px}.stat-note{color:var(--muted);font-size:11px;margin-top:2px}
+.badge{display:inline-flex;align-items:center;border-radius:999px;padding:3px 8px;font-size:11px;font-weight:700}.badge.running,.badge.ready{background:var(--success-bg);color:var(--success)}.badge.failed{background:var(--danger-bg);color:var(--danger)}.badge.created,.badge.unknown{background:#eef2f6;color:#475467}
+.active-title{font-size:18px;font-weight:700;margin:6px 0}.meta{color:var(--muted);font-size:12px;word-break:break-all}
+.form-grid{display:grid;grid-template-columns:2fr 1fr 1fr;gap:14px}.field label{display:block;font-weight:600;margin-bottom:6px}.field small{display:block;color:var(--muted);margin-top:5px}.field textarea,.field input,.field select{width:100%;border:1px solid #cfd4dc;border-radius:8px;background:white;color:var(--text);padding:10px 11px;outline:none}.field textarea{min-height:120px;resize:vertical}.field textarea:focus,.field input:focus,.field select:focus{border-color:#84adff;box-shadow:0 0 0 3px rgba(37,99,235,.12)}
+.actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:16px}.btn{appearance:none;border:1px solid #cfd4dc;background:white;color:var(--text);border-radius:8px;padding:9px 13px;font-weight:600;cursor:pointer;text-decoration:none;display:inline-flex;align-items:center;justify-content:center;gap:6px}.btn:hover{background:#f8fafc}.btn.primary{background:var(--primary);border-color:var(--primary);color:white}.btn.primary:hover{background:var(--primary-dark)}.btn.success{background:#16a34a;border-color:#16a34a;color:white}.btn:disabled{opacity:.5;cursor:not-allowed}
+.notice{margin-top:14px;border-radius:8px;padding:10px 12px;background:#f8fafc;color:var(--muted);display:none}.notice.show{display:block}.notice.error{background:var(--danger-bg);color:var(--danger)}.notice.success{background:var(--success-bg);color:var(--success)}.notice.busy{background:var(--warning-bg);color:var(--warning)}
+.gallery{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px}.shot{background:var(--surface);border:1px solid var(--border);border-radius:10px;overflow:hidden;box-shadow:var(--shadow)}.shot .imgwrap{aspect-ratio:1;background:#e8edf2;display:block}.shot img{width:100%;height:100%;object-fit:cover;display:block}.shot-info{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:10px}.shot-name{font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.download{font-size:12px;text-decoration:none;font-weight:600}
+.empty{padding:36px 18px;text-align:center;color:var(--muted);border:1px dashed #cbd5e1;border-radius:10px;background:#fafbfc}
+.table-wrap{overflow:auto}.table{width:100%;border-collapse:collapse}.table th,.table td{text-align:left;padding:11px 12px;border-bottom:1px solid #eaecf0;vertical-align:middle}.table th{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;background:#f9fafb}.table tr.clickable{cursor:pointer}.table tr.clickable:hover{background:#f8fafc}.table tr.selected{background:#eff6ff}.prompt-cell{max-width:520px}.prompt-cell strong{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.small{font-size:12px;color:var(--muted)}
+.files-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px}.file-group{background:var(--surface);border:1px solid var(--border);border-radius:10px;overflow:hidden}.file-group-head{display:flex;justify-content:space-between;padding:12px 14px;background:#f9fafb;border-bottom:1px solid var(--border);font-weight:700}.file-row{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:11px 14px;border-bottom:1px solid #eef0f3}.file-row:last-child{border-bottom:0}.file-name{min-width:0}.file-name span{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.file-name small{color:var(--muted)}
+.job-picker{display:flex;align-items:center;gap:10px}.job-picker select{max-width:460px;border:1px solid #cfd4dc;border-radius:8px;background:white;padding:9px 10px}
+.recent-list{display:grid;gap:10px}.recent-item{display:flex;justify-content:space-between;gap:12px;padding:12px;border:1px solid var(--border);border-radius:9px;cursor:pointer}.recent-item:hover{background:#f8fafc}.recent-main{min-width:0}.recent-main strong{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.footer{padding:20px 24px 30px;color:var(--muted);font-size:12px}
+@media(max-width:980px){.grid-4{grid-template-columns:repeat(2,1fr)}.grid-2,.form-grid,.files-grid{grid-template-columns:1fr}.gallery{grid-template-columns:repeat(2,1fr)}}
+@media(max-width:620px){.header{padding:0 14px}.brand p,.selected-chip{display:none}.nav{padding:0 10px}.main{padding:14px}.grid-4{grid-template-columns:1fr 1fr}.gallery{grid-template-columns:1fr}.page-head{flex-direction:column}.job-picker{width:100%;align-items:stretch;flex-direction:column}.job-picker select{max-width:none;width:100%}}
+</style>
+</head>
+<body>
+<div class="app">
+<header class="header">
+  <div class="brand"><div class="logo">3D</div><div><h1>3D Modeling AI</h1><p>Blender generation dashboard</p></div></div>
+  <div class="header-right"><div class="live"><span class="live-dot"></span>Live</div><div class="selected-chip" id="selectedChip">No job selected</div></div>
+</header>
+<nav class="nav" id="nav">
+  <button class="tab-btn active" data-tab="overview">Overview</button>
+  <button class="tab-btn" data-tab="new">New Job</button>
+  <button class="tab-btn" data-tab="gallery">Gallery</button>
+  <button class="tab-btn" data-tab="files">Files</button>
+  <button class="tab-btn" data-tab="jobs">Jobs</button>
+</nav>
+<main class="main">
 
-<section class="panel"><h2>Active fabrication</h2><div id="active"></div></section>
-<section class="panel"><h2>System telemetry</h2><div class="stats"><div class="stat"><div class="num" id="total">0</div><div class="muted">JOBS</div></div><div class="stat"><div class="num" id="running">0</div><div class="muted">ACTIVE</div></div><div class="stat"><div class="num" id="failed">0</div><div class="muted">FAILED</div></div></div><p class="muted" id="stamp"></p></section>
+<section class="tab active" id="tab-overview">
+  <div class="page-head"><div><h2>Overview</h2><p>Current service status and recent activity.</p></div><button class="btn primary" data-go="new">+ New Job</button></div>
+  <div class="grid grid-4">
+    <div class="card"><div class="stat-label">Total jobs</div><div class="stat-value" id="total">0</div><div class="stat-note">Jobs stored on this server</div></div>
+    <div class="card"><div class="stat-label">Running</div><div class="stat-value" id="running">0</div><div class="stat-note">Currently processing</div></div>
+    <div class="card"><div class="stat-label">Failed</div><div class="stat-value" id="failed">0</div><div class="stat-note">Jobs that need attention</div></div>
+    <div class="card"><div class="stat-label">Last refresh</div><div class="stat-value" style="font-size:18px" id="stamp">—</div><div class="stat-note">Auto-refreshes every 3 seconds</div></div>
+  </div>
+  <div class="grid grid-2" style="margin-top:16px">
+    <div class="card"><h3>Active job</h3><div id="active"></div></div>
+    <div class="card"><h3>Recent jobs</h3><div class="recent-list" id="recent"></div></div>
+  </div>
+</section>
 
-<section class="panel wide"><h2>Optical capture array // selected job</h2><div class="renders" id="renders"></div></section>
-<section class="panel wide"><h2>Generated files // gallery & downloads</h2><div class="artgroups" id="artifacts"></div></section>
-<section class="panel wide"><h2>Recent jobs // click to inspect</h2><div id="jobs"></div></section>
-</div><footer>OPEN PROTOTYPE // JOB CREATION + TEST EXECUTION + GENERATED FILE DOWNLOADS ENABLED // AUTO REFRESH 3s</footer></div>
+<section class="tab" id="tab-new">
+  <div class="page-head"><div><h2>New Job</h2><p>Create a new modeling job or run the Pikachu test preset.</p></div></div>
+  <div class="card">
+    <div class="form-grid">
+      <div class="field"><label for="prompt">Prompt</label><textarea id="prompt" placeholder="Describe the 3D object you want to create...">Create a stylized Pikachu test model</textarea><small>Describe shape, proportions, style and intended result.</small></div>
+      <div class="field"><label for="intended">Intended use</label><select id="intended"><option value="rendering">Rendering</option><option value="3d_printing">3D printing</option><option value="game_asset">Game asset</option></select></div>
+      <div class="field"><label for="width">Target width (mm)</label><input id="width" type="number" min="0.01" max="10000" step="0.1" placeholder="Optional"></div>
+    </div>
+    <div class="actions"><button class="btn primary" id="create">Create Job</button><button class="btn success" id="pikachu">Create + Run Pikachu Test</button></div>
+    <div class="notice" id="notice"></div>
+  </div>
+</section>
+
+<section class="tab" id="tab-gallery">
+  <div class="page-head">
+    <div><h2>Gallery</h2><p>Rendered views from the selected job.</p></div>
+    <div class="job-picker"><select id="galleryJob"></select><button class="btn" id="rerun" disabled>Run Pikachu Test</button></div>
+  </div>
+  <div class="gallery" id="renders"></div>
+</section>
+
+<section class="tab" id="tab-files">
+  <div class="page-head">
+    <div><h2>Files</h2><p>Download generated scenes, renders and exports.</p></div>
+    <div class="job-picker"><select id="filesJob"></select></div>
+  </div>
+  <div class="files-grid" id="artifacts"></div>
+</section>
+
+<section class="tab" id="tab-jobs">
+  <div class="page-head"><div><h2>Jobs</h2><p>Select a job to inspect its renders and generated files.</p></div><button class="btn primary" data-go="new">+ New Job</button></div>
+  <div class="card" style="padding:0"><div class="table-wrap"><table class="table"><thead><tr><th>Status</th><th>Prompt</th><th>Use</th><th>Stage</th><th>Updated</th><th></th></tr></thead><tbody id="jobs"></tbody></table></div></div>
+</section>
+
+</main>
+<div class="footer">Open prototype · job creation, test execution and downloads are currently public.</div>
+</div>
 <script>
 const esc=s=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const fmt=n=>n<1024?n+" B":n<1048576?(n/1024).toFixed(1)+" KB":(n/1048576).toFixed(1)+" MB";
-let selectedJob=null,lastData=null,busy=false;
+const dateFmt=v=>{if(!v)return "—";try{return new Date(v).toLocaleString()}catch(e){return v}};
+let selectedJob=localStorage.getItem("selected3dJob")||null,lastData=null,busy=false,currentTab=localStorage.getItem("selected3dTab")||"overview";
+
+function setTab(name){
+  currentTab=name;localStorage.setItem("selected3dTab",name);
+  document.querySelectorAll(".tab").forEach(x=>x.classList.toggle("active",x.id==="tab-"+name));
+  document.querySelectorAll(".tab-btn").forEach(x=>x.classList.toggle("active",x.dataset.tab===name));
+}
+document.querySelectorAll(".tab-btn").forEach(x=>x.onclick=()=>setTab(x.dataset.tab));
+document.querySelectorAll("[data-go]").forEach(x=>x.onclick=()=>setTab(x.dataset.go));
+setTab(currentTab);
+
 function jobFromData(d){return d.jobs.find(j=>j.job_id===selectedJob)||d.active||d.jobs[0]||null}
 function fileUrl(job,cat,name){return "/dashboard/artifacts/"+encodeURIComponent(job)+"/"+encodeURIComponent(cat)+"/"+encodeURIComponent(name)}
-function renderUI(d){lastData=d;total.textContent=d.counts.total;running.textContent=d.counts.running;failed.textContent=d.counts.failed;stamp.textContent="LAST SYNC "+new Date(d.generated_at).toLocaleTimeString();
-const current=jobFromData(d);if(current&&!selectedJob)selectedJob=current.job_id;rerun.disabled=!current||busy;
-active.innerHTML=d.active?'<div class="hero">'+esc(d.active.prompt)+'</div><div class="stage">◉ '+esc(d.active.stage)+'</div><p class="muted">JOB '+esc(d.active.job_id)+' // '+esc(d.active.state)+'</p>':'<div class="empty">NO JOBS RUNNING</div>';
-renders.innerHTML=current&&current.renders.length?current.renders.map(x=>'<div class="shot"><a target="_blank" href="/dashboard/renders/'+encodeURIComponent(current.job_id)+'/'+encodeURIComponent(x.name)+'"><img loading="lazy" src="/dashboard/renders/'+encodeURIComponent(current.job_id)+'/'+encodeURIComponent(x.name)+'?v='+encodeURIComponent(x.mtime)+'"></a><div class="cap">'+esc(x.name)+'<a download href="'+fileUrl(current.job_id,"renders",x.name)+'">DOWNLOAD</a></div></div>').join(""):'<div class="empty" style="grid-column:1/-1">CAMERAS STANDING BY // RENDERS APPEAR HERE</div>';
-if(current){const groups=["renders","scene","exports"];artifacts.innerHTML=groups.map(cat=>{const files=current.artifacts[cat]||[];return '<div class="artgroup"><h3>'+cat.toUpperCase()+' // '+files.length+'</h3>'+(files.length?files.map(f=>'<div class="artifact"><span>'+esc(f.name)+' <small class="muted">'+fmt(f.bytes)+'</small></span><a download href="'+fileUrl(current.job_id,cat,f.name)+'">DOWNLOAD</a></div>').join(""):'<div class="muted">No files yet</div>')+'</div>'}).join("")}else{artifacts.innerHTML='<div class="empty" style="grid-column:1/-1">NO GENERATED FILES YET</div>'}
-jobs.innerHTML=d.jobs.length?d.jobs.map(j=>'<div data-job="'+esc(j.job_id)+'" class="job '+esc(j.state)+(j.job_id===selectedJob?' selected':'')+'"><span class="state">'+esc(j.state)+'</span><b>'+esc(j.prompt)+'</b><br><span class="muted">'+esc(j.stage)+' // '+esc(j.intended_use)+' // '+esc(j.updated_at||"")+'</span></div>').join(""):'<div class="empty">NO HISTORY</div>';
-document.querySelectorAll("[data-job]").forEach(el=>el.onclick=()=>{selectedJob=el.dataset.job;renderUI(lastData)})}
-async function tick(){try{const r=await fetch("/dashboard/api",{cache:"no-store"});renderUI(await r.json())}catch(e){stamp.textContent="TELEMETRY LINK LOST"}}
-async function newJob(runTest){if(busy)return;const p=prompt.value.trim();if(!p){notice.textContent="Prompt is required.";return}busy=true;create.disabled=pikachu.disabled=rerun.disabled=true;notice.textContent="CREATING JOB...";
-try{const body={prompt:p,intended_use:intended.value};if(width.value)body.target_width_mm=Number(width.value);let r=await fetch("/dashboard/jobs",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});if(!r.ok)throw new Error(await r.text());const d=await r.json();selectedJob=d.job_id;notice.textContent="JOB "+d.job_id+" CREATED";await tick();if(runTest){notice.textContent="PIKACHU BUILD RUNNING // WATCH THE TELEMETRY + GALLERY...";r=await fetch("/dashboard/jobs/"+encodeURIComponent(d.job_id)+"/pikachu",{method:"POST"});if(!r.ok)throw new Error(await r.text());notice.textContent="PIKACHU BUILD COMPLETE // FILES READY"}}
-catch(e){notice.textContent="ERROR // "+e.message}finally{busy=false;create.disabled=pikachu.disabled=false;rerun.disabled=!selectedJob;await tick()}}
-async function runSelected(){if(!selectedJob||busy)return;busy=true;create.disabled=pikachu.disabled=rerun.disabled=true;notice.textContent="PIKACHU BUILD RUNNING ON "+selectedJob+"...";
-try{const r=await fetch("/dashboard/jobs/"+encodeURIComponent(selectedJob)+"/pikachu",{method:"POST"});if(!r.ok)throw new Error(await r.text());notice.textContent="PIKACHU BUILD COMPLETE // FILES READY"}catch(e){notice.textContent="ERROR // "+e.message}finally{busy=false;create.disabled=pikachu.disabled=false;rerun.disabled=false;await tick()}}
-create.onclick=()=>newJob(false);pikachu.onclick=()=>newJob(true);rerun.onclick=runSelected;tick();setInterval(tick,3000);
-</script></body></html>"""
+function selectJob(id,goTab){
+  selectedJob=id;localStorage.setItem("selected3dJob",id);
+  if(lastData)renderUI(lastData);
+  if(goTab)setTab(goTab);
+}
+function badge(j){return '<span class="badge '+esc(j.state)+'">'+esc(j.state)+'</span>'}
+function showNotice(message,type){
+  notice.textContent=message;notice.className="notice show "+(type||"");
+}
+function populateSelectors(d,current){
+  const options=d.jobs.length?d.jobs.map(j=>'<option value="'+esc(j.job_id)+'">'+esc(j.prompt).slice(0,70)+' · '+esc(j.state)+'</option>').join(""):'<option value="">No jobs yet</option>';
+  [galleryJob,filesJob].forEach(sel=>{const old=sel.value;sel.innerHTML=options;if(current)sel.value=current.job_id;else if(old)sel.value=old});
+}
+
+function renderUI(d){
+  lastData=d;
+  total.textContent=d.counts.total;running.textContent=d.counts.running;failed.textContent=d.counts.failed;
+  stamp.textContent=new Date(d.generated_at).toLocaleTimeString();
+  const current=jobFromData(d);
+  if(current&&!selectedJob){selectedJob=current.job_id;localStorage.setItem("selected3dJob",selectedJob)}
+  selectedChip.textContent=current?"Selected: "+current.prompt:"No job selected";
+  populateSelectors(d,current);
+  rerun.disabled=!current||busy;
+
+  active.innerHTML=d.active
+    ? badge(d.active)+'<div class="active-title">'+esc(d.active.prompt)+'</div><div class="meta">'+esc(d.active.stage)+' · '+esc(d.active.job_id)+'</div><div class="actions"><button class="btn" onclick="selectJob(\''+esc(d.active.job_id)+'\',\'gallery\')">View Gallery</button></div>'
+    : '<div class="empty">No jobs are currently running.</div>';
+
+  recent.innerHTML=d.jobs.length
+    ? d.jobs.slice(0,5).map(j=>'<div class="recent-item" data-select="'+esc(j.job_id)+'"><div class="recent-main"><strong>'+esc(j.prompt)+'</strong><span class="small">'+esc(j.stage)+' · '+dateFmt(j.updated_at)+'</span></div>'+badge(j)+'</div>').join("")
+    : '<div class="empty">No jobs yet.</div>';
+
+  renders.innerHTML=current&&current.renders.length
+    ? current.renders.map(x=>'<div class="shot"><a class="imgwrap" target="_blank" href="/dashboard/renders/'+encodeURIComponent(current.job_id)+'/'+encodeURIComponent(x.name)+'"><img loading="lazy" src="/dashboard/renders/'+encodeURIComponent(current.job_id)+'/'+encodeURIComponent(x.name)+'?v='+encodeURIComponent(x.mtime)+'"></a><div class="shot-info"><span class="shot-name">'+esc(x.name)+'</span><a class="download" download href="'+fileUrl(current.job_id,"renders",x.name)+'">Download</a></div></div>').join("")
+    : '<div class="empty" style="grid-column:1/-1">No renders are available for the selected job yet.</div>';
+
+  if(current){
+    const groups=[["renders","Renders"],["scene","Scene files"],["exports","Exports"]];
+    artifacts.innerHTML=groups.map(([cat,label])=>{const files=current.artifacts[cat]||[];return '<div class="file-group"><div class="file-group-head"><span>'+label+'</span><span class="small">'+files.length+' file'+(files.length===1?'':'s')+'</span></div>'+(files.length?files.map(f=>'<div class="file-row"><div class="file-name"><span>'+esc(f.name)+'</span><small>'+fmt(f.bytes)+'</small></div><a class="btn" download href="'+fileUrl(current.job_id,cat,f.name)+'">Download</a></div>').join(""):'<div class="file-row"><span class="small">No files yet</span></div>')+'</div>'}).join("");
+  }else{
+    artifacts.innerHTML='<div class="empty" style="grid-column:1/-1">Create or select a job to see generated files.</div>';
+  }
+
+  jobs.innerHTML=d.jobs.length
+    ? d.jobs.map(j=>'<tr class="clickable '+(j.job_id===selectedJob?'selected':'')+'" data-select="'+esc(j.job_id)+'"><td>'+badge(j)+'</td><td class="prompt-cell"><strong>'+esc(j.prompt)+'</strong><span class="small">'+esc(j.job_id)+'</span></td><td>'+esc(j.intended_use)+'</td><td>'+esc(j.stage)+'</td><td>'+dateFmt(j.updated_at)+'</td><td><button class="btn" data-gallery="'+esc(j.job_id)+'">Gallery</button></td></tr>').join("")
+    : '<tr><td colspan="6"><div class="empty">No jobs yet.</div></td></tr>';
+
+  document.querySelectorAll("[data-select]").forEach(el=>el.onclick=e=>{if(e.target.closest("[data-gallery]"))return;selectJob(el.dataset.select)});
+  document.querySelectorAll("[data-gallery]").forEach(el=>el.onclick=e=>{e.stopPropagation();selectJob(el.dataset.gallery,"gallery")});
+}
+
+async function tick(){
+  try{
+    const r=await fetch("/dashboard/api",{cache:"no-store"});
+    if(!r.ok)throw new Error("Dashboard API "+r.status);
+    renderUI(await r.json());
+  }catch(e){stamp.textContent="Offline"}
+}
+
+async function newJob(runTest){
+  if(busy)return;
+  const p=prompt.value.trim();
+  if(!p){showNotice("Prompt is required.","error");return}
+  busy=true;create.disabled=pikachu.disabled=rerun.disabled=true;showNotice("Creating job...","busy");
+  try{
+    const body={prompt:p,intended_use:intended.value};if(width.value)body.target_width_mm=Number(width.value);
+    let r=await fetch("/dashboard/jobs",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+    if(!r.ok)throw new Error(await r.text());
+    const d=await r.json();selectedJob=d.job_id;localStorage.setItem("selected3dJob",selectedJob);showNotice("Job created successfully.","success");await tick();
+    if(runTest){
+      showNotice("Running Pikachu test. This can take a little while...","busy");setTab("gallery");
+      r=await fetch("/dashboard/jobs/"+encodeURIComponent(d.job_id)+"/pikachu",{method:"POST"});
+      if(!r.ok)throw new Error(await r.text());
+      showNotice("Pikachu test completed. Generated files are ready.","success");await tick();
+    }
+  }catch(e){showNotice("Error: "+e.message,"error")}
+  finally{busy=false;create.disabled=pikachu.disabled=false;rerun.disabled=!selectedJob;await tick()}
+}
+
+async function runSelected(){
+  if(!selectedJob||busy)return;
+  busy=true;create.disabled=pikachu.disabled=rerun.disabled=true;showNotice("Running Pikachu test on selected job...","busy");setTab("gallery");
+  try{
+    const r=await fetch("/dashboard/jobs/"+encodeURIComponent(selectedJob)+"/pikachu",{method:"POST"});
+    if(!r.ok)throw new Error(await r.text());
+    showNotice("Pikachu test completed.","success");
+  }catch(e){showNotice("Error: "+e.message,"error")}
+  finally{busy=false;create.disabled=pikachu.disabled=false;rerun.disabled=false;await tick()}
+}
+
+galleryJob.onchange=()=>selectJob(galleryJob.value);
+filesJob.onchange=()=>selectJob(filesJob.value);
+create.onclick=()=>newJob(false);
+pikachu.onclick=()=>newJob(true);
+rerun.onclick=runSelected;
+tick();setInterval(tick,3000);
+</script>
+</body></html>"""
     )

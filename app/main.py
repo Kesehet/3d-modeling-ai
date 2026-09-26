@@ -26,6 +26,7 @@ from .config import (
 from .dashboard import dashboard_page, jobs_snapshot, public_artifact, public_render
 from .history import append_history, load_history
 from .ollama import OllamaProxyClient, OllamaProxyError
+from .generic_builder import generic_scene_script
 from .repair import print_repair_script
 from .research import research_web_references, write_research_manifest
 from .security import require_api_token
@@ -103,6 +104,28 @@ class PikachuTuning(BaseModel):
     cheek_scale: float = Field(default=1.0, ge=0.72, le=1.32)
     foot_scale: float = Field(default=1.0, ge=0.72, le=1.32)
     tail_scale: float = Field(default=1.0, ge=0.72, le=1.32)
+
+
+class GenericGenerateRequest(BaseModel):
+    auto_research: bool = True
+
+
+class SceneObjectSpec(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    shape: Literal["sphere", "cube", "cylinder", "cone", "torus"]
+    location: list[float] = Field(min_length=3, max_length=3)
+    scale: list[float] = Field(min_length=3, max_length=3)
+    rotation_deg: list[float] = Field(default_factory=lambda: [0.0, 0.0, 0.0], min_length=3, max_length=3)
+    color: str = Field(default="#808080", pattern=r"^#[0-9A-Fa-f]{6}$")
+    bevel: bool = True
+    smooth: bool = True
+
+
+class GenericSceneSpec(BaseModel):
+    title: str = Field(min_length=1, max_length=120)
+    rationale: str = Field(default="", max_length=2000)
+    presentation_base: bool = True
+    objects: list[SceneObjectSpec] = Field(min_length=1, max_length=40)
 
 
 class ModelingStage(BaseModel):
@@ -262,6 +285,11 @@ async def dashboard_research(job_id: str, request: ResearchRequest) -> dict:
     return await research_job(job_id, request)
 
 
+@app.post("/dashboard/jobs/{job_id}/generate", include_in_schema=False)
+async def dashboard_generate_generic(job_id: str, request: GenericGenerateRequest) -> dict:
+    return await generate_generic_scene(job_id, request)
+
+
 @app.post("/dashboard/jobs/{job_id}/refine-pikachu", include_in_schema=False)
 async def dashboard_refine_pikachu(job_id: str, request: PikachuRefineRequest) -> dict:
     return await refine_pikachu(job_id, request)
@@ -318,6 +346,8 @@ async def capabilities() -> dict:
             "glb-obj-stl-export-attempts",
             "mesh-qa-report",
             "experimental-voxel-print-repair",
+            "safe-declarative-generic-scene-builder",
+            "generic-prompt-to-primitive-blockout",
         ],
     }
 
@@ -587,6 +617,182 @@ async def build_plan(job_id: str, request: PlanRequest) -> dict:
     (root / "plan.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
     _write_status(root, state="ready", stage="planned", latest_plan_log=log_name)
     return payload
+
+
+async def _build_generic_scene_spec(job_id: str, auto_research: bool) -> GenericSceneSpec:
+    root = _require_job(job_id)
+    job_request = json.loads((root / "request.json").read_text(encoding="utf-8"))
+
+    if auto_research and not _load_reference_index(root):
+        try:
+            await research_job(job_id, ResearchRequest(max_images=5))
+        except HTTPException:
+            append_history(root, "research_skipped", reason="generic generation could not obtain web references")
+
+    visual_context: dict = {}
+    if _load_reference_index(root):
+        try:
+            visual = await analyze_vision(
+                job_id,
+                VisionAnalyzeRequest(
+                    stage="generic_reference_analysis",
+                    include_references=True,
+                    include_renders=False,
+                    max_images=8,
+                    instruction=(
+                        "Describe the subject as primitive-friendly 3D forms. Focus on silhouette, "
+                        "relative dimensions, part placement, major colors, and distinctive appendages."
+                    ),
+                ),
+            )
+            visual_context = visual.get("report") or {}
+        except HTTPException:
+            append_history(root, "vision_skipped", reason="reference analysis was unavailable")
+
+    research_context: dict = {}
+    research_path = root / "research.json"
+    if research_path.exists():
+        try:
+            research_payload = json.loads(research_path.read_text(encoding="utf-8"))
+            research_context = {
+                "pages": [
+                    {
+                        "title": page.get("title"),
+                        "extract": (page.get("extract") or "")[:1200],
+                    }
+                    for page in (research_payload.get("pages") or [])[:4]
+                ]
+            }
+        except (OSError, json.JSONDecodeError):
+            research_context = {}
+
+    system = (
+        "You are a 3D blockout planner. Return a safe declarative scene made only from the allowed "
+        "primitive types in the supplied JSON schema. Do not output Python. Build a recognizable model "
+        "using as few primitives as practical while preserving silhouette and major parts. Coordinates "
+        "should normally stay within -8..8. Place the subject around the origin and keep its lowest major "
+        "geometry near Z=0. Use meaningful semantic object names and realistic relative proportions."
+    )
+    prompt = (
+        f"User request: {job_request.get('prompt', '')}\n"
+        f"Intended use: {job_request.get('intended_use', '')}\n"
+        f"Target width mm: {job_request.get('target_width_mm')}\n"
+        f"Visual reference analysis: {json.dumps(visual_context, ensure_ascii=False)}\n"
+        f"Web research context: {json.dumps(research_context, ensure_ascii=False)}\n"
+        "Create a primitive-based blockout scene specification. If the subject is organic, approximate "
+        "it with overlapping ellipsoids/cones. If hard-surface, prefer cubes/cylinders/torus forms."
+    )
+    try:
+        result = await OllamaProxyClient().chat_json(
+            model=REASONING_MODEL,
+            system=system,
+            prompt=prompt,
+            schema=GenericSceneSpec.model_json_schema(),
+            temperature=0.1,
+        )
+        spec = GenericSceneSpec.model_validate(result.data)
+    except (OllamaProxyError, httpx.HTTPError, ValidationError, ValueError) as exc:
+        raise HTTPException(status_code=502, detail=f"Generic scene planning failed: {exc}") from exc
+
+    payload = {
+        "job_id": job_id,
+        "model": REASONING_MODEL,
+        "endpoint": result.endpoint,
+        "usage": result.usage,
+        "spec": spec.model_dump(),
+        "created_at": datetime.now(UTC).isoformat(),
+    }
+    (root / "scene-spec.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    _write_llm_log(root, "scene-spec", payload)
+    append_history(root, "scene_spec", title=spec.title, object_count=len(spec.objects))
+    return spec
+
+
+async def generate_generic_scene(job_id: str, request: GenericGenerateRequest) -> dict:
+    root = _require_job(job_id)
+    _write_status(root, state="running", stage="planning_generic_scene")
+    spec = await _build_generic_scene_spec(job_id, request.auto_research)
+
+    version = 1 + len(list((root / "scene").glob("model-v*.blend")))
+    prefix = f"model-v{version}"
+    blend_path = root / "scene" / f"{prefix}.blend"
+    qa_path = root / "exports" / f"{prefix}-qa.json"
+
+    _write_status(root, state="running", stage=f"generic_build_v{version}")
+    payload = {
+        "tool": "blender_python_exec",
+        "arguments": {
+            "code": generic_scene_script(),
+            "args": {
+                "spec": spec.model_dump(),
+                "blend_path": str(blend_path),
+                "output_dir": str(root / "renders"),
+                "exports_dir": str(root / "exports"),
+                "qa_path": str(qa_path),
+                "prefix": prefix,
+            },
+            "transport": "headless",
+            "factory_startup": True,
+            "timeout_seconds": 300,
+        },
+    }
+    try:
+        async with httpx.AsyncClient(timeout=360) as client:
+            response = await client.post(f"{WORKER_URL}/v1/mcp/call", json=payload)
+            response.raise_for_status()
+            result = response.json()
+    except (httpx.HTTPError, ValueError) as exc:
+        _write_status(root, state="failed", stage=f"generic_build_v{version}", error=str(exc))
+        raise HTTPException(status_code=502, detail=f"Generic Blender build failed: {exc}") from exc
+
+    blender_error = _worker_blender_error(result)
+    if blender_error:
+        _write_status(root, state="failed", stage=f"generic_build_v{version}", error=blender_error)
+        raise HTTPException(status_code=502, detail=f"Generic Blender script failed: {blender_error}")
+
+    expected = [f"{prefix}-{view}.png" for view in (
+        "front", "front-left", "left", "back-left", "back",
+        "back-right", "right", "front-right", "top"
+    )]
+    missing = [name for name in expected if not (root / "renders" / name).is_file()]
+    if missing or not blend_path.is_file():
+        _write_status(root, state="failed", stage=f"generic_build_v{version}", error=f"Missing artifacts: {missing}")
+        raise HTTPException(status_code=502, detail=f"Generic build completed but artifacts are missing: {missing}")
+
+    append_history(
+        root,
+        "generic_generation",
+        version=version,
+        title=spec.title,
+        object_count=len(spec.objects),
+        renders=expected,
+        blend=blend_path.name,
+        qa=qa_path.name,
+    )
+    status = _write_status(
+        root,
+        state="ready",
+        stage=f"generic_rendered_v{version}",
+        generic_model={
+            "version": version,
+            "title": spec.title,
+            "blend": blend_path.name,
+            "renders": expected,
+            "qa": qa_path.name,
+        },
+    )
+    return {
+        "job_id": job_id,
+        "status": status,
+        "spec": spec.model_dump(),
+        "renders": expected,
+        "worker_result": result,
+    }
+
+
+@app.post("/v1/jobs/{job_id}/generate", dependencies=[Depends(require_api_token)])
+async def generate_generic_scene_api(job_id: str, request: GenericGenerateRequest) -> dict:
+    return await generate_generic_scene(job_id, request)
 
 
 async def _execute_pikachu(

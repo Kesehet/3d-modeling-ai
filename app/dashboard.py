@@ -224,7 +224,7 @@ a{color:var(--primary)}
       <div class="field"><label for="jobIntended">Intended use</label><select id="jobIntended"><option value="rendering">Rendering</option><option value="3d_printing">3D printing</option><option value="game_asset">Game asset</option></select></div>
       <div class="field"><label for="jobWidth">Target width (mm)</label><input id="jobWidth" type="number" min="0.01" max="10000" step="0.1" placeholder="Optional"></div>
     </div>
-    <div class="actions"><button class="btn primary" id="create">Create Job</button><button class="btn success" id="pikachu">Create + Run Pikachu Test</button><button class="btn" id="autopilot">Research + Improve Pikachu</button></div>
+    <div class="actions"><button class="btn primary" id="create">Create Job</button><button class="btn primary" id="genericBuild">Create + Build from Prompt</button><button class="btn success" id="pikachu">Create + Run Pikachu Test</button><button class="btn" id="autopilot">Research + Improve Pikachu</button></div>
     <div class="notice" id="notice"></div>
   </div>
 </section>
@@ -282,7 +282,7 @@ const els={
   total:byId("total"),running:byId("running"),failed:byId("failed"),stamp:byId("stamp"),
   active:byId("active"),recent:byId("recent"),selectedChip:byId("selectedChip"),
   jobPrompt:byId("jobPrompt"),jobIntended:byId("jobIntended"),jobWidth:byId("jobWidth"),
-  create:byId("create"),pikachu:byId("pikachu"),autopilot:byId("autopilot"),notice:byId("notice"),
+  create:byId("create"),genericBuild:byId("genericBuild"),pikachu:byId("pikachu"),autopilot:byId("autopilot"),notice:byId("notice"),
   galleryJob:byId("galleryJob"),renders:byId("renders"),rerun:byId("rerun"),
   iterationsJob:byId("iterationsJob"),iterations:byId("iterations"),
   filesJob:byId("filesJob"),artifacts:byId("artifacts"),
@@ -333,7 +333,7 @@ function showNotice(element,message,type){
 }
 function setBusy(value){
   busy=value;
-  [els.create,els.pikachu,els.autopilot,els.rerun,els.repairPrint].forEach(button=>{
+  [els.create,els.genericBuild,els.pikachu,els.autopilot,els.rerun,els.repairPrint].forEach(button=>{
     if(button)button.disabled=value;
   });
 }
@@ -358,6 +358,10 @@ function renderIterations(current){
       const tuning=event.tuning||{};
       body='<strong>Model iteration v'+esc(event.version||"?")+'</strong><div class="small">'+esc(event.prefix||"")+' · '+(event.renders||[]).length+' renders</div>'+
         '<div class="param-grid">'+Object.entries(tuning).map(([key,value])=>'<span class="param">'+esc(key)+': '+esc(Number(value).toFixed(2))+'</span>').join("")+'</div>';
+    }else if(event.event==="generic_generation"){
+      body='<strong>Generic model v'+esc(event.version||"?")+'</strong><div class="small">'+esc(event.title||"")+' · '+esc(event.object_count||0)+' authored objects · '+(event.renders||[]).length+' renders</div>';
+    }else if(event.event==="scene_spec"){
+      body='<strong>Safe scene specification</strong><div class="small">'+esc(event.title||"")+' · '+esc(event.object_count||0)+' primitive objects planned</div>';
     }else if(event.event==="research"){
       body='<strong>Reference research</strong><div class="small">'+esc(event.query||"")+' · '+esc(event.added||0)+' images added · '+esc(event.provider||"")+'</div>';
     }else if(event.event==="refinement_stop"){
@@ -503,6 +507,29 @@ async function runSelected(){
   }catch(error){alert("Pikachu test failed: "+error.message)}
   finally{setBusy(false);await tick()}
 }
+async function buildGenericFromPrompt(){
+  if(busy)return;
+  const promptText=els.jobPrompt.value.trim();
+  if(!promptText){showNotice(els.notice,"Prompt is required.","error");setTab("new");return}
+  setBusy(true);showNotice(els.notice,"Creating job and researching references...","busy");
+  try{
+    const body={prompt:promptText,intended_use:els.jobIntended.value};
+    if(els.jobWidth.value)body.target_width_mm=Number(els.jobWidth.value);
+    let response=await fetch("/dashboard/jobs",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+    if(!response.ok)throw new Error(await response.text());
+    const result=await response.json();
+    selectJob(result.job_id,"iterations");
+    await tick();
+    showNotice(els.notice,"Planning a safe primitive scene and building it in Blender...","busy");
+    response=await fetch("/dashboard/jobs/"+encodeURIComponent(result.job_id)+"/generate",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({auto_research:true})});
+    if(!response.ok)throw new Error(await response.text());
+    await tick();
+    showNotice(els.notice,"Generic model built. Review Gallery, Files and Print QA.","success");
+    setTab("gallery");
+  }catch(error){showNotice(els.notice,"Error: "+error.message,"error");setTab("new")}
+  finally{setBusy(false);await tick()}
+}
+
 async function researchAndImprove(){
   if(busy)return;
   const promptText=els.jobPrompt.value.trim();
@@ -541,6 +568,7 @@ async function repairForPrint(){
   if(select)select.addEventListener("change",()=>selectJob(select.value));
 });
 els.create.addEventListener("click",()=>createJob(false));
+els.genericBuild.addEventListener("click",buildGenericFromPrompt);
 els.pikachu.addEventListener("click",()=>createJob(true));
 els.autopilot.addEventListener("click",researchAndImprove);
 els.rerun.addEventListener("click",runSelected);

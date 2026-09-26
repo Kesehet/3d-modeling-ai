@@ -17,3 +17,9 @@ def test_dashboard_has_print_repair_and_iteration_controls():
     assert 'id="repairPrint"' in html
     assert 'id="iterations"' in html
     assert '/repair-print' in html
+
+
+def test_dashboard_has_generic_prompt_build_control():
+    html = dashboard_page().body.decode("utf-8")
+    assert 'id="genericBuild"' in html
+    assert '/generate' in html

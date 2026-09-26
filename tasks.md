@@ -188,7 +188,7 @@ Checkpoint renders are fast enough for iteration while final previews are presen
 **Goal:** reason about multiple objects and contacts.
 
 ### Capabilities
-- [ ] Object hierarchy and semantic names.
+- [x] Semantic object names and structured multi-object SceneSpec.
 - [ ] Relative placement constraints.
 - [ ] Contact/collision checks.
 - [ ] Scale consistency.
@@ -272,7 +272,7 @@ Iteration N+1 must make a measurable/visible correction requested by vision QA, 
 ### Capabilities
 - [x] Initial automatic research provider.
 - [x] Research manifest stored per job.
-- [ ] Research stage in generic job pipeline.
+- [x] Research stage in generic job pipeline.
 - [ ] Source quality ranking.
 - [ ] Text fact extraction for dimensions/materials/features.
 - [ ] Reference-view classification.
@@ -344,9 +344,9 @@ A dimensioned functional benchmark assembles/moves as intended and respects spec
 **Goal:** one prompt/reference set produces a usable deliverable with minimal intervention.
 
 ### Pipeline
-- [ ] Understand request.
+- [x] Parse job request into a validated generic SceneSpec for primitive blockouts.
 - [ ] Research references and facts.
-- [ ] Choose modeling strategy.
+- [ ] Choose modeling strategy (generic safe primitive strategy implemented; automatic strategy selection still pending).
 - [ ] Build blockout.
 - [ ] Render checkpoints.
 - [ ] Run visual critique.
@@ -385,9 +385,9 @@ The first deployed benchmark produced 23 mesh objects, 12 non-manifold edges and
 - [x] Show iteration/tuning/status history in a dedicated dashboard tab.
 
 ## Sprint C — Generalization
-- [ ] Extract reusable high-level Blender geometry library.
+- [x] Add first reusable safe declarative primitive scene builder (sphere/cube/cylinder/cone/torus, materials, transforms, cameras, exports).
 - [ ] Build a second character benchmark.
-- [ ] Build a hard-surface product benchmark.
+- [ ] Build and live-verify a hard-surface product benchmark using the generic SceneSpec engine.
 - [ ] Replace subject-specific tuning with general edit operations.
 
 ---
@@ -434,8 +434,8 @@ The first deployed benchmark produced 23 mesh objects, 12 non-manifold edges and
 
 ## Phase 3 — Blender modeling tools
 
-- [ ] Build a safe high-level Blender script library for primitives, booleans, bevels, modifiers, curves, text, materials, cameras, lights, and transforms.
-- [ ] Prefer high-level deterministic tools over unconstrained generated Python.
+- [ ] Build a safe high-level Blender script library for primitives, booleans, bevels, modifiers, curves, text, materials, cameras, lights, and transforms. **Primitive/camera/material/export subset is now implemented through the safe SceneSpec engine.**
+- [x] Prefer high-level deterministic tools over unconstrained generated Python for generic blockouts via a validated SceneSpec schema.
 - [x] Add persistent `.blend` checkpoint naming for benchmark iterations.
 - [ ] Add automatic scene inspection: objects, dimensions, modifiers, mesh stats.
 - [ ] Add multi-view render helper: front, left, right, top, isometric.
@@ -475,7 +475,7 @@ The first deployed benchmark produced 23 mesh objects, 12 non-manifold edges and
 
 ## Phase 7 — Product UI
 
-- [ ] Prompt + reference image form.
+- [x] Prompt form; reference upload API exists (dashboard upload UI still pending).
 - [ ] Intended-use selector: 3D printing / rendering / game asset.
 - [ ] Target dimensions.
 - [ ] Live stage/progress timeline.

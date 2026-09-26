@@ -55,6 +55,9 @@ services:
       - traefik.http.services.threed-modeling-ai.loadbalancer.server.port=8080
 
   worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
     image: 3d-modeling-ai:local
     restart: unless-stopped
     init: true

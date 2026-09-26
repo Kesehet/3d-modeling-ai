@@ -176,7 +176,7 @@ rim.data.size = 3.0
 rim.rotation_euler = (math.radians(-35), 0, math.radians(180))
 
 scene = bpy.context.scene
-scene.render.engine = "BLENDER_EEVEE_NEXT" if hasattr(bpy.types, "EEVEE_NEXT") else "BLENDER_EEVEE"
+scene.render.engine = "BLENDER_EEVEE" if bpy.app.version >= (5, 0, 0) else "BLENDER_EEVEE_NEXT"
 scene.render.resolution_x = 640
 scene.render.resolution_y = 640
 scene.render.resolution_percentage = 100

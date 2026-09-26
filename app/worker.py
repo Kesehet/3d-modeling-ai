@@ -99,7 +99,7 @@ async def call_mcp(payload: ToolCall) -> dict:
         async with stdio_client(params) as (read, write), ClientSession(read, write) as session:
             await session.initialize()
             result = await session.call_tool(payload.tool, arguments=arguments)
-    except Exception as exc:  # noqa: BLE001 - external MCP process boundary
+    except Exception as exc:
         raise HTTPException(status_code=500, detail=f"MCP tool call failed: {exc}") from exc
 
     content = []

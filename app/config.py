@@ -33,4 +33,4 @@ OLLAMA_PROXY_BASE_URL = "https://mediapitch.in/ollama-proxy"
 OLLAMA_PROXY_API_KEY = secret_env("OLLAMA_PROXY_API_KEY")
 REASONING_MODEL = env("REASONING_MODEL", "gpt-oss:120b")
 VISION_MODEL = env("VISION_MODEL", "qwen3-vl:235b-cloud")
-BLENDER_BIN = env("BLENDER_BIN", "/usr/bin/blender")
+BLENDER_BIN = env("BLENDER_BIN", "/home/headless/blender/blender")

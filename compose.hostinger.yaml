@@ -61,7 +61,7 @@ services:
     command: ["uvicorn", "app.worker:app", "--host", "0.0.0.0", "--port", "8090"]
     environment:
       JOBS_ROOT: /var/lib/3d-modeling-ai/jobs
-      BLENDER_BIN: /usr/bin/blender
+      BLENDER_BIN: /home/headless/blender/blender
       BLENDER_MCP_HEADLESS: "1"
       BLENDER_MCP_HEADLESS_TIMEOUT: ${BLENDER_MCP_HEADLESS_TIMEOUT:-3600}
     volumes:

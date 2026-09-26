@@ -1,17 +1,21 @@
-FROM ubuntu:24.04
+FROM blenderkit/headless-blender:blender-4.4-stable
+
+USER root
+ENTRYPOINT []
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PATH=/opt/venv/bin:$PATH \
-    BLENDER_BIN=/usr/bin/blender \
+    BLENDER_BIN=/home/headless/blender/blender \
     BLENDER_MCP_HEADLESS=1 \
     HOME=/tmp/home
 
+# Blender is already present in the base image. We only add the small Python
+# runtime needed by our API + MCP integration.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        blender \
         ca-certificates \
         curl \
         python3 \
@@ -22,8 +26,6 @@ RUN apt-get update \
 RUN python3 -m venv /opt/venv \
     && /opt/venv/bin/pip install --upgrade pip setuptools wheel
 
-# Vendored practical fork of djeada/blender-mcp-server.
-# Provenance and pinned revision are documented in vendor/UPSTREAM.md.
 COPY vendor/blender-mcp-server /opt/blender-mcp
 RUN /opt/venv/bin/pip install /opt/blender-mcp
 

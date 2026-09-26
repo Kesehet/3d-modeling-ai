@@ -1,25 +1,18 @@
 from app.dashboard import dashboard_page
 
 
-def test_dashboard_uses_explicit_dom_refs_and_hash_tabs():
+def test_dashboard_is_gallery_first():
     html = dashboard_page().body.decode("utf-8")
-    assert 'id="tab-gallery"' in html
-    assert 'id="tab-iterations"' in html
-    assert 'id="tab-qa"' in html
-    assert 'const els={' in html
-    assert 'byId("galleryJob")' in html
-    assert 'prompt.value' not in html
-    assert 'window.addEventListener("hashchange"' in html
+    assert 'id="jobGallery"' in html
+    assert 'id="detailView"' in html
+    assert 'id="fileList"' in html
+    assert 'id="newJobBtn"' in html
+    assert 'data-tab=' not in html
 
 
-def test_dashboard_has_print_repair_and_iteration_controls():
+def test_dashboard_job_detail_can_download_and_improve():
     html = dashboard_page().body.decode("utf-8")
-    assert 'id="repairPrint"' in html
-    assert 'id="iterations"' in html
-    assert '/repair-print' in html
-
-
-def test_dashboard_has_generic_prompt_build_control():
-    html = dashboard_page().body.decode("utf-8")
-    assert 'id="genericBuild"' in html
+    assert '/dashboard/artifacts/' in html
+    assert 'id="improveBtn"' in html
+    assert '/improve' in html
     assert '/generate' in html

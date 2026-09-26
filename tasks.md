@@ -256,9 +256,9 @@ Known broken test meshes are detected correctly and at least common manifold/nor
 - [x] Stop early when no high-severity issues and very few medium issues remain.
 - [ ] Compare latest iteration specifically against previous iteration.
 - [ ] Detect regressions and rollback.
-- [ ] Detect stalled loops.
+- [x] Detect a basic stalled loop when the revised generic SceneSpec is unchanged; broader semantic stall detection remains future work.
 - [ ] Strategy switch when repeated edits do not improve.
-- [ ] Generalize correction operations beyond Pikachu parameters.
+- [x] Generalize visual correction beyond Pikachu: Qwen3-VL critique can now drive a full revised safe SceneSpec and re-render a generic v2.
 
 ### Acceptance
 Iteration N+1 must make a measurable/visible correction requested by vision QA, with complete history of critique → parameters → renders.
@@ -348,16 +348,16 @@ A dimensioned functional benchmark assembles/moves as intended and respects spec
 - [ ] Research references and facts.
 - [ ] Choose modeling strategy (generic safe primitive strategy implemented; automatic strategy selection still pending).
 - [ ] Build blockout.
-- [ ] Render checkpoints.
-- [ ] Run visual critique.
-- [ ] Apply corrections.
-- [ ] Repeat with stopping rules.
+- [x] Render nine-view checkpoints for generic and benchmark builds.
+- [x] Run visual critique through Qwen3-VL.
+- [x] Apply safe corrections through bounded benchmark tuning or revised SceneSpec.
+- [ ] Repeat with stopping rules (severity and unchanged-spec stops implemented; regression rollback still pending).
 - [ ] Run geometry/print QA.
 - [ ] Repair mandatory failures.
 - [ ] Produce final preview renders.
 - [ ] Export BLEND / GLB / OBJ / STL / 3MF as appropriate.
 - [ ] Package provenance, QA report and iteration history.
-- [ ] Present all outputs in dashboard.
+- [x] Present outputs in a gallery-first UI with per-job render/detail/download views.
 
 ### Acceptance
 A request such as "make a 12 cm printable stylized character figurine from references" completes research → modeling → iterative QA → print QA → exports without developer intervention.
@@ -437,18 +437,18 @@ The first deployed benchmark produced 23 mesh objects, 12 non-manifold edges and
 - [ ] Build a safe high-level Blender script library for primitives, booleans, bevels, modifiers, curves, text, materials, cameras, lights, and transforms. **Primitive/camera/material/export subset is now implemented through the safe SceneSpec engine.**
 - [x] Prefer high-level deterministic tools over unconstrained generated Python for generic blockouts via a validated SceneSpec schema.
 - [x] Add persistent `.blend` checkpoint naming for benchmark iterations.
-- [ ] Add automatic scene inspection: objects, dimensions, modifiers, mesh stats.
-- [ ] Add multi-view render helper: front, left, right, top, isometric.
-- [ ] Standardize preview rendering with Workbench/Eevee.
+- [x] Add first automatic scene inspection: object count, dimensions, non-manifold edges, loose vertices; deeper modifier/component inspection remains future work.
+- [x] Standardize nine-view rendering for generic and benchmark builders.
+- [x] Standardize fast checkpoint rendering with Workbench.
 - [ ] Add final Cycles render option when hardware allows.
 
 ## Phase 4 — Visual self-correction loop
 
-- [ ] Keep original reference images attached to every critique cycle.
+- [x] Keep original reference images attached to generic and Pikachu critique cycles.
 - [ ] Render checkpoints after blockout, proportions, secondary forms, details, materials, and final QA.
-- [ ] Ask vision model to compare references vs current renders.
-- [ ] Convert critique into explicit geometry changes.
-- [ ] Re-render after each accepted edit batch.
+- [x] Ask vision model to compare references vs current renders for generic and Pikachu refinement.
+- [x] Convert critique into explicit geometry changes through revised bounded parameters or a revised validated SceneSpec.
+- [x] Re-render after each accepted generic/Pikachu edit batch.
 - [ ] Detect stalled loops and switch strategy instead of repeating the same edit.
 - [ ] Add human pause/approve/redirect controls.
 

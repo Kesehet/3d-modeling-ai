@@ -110,6 +110,10 @@ class GenericGenerateRequest(BaseModel):
     auto_research: bool = True
 
 
+class GenericRefineRequest(BaseModel):
+    iterations: int = Field(default=1, ge=1, le=3)
+
+
 class SceneObjectSpec(BaseModel):
     name: str = Field(min_length=1, max_length=80)
     shape: Literal["sphere", "cube", "cylinder", "cone", "torus"]
@@ -288,6 +292,11 @@ async def dashboard_research(job_id: str, request: ResearchRequest) -> dict:
 @app.post("/dashboard/jobs/{job_id}/generate", include_in_schema=False)
 async def dashboard_generate_generic(job_id: str, request: GenericGenerateRequest) -> dict:
     return await generate_generic_scene(job_id, request)
+
+
+@app.post("/dashboard/jobs/{job_id}/improve", include_in_schema=False)
+async def dashboard_improve_generic(job_id: str, request: GenericRefineRequest) -> dict:
+    return await refine_generic_scene(job_id, request)
 
 
 @app.post("/dashboard/jobs/{job_id}/refine-pikachu", include_in_schema=False)
@@ -708,12 +717,13 @@ async def _build_generic_scene_spec(job_id: str, auto_research: bool) -> Generic
     return spec
 
 
-async def generate_generic_scene(job_id: str, request: GenericGenerateRequest) -> dict:
+async def _execute_generic_spec(
+    job_id: str,
+    spec: GenericSceneSpec,
+    *,
+    version: int,
+) -> dict:
     root = _require_job(job_id)
-    _write_status(root, state="running", stage="planning_generic_scene")
-    spec = await _build_generic_scene_spec(job_id, request.auto_research)
-
-    version = 1 + len(list((root / "scene").glob("model-v*.blend")))
     prefix = f"model-v{version}"
     blend_path = root / "scene" / f"{prefix}.blend"
     qa_path = root / "exports" / f"{prefix}-qa.json"
@@ -759,6 +769,16 @@ async def generate_generic_scene(job_id: str, request: GenericGenerateRequest) -
         _write_status(root, state="failed", stage=f"generic_build_v{version}", error=f"Missing artifacts: {missing}")
         raise HTTPException(status_code=502, detail=f"Generic build completed but artifacts are missing: {missing}")
 
+    spec_payload = {
+        "job_id": job_id,
+        "version": version,
+        "spec": spec.model_dump(),
+        "created_at": datetime.now(UTC).isoformat(),
+    }
+    (root / f"scene-spec-v{version}.json").write_text(
+        json.dumps(spec_payload, indent=2),
+        encoding="utf-8",
+    )
     append_history(
         root,
         "generic_generation",
@@ -790,9 +810,107 @@ async def generate_generic_scene(job_id: str, request: GenericGenerateRequest) -
     }
 
 
+async def generate_generic_scene(job_id: str, request: GenericGenerateRequest) -> dict:
+    root = _require_job(job_id)
+    _write_status(root, state="running", stage="planning_generic_scene")
+    spec = await _build_generic_scene_spec(job_id, request.auto_research)
+    version = 1 + len(list((root / "scene").glob("model-v*.blend")))
+    return await _execute_generic_spec(job_id, spec, version=version)
+
+
 @app.post("/v1/jobs/{job_id}/generate", dependencies=[Depends(require_api_token)])
 async def generate_generic_scene_api(job_id: str, request: GenericGenerateRequest) -> dict:
     return await generate_generic_scene(job_id, request)
+
+
+async def refine_generic_scene(job_id: str, request: GenericRefineRequest) -> dict:
+    root = _require_job(job_id)
+    spec_files = sorted(
+        root.glob("scene-spec-v*.json"),
+        key=lambda path: path.stat().st_mtime,
+    )
+    if not spec_files:
+        await generate_generic_scene(job_id, GenericGenerateRequest(auto_research=True))
+        spec_files = sorted(
+            root.glob("scene-spec-v*.json"),
+            key=lambda path: path.stat().st_mtime,
+        )
+
+    current_payload = json.loads(spec_files[-1].read_text(encoding="utf-8"))
+    current_spec = GenericSceneSpec.model_validate(current_payload["spec"])
+    completed = []
+
+    for _ in range(request.iterations):
+        vision = await analyze_vision(
+            job_id,
+            VisionAnalyzeRequest(
+                stage="generic_visual_refinement",
+                include_references=True,
+                include_renders=True,
+                max_images=16,
+                instruction=(
+                    "Critique the newest generic model renders against the references and prompt. "
+                    "Prioritize silhouette, proportions, missing major parts, relative placement, and colors. "
+                    "Ignore tiny surface detail that cannot be represented by primitive geometry."
+                ),
+            ),
+        )
+        report = vision["report"]
+        issues = report.get("issues", [])
+        high = sum(1 for issue in issues if issue.get("severity") == "high")
+        medium = sum(1 for issue in issues if issue.get("severity") == "medium")
+        if high == 0 and medium <= 1:
+            append_history(root, "generic_refinement_stop", reason="visual severity threshold met")
+            break
+
+        system = (
+            "Revise a safe declarative 3D SceneSpec using the visual critique. Return JSON only matching "
+            "the supplied schema. You may add, remove, resize, rotate, recolor, or reposition objects, but "
+            "you may only use the schema's allowed primitive shapes. Preserve good geometry and make the "
+            "smallest changes that address the critique. Do not output Python."
+        )
+        prompt = (
+            f"Current SceneSpec: {json.dumps(current_spec.model_dump(), ensure_ascii=False)}\n"
+            f"Visual critique: {json.dumps(report, ensure_ascii=False)}\n"
+            "Return the improved full SceneSpec."
+        )
+        try:
+            result = await OllamaProxyClient().chat_json(
+                model=REASONING_MODEL,
+                system=system,
+                prompt=prompt,
+                schema=GenericSceneSpec.model_json_schema(),
+                temperature=0.1,
+            )
+            revised = GenericSceneSpec.model_validate(result.data)
+        except (OllamaProxyError, httpx.HTTPError, ValidationError, ValueError) as exc:
+            append_history(root, "generic_refinement_failed", error=str(exc))
+            raise HTTPException(status_code=502, detail=f"Generic refinement failed: {exc}") from exc
+
+        if revised.model_dump() == current_spec.model_dump():
+            append_history(root, "generic_refinement_stop", reason="revised SceneSpec was unchanged")
+            break
+
+        version = 1 + len(list((root / "scene").glob("model-v*.blend")))
+        build = await _execute_generic_spec(job_id, revised, version=version)
+        append_history(
+            root,
+            "generic_revision",
+            version=version,
+            high_issues=high,
+            medium_issues=medium,
+            object_count=len(revised.objects),
+        )
+        completed.append({"vision": vision, "spec": revised.model_dump(), "build": build})
+        current_spec = revised
+
+    status = _write_status(root, state="ready", stage="generic_refinement_complete")
+    return {"job_id": job_id, "iterations": completed, "status": status}
+
+
+@app.post("/v1/jobs/{job_id}/improve", dependencies=[Depends(require_api_token)])
+async def refine_generic_scene_api(job_id: str, request: GenericRefineRequest) -> dict:
+    return await refine_generic_scene(job_id, request)
 
 
 async def _execute_pikachu(

@@ -283,17 +283,23 @@ jobs:
           cat /tmp/generic-improve.json | jq . || cat /tmp/generic-improve.json
           test "$IMPROVE_CODE" -ge 200
           test "$IMPROVE_CODE" -lt 300
-          jq -e '.status.stage == "generic_refinement_complete"' /tmp/generic-improve.json >/dev/null
-          jq -e '.iterations | length >= 1' /tmp/generic-improve.json >/dev/null
+          jq -e '(.status.stage == "generic_refinement_complete") or (.status.stage == "generic_refinement_preserved_previous")' /tmp/generic-improve.json >/dev/null
+          jq -e '((.iterations | length) >= 1) or (.rejected != null)' /tmp/generic-improve.json >/dev/null
 
-          curl --fail --silent --show-error --max-time 30 \
-            "$BASE_URL/dashboard/renders/$JOB_ID/model-v2-front.png" \
-            -o /tmp/model-v2-front.png
-          test "$(xxd -p -l 8 /tmp/model-v2-front.png)" = "89504e470d0a1a0a"
-          curl --fail --silent --show-error --max-time 30 \
-            "$BASE_URL/dashboard/artifacts/$JOB_ID/scene/model-v2.blend" \
-            -o /tmp/model-v2.blend
-          test -s /tmp/model-v2.blend
+          if jq -e '(.iterations | length) >= 1' /tmp/generic-improve.json >/dev/null; then
+            curl --fail --silent --show-error --max-time 30 \
+              "$BASE_URL/dashboard/renders/$JOB_ID/model-v2-front.png" \
+              -o /tmp/model-v2-front.png
+            test "$(xxd -p -l 8 /tmp/model-v2-front.png)" = "89504e470d0a1a0a"
+            curl --fail --silent --show-error --max-time 30 \
+              "$BASE_URL/dashboard/artifacts/$JOB_ID/scene/model-v2.blend" \
+              -o /tmp/model-v2.blend
+            test -s /tmp/model-v2.blend
+          else
+            jq -e '.status.stage == "generic_refinement_preserved_previous"' /tmp/generic-improve.json >/dev/null
+            jq -e '.rejected.reasons | length >= 1' /tmp/generic-improve.json >/dev/null
+            echo "Refinement candidate was safely rejected; keeping model-v1."
+          fi
 
           DASHBOARD=$(curl --fail --silent --show-error "$BASE_URL/dashboard/api")
           echo "$DASHBOARD" | jq -e --arg id "$JOB_ID" '.jobs[] | select(.job_id == $id) | .renders | length >= 9' >/dev/null

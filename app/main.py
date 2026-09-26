@@ -24,7 +24,9 @@ from .config import (
     WORKER_URL,
 )
 from .dashboard import dashboard_page, jobs_snapshot, public_artifact, public_render
+from .history import append_history, load_history
 from .ollama import OllamaProxyClient, OllamaProxyError
+from .research import research_web_references, write_research_manifest
 from .security import require_api_token
 
 app = FastAPI(title="3D Modeling AI", version="0.2.0")

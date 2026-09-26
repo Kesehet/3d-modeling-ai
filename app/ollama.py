@@ -126,18 +126,24 @@ class OllamaProxyClient:
         }
 
         response = await self._post("/api/chat", payload)
+        chat_decode_error: OllamaProxyError | None = None
         if response.status_code not in {404, 405}:
             self._raise_for_response(response, "/api/chat")
             body = response.json()
             content = (body.get("message") or {}).get("content") or ""
-            return OllamaJSONResult(
-                data=decode_structured_json(content),
-                endpoint="/api/chat",
-                usage={
-                    "prompt_eval_count": int(body.get("prompt_eval_count") or 0),
-                    "eval_count": int(body.get("eval_count") or 0),
-                },
-            )
+            try:
+                data = decode_structured_json(content)
+            except OllamaProxyError as exc:
+                chat_decode_error = exc
+            else:
+                return OllamaJSONResult(
+                    data=data,
+                    endpoint="/api/chat",
+                    usage={
+                        "prompt_eval_count": int(body.get("prompt_eval_count") or 0),
+                        "eval_count": int(body.get("eval_count") or 0),
+                    },
+                )
 
         generate_payload: dict[str, Any] = {
             "model": model,
@@ -152,8 +158,17 @@ class OllamaProxyClient:
         response = await self._post("/api/generate", generate_payload)
         self._raise_for_response(response, "/api/generate")
         body = response.json()
+        try:
+            data = decode_structured_json(body.get("response") or "")
+        except OllamaProxyError as generate_error:
+            if chat_decode_error:
+                raise OllamaProxyError(
+                    "Ollama returned malformed structured JSON from both /api/chat "
+                    f"({chat_decode_error}) and /api/generate ({generate_error})."
+                ) from generate_error
+            raise
         return OllamaJSONResult(
-            data=decode_structured_json(body.get("response") or ""),
+            data=data,
             endpoint="/api/generate",
             usage={
                 "prompt_eval_count": int(body.get("prompt_eval_count") or 0),

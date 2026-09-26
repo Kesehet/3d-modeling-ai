@@ -42,7 +42,7 @@ A new deployment must create a job, execute Blender through MCP, save a .blend, 
 - [x] Camera creation and fixed QA views.
 - [x] Multi-angle rendering.
 - [x] Deterministic Pikachu benchmark builder.
-- [ ] Keep benchmark runtime under 90 seconds on the current VPS.
+- [x] Keep benchmark runtime under 90 seconds on the current VPS (live benchmark ~10.3 seconds including 9 renders + exports).
 - [ ] Add at least two non-character regression subjects.
 
 ### Acceptance
@@ -62,7 +62,7 @@ At least three known benchmark prompts produce recognizable, repeatable results 
 - [ ] Tune cheek position/scale.
 - [ ] Tune arm/foot proportions.
 - [ ] Tune tail size/position.
-- [ ] Persist parameter sets per iteration.
+- [x] Persist parameter sets per iteration.
 - [ ] Add silhouette-focused render mode / masks for vision comparison.
 
 ### Acceptance
@@ -234,7 +234,7 @@ A benchmark model exports to STL/3MF, opens in a slicer, has correct intended si
 - [ ] Normal orientation check/fix.
 - [ ] Duplicate/degenerate geometry cleanup.
 - [ ] Overhang/support estimate.
-- [ ] Automated repair pass.
+- [x] Experimental automated repair pass using join + voxel remesh + cleanup; still requires stronger QA before print-ready status is trusted.
 - [ ] Mandatory QA gate before "print ready".
 
 ### Acceptance
@@ -367,18 +367,22 @@ A request such as "make a 12 cm printable stylized character figurine from refer
 # Immediate implementation sprint
 
 ## Sprint A — Stabilize benchmark
-- [ ] Confirm the corrected Workbench Pikachu builder completes on VPS.
-- [ ] Keep nine-view checkpoint render under 90 seconds.
-- [ ] Confirm BLEND + GLB/OBJ/STL attempts + QA report appear in Files.
-- [ ] Add live regression after deploy once runtime is stable.
+- [x] Confirm the corrected Workbench Pikachu builder completes on VPS.
+- [x] Keep nine-view checkpoint render under 90 seconds (live ~10.3 seconds including exports).
+- [x] Confirm BLEND + GLB/OBJ/STL + QA report are generated on the live VPS.
+- [x] Add live Pikachu regression and verify all nine PNGs through the public app.
+
+### Live QA baseline
+
+The first deployed benchmark produced 23 mesh objects, 12 non-manifold edges and 0 loose vertices. The new experimental print-repair pass attempts to fuse those visible parts through voxel remeshing, then recalculates connected components and manifold status. Wall thickness, self-intersections, overhangs and slicer validation remain mandatory future gates.
 
 ## Sprint B — Research + refinement
 - [x] Add Wikimedia/Wikipedia research provider.
 - [x] Persist research references and source/license metadata.
 - [x] Add bounded Pikachu tuning schema.
 - [x] Add one-to-three-pass visual refinement endpoint.
-- [ ] Add dashboard "Research + Improve" control.
-- [ ] Show critique and tuning history in dashboard.
+- [x] Add dashboard "Research + Improve" control.
+- [x] Show iteration/tuning/status history in a dedicated dashboard tab.
 
 ## Sprint C — Generalization
 - [ ] Extract reusable high-level Blender geometry library.
@@ -414,7 +418,7 @@ A request such as "make a 12 cm printable stylized character figurine from refer
 - [x] Store image metadata and SHA-256 hashes.
 - [ ] Add job cancellation and deletion.
 - [x] Add artifact listing/download endpoints.
-- [ ] Add structured job/event history.
+- [x] Add structured job/event history.
 - [ ] Add concurrency lock so one worker cannot mutate the same scene twice.
 
 ## Phase 2 — Ollama orchestration
@@ -432,7 +436,7 @@ A request such as "make a 12 cm printable stylized character figurine from refer
 
 - [ ] Build a safe high-level Blender script library for primitives, booleans, bevels, modifiers, curves, text, materials, cameras, lights, and transforms.
 - [ ] Prefer high-level deterministic tools over unconstrained generated Python.
-- [ ] Add persistent `.blend` checkpoint naming.
+- [x] Add persistent `.blend` checkpoint naming for benchmark iterations.
 - [ ] Add automatic scene inspection: objects, dimensions, modifiers, mesh stats.
 - [ ] Add multi-view render helper: front, left, right, top, isometric.
 - [ ] Standardize preview rendering with Workbench/Eevee.
@@ -475,10 +479,10 @@ A request such as "make a 12 cm printable stylized character figurine from refer
 - [ ] Intended-use selector: 3D printing / rendering / game asset.
 - [ ] Target dimensions.
 - [ ] Live stage/progress timeline.
-- [ ] Render gallery for each iteration.
+- [x] Render gallery includes iteration render sets; dedicated Iterations tab exposes version history.
 - [ ] Web GLB viewer.
 - [ ] Human feedback box during generation.
-- [ ] Downloads for BLEND/GLB/OBJ/STL/3MF.
+- [ ] Downloads for BLEND/GLB/OBJ/STL/3MF (BLEND/GLB/OBJ/STL working; 3MF pending).
 
 ## Phase 8 — Hardening and scale
 

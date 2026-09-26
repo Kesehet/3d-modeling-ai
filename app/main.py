@@ -26,6 +26,7 @@ from .config import (
 from .dashboard import dashboard_page, jobs_snapshot, public_artifact, public_render
 from .history import append_history, load_history
 from .ollama import OllamaProxyClient, OllamaProxyError
+from .repair import print_repair_script
 from .research import research_web_references, write_research_manifest
 from .security import require_api_token
 
@@ -85,6 +86,11 @@ class ResearchRequest(BaseModel):
 class PikachuRefineRequest(BaseModel):
     iterations: int = Field(default=2, ge=1, le=3)
     auto_research: bool = True
+
+
+class PrintRepairRequest(BaseModel):
+    voxel_size: float = Field(default=0.05, ge=0.01, le=0.20)
+    target_width_mm: float | None = Field(default=None, gt=0, le=10_000)
 
 
 class PikachuTuning(BaseModel):
@@ -267,6 +273,11 @@ async def dashboard_history(job_id: str) -> dict:
     return {"job_id": job_id, "history": load_history(root)}
 
 
+@app.post("/dashboard/jobs/{job_id}/repair-print", include_in_schema=False)
+async def dashboard_repair_print(job_id: str, request: PrintRepairRequest) -> dict:
+    return await repair_print_model(job_id, request)
+
+
 @app.get("/health")
 async def health() -> dict:
     worker = {"ok": False}
@@ -306,6 +317,7 @@ async def capabilities() -> dict:
             "parametric-pikachu-refinement",
             "glb-obj-stl-export-attempts",
             "mesh-qa-report",
+            "experimental-voxel-print-repair",
         ],
     }
 
@@ -755,6 +767,96 @@ async def refine_pikachu(job_id: str, request: PikachuRefineRequest) -> dict:
 
     status = _write_status(root, state="ready", stage="pikachu_refinement_complete")
     return {"job_id": job_id, "iterations": completed, "status": status}
+
+
+async def repair_print_model(job_id: str, request: PrintRepairRequest) -> dict:
+    root = _require_job(job_id)
+    candidates = [
+        path
+        for path in (root / "scene").glob("*.blend")
+        if "print-repaired" not in path.stem
+    ]
+    if not candidates:
+        raise HTTPException(status_code=400, detail="This job has no source .blend file to repair.")
+    source = max(candidates, key=lambda path: path.stat().st_mtime)
+    job_request = json.loads((root / "request.json").read_text(encoding="utf-8"))
+    target_width_mm = request.target_width_mm or job_request.get("target_width_mm")
+
+    stem = source.stem
+    output_blend = root / "scene" / f"{stem}-print-repaired.blend"
+    output_stl = root / "exports" / f"{stem}-print-repaired.stl"
+    qa_path = root / "exports" / f"{stem}-print-repaired-qa.json"
+
+    _write_status(root, state="running", stage="print_repair")
+    payload = {
+        "tool": "blender_python_exec",
+        "arguments": {
+            "code": print_repair_script(),
+            "args": {
+                "source_blend": str(source),
+                "output_blend": str(output_blend),
+                "output_stl": str(output_stl),
+                "qa_path": str(qa_path),
+                "voxel_size": request.voxel_size,
+                "target_width_mm": target_width_mm,
+            },
+            "transport": "headless",
+            "factory_startup": True,
+            "timeout_seconds": 300,
+        },
+    }
+    try:
+        async with httpx.AsyncClient(timeout=360) as client:
+            response = await client.post(f"{WORKER_URL}/v1/mcp/call", json=payload)
+            response.raise_for_status()
+            result = response.json()
+    except (httpx.HTTPError, ValueError) as exc:
+        _write_status(root, state="failed", stage="print_repair", error=str(exc))
+        raise HTTPException(status_code=502, detail=f"Print repair failed: {exc}") from exc
+
+    blender_error = _worker_blender_error(result)
+    if blender_error:
+        _write_status(root, state="failed", stage="print_repair", error=blender_error)
+        raise HTTPException(status_code=502, detail=f"Blender print repair failed: {blender_error}")
+
+    missing = [
+        path.name
+        for path in (output_blend, output_stl, qa_path)
+        if not path.is_file()
+    ]
+    if missing:
+        _write_status(root, state="failed", stage="print_repair", error=f"Missing repair artifacts: {missing}")
+        raise HTTPException(status_code=502, detail=f"Repair completed but files are missing: {missing}")
+
+    qa = json.loads(qa_path.read_text(encoding="utf-8"))
+    append_history(
+        root,
+        "print_repair",
+        source=source.name,
+        blend=output_blend.name,
+        stl=output_stl.name,
+        qa=qa_path.name,
+        print_ready=qa.get("print_ready", False),
+        non_manifold_edges=qa.get("non_manifold_edges"),
+        connected_components=qa.get("connected_components"),
+    )
+    status = _write_status(
+        root,
+        state="ready",
+        stage="print_repair_complete",
+        print_repair={
+            "blend": output_blend.name,
+            "stl": output_stl.name,
+            "qa": qa_path.name,
+            "print_ready": qa.get("print_ready", False),
+        },
+    )
+    return {"job_id": job_id, "status": status, "qa": qa, "worker_result": result}
+
+
+@app.post("/v1/jobs/{job_id}/repair-print", dependencies=[Depends(require_api_token)])
+async def repair_print_model_api(job_id: str, request: PrintRepairRequest) -> dict:
+    return await repair_print_model(job_id, request)
 
 
 @app.post("/v1/jobs/{job_id}/smoke-test", dependencies=[Depends(require_api_token)])

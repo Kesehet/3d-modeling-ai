@@ -58,7 +58,35 @@ def jobs_snapshot() -> dict:
                 item
                 for item in artifacts["renders"]
                 if Path(item["name"]).suffix.lower() in IMAGE_SUFFIXES
-            ][:32]
+            ][:64]
+
+            history: list[dict] = []
+            history_path = root / "history.json"
+            if history_path.exists():
+                try:
+                    parsed_history = json.loads(history_path.read_text(encoding="utf-8"))
+                    if isinstance(parsed_history, list):
+                        history = parsed_history[-100:]
+                except (OSError, json.JSONDecodeError):
+                    history = []
+
+            latest_qa: dict | None = None
+            latest_qa_file: str | None = None
+            qa_files = sorted(
+                (root / "exports").glob("*-qa.json"),
+                key=lambda item: item.stat().st_mtime,
+                reverse=True,
+            )
+            for qa_path in qa_files:
+                try:
+                    parsed_qa = json.loads(qa_path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    continue
+                if isinstance(parsed_qa, dict):
+                    latest_qa = parsed_qa
+                    latest_qa_file = qa_path.name
+                    break
+
             rows.append(
                 {
                     "job_id": root.name,
@@ -69,6 +97,12 @@ def jobs_snapshot() -> dict:
                     "updated_at": status.get("updated_at"),
                     "renders": renders,
                     "artifacts": artifacts,
+                    "history": history,
+                    "iterations": [
+                        event for event in history if event.get("event") == "pikachu_iteration"
+                    ],
+                    "qa": latest_qa,
+                    "qa_file": latest_qa_file,
                 }
             )
 
@@ -144,6 +178,8 @@ a{color:var(--primary)}
 .files-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px}.file-group{background:var(--surface);border:1px solid var(--border);border-radius:10px;overflow:hidden}.file-group-head{display:flex;justify-content:space-between;padding:12px 14px;background:#f9fafb;border-bottom:1px solid var(--border);font-weight:700}.file-row{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:11px 14px;border-bottom:1px solid #eef0f3}.file-row:last-child{border-bottom:0}.file-name{min-width:0}.file-name span{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.file-name small{color:var(--muted)}
 .job-picker{display:flex;align-items:center;gap:10px}.job-picker select{max-width:460px;border:1px solid #cfd4dc;border-radius:8px;background:white;padding:9px 10px}
 .recent-list{display:grid;gap:10px}.recent-item{display:flex;justify-content:space-between;gap:12px;padding:12px;border:1px solid var(--border);border-radius:9px;cursor:pointer}.recent-item:hover{background:#f8fafc}.recent-main{min-width:0}.recent-main strong{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.timeline{display:grid;gap:12px}.timeline-item{display:grid;grid-template-columns:90px 1fr;gap:14px;padding:14px 0;border-bottom:1px solid #eaecf0}.timeline-item:last-child{border-bottom:0}.timeline-step{font-weight:700;color:var(--primary)}.param-grid{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}.param{font-size:11px;background:#f2f4f7;border-radius:6px;padding:4px 7px;color:#475467}
+.qa-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px}.qa-metric{border:1px solid var(--border);border-radius:10px;padding:14px;background:#f9fafb}.qa-metric b{display:block;font-size:24px;margin-top:4px}.qa-status{padding:14px;border-radius:10px;margin-bottom:14px}.qa-status.good{background:var(--success-bg);color:var(--success)}.qa-status.bad{background:var(--danger-bg);color:var(--danger)}.qa-note{margin-top:14px;color:var(--muted)}
 .footer{padding:20px 24px 30px;color:var(--muted);font-size:12px}
 @media(max-width:980px){.grid-4{grid-template-columns:repeat(2,1fr)}.grid-2,.form-grid,.files-grid{grid-template-columns:1fr}.gallery{grid-template-columns:repeat(2,1fr)}}
 @media(max-width:620px){.header{padding:0 14px}.brand p,.selected-chip{display:none}.nav{padding:0 10px}.main{padding:14px}.grid-4{grid-template-columns:1fr 1fr}.gallery{grid-template-columns:1fr}.page-head{flex-direction:column}.job-picker{width:100%;align-items:stretch;flex-direction:column}.job-picker select{max-width:none;width:100%}}
@@ -159,7 +195,9 @@ a{color:var(--primary)}
   <button class="tab-btn active" data-tab="overview">Overview</button>
   <button class="tab-btn" data-tab="new">New Job</button>
   <button class="tab-btn" data-tab="gallery">Gallery</button>
+  <button class="tab-btn" data-tab="iterations">Iterations</button>
   <button class="tab-btn" data-tab="files">Files</button>
+  <button class="tab-btn" data-tab="qa">Print QA</button>
   <button class="tab-btn" data-tab="jobs">Jobs</button>
 </nav>
 <main class="main">
@@ -182,9 +220,9 @@ a{color:var(--primary)}
   <div class="page-head"><div><h2>New Job</h2><p>Create a new modeling job or run the Pikachu test preset.</p></div></div>
   <div class="card">
     <div class="form-grid">
-      <div class="field"><label for="prompt">Prompt</label><textarea id="prompt" placeholder="Describe the 3D object you want to create...">Create a stylized Pikachu test model</textarea><small>Describe shape, proportions, style and intended result.</small></div>
-      <div class="field"><label for="intended">Intended use</label><select id="intended"><option value="rendering">Rendering</option><option value="3d_printing">3D printing</option><option value="game_asset">Game asset</option></select></div>
-      <div class="field"><label for="width">Target width (mm)</label><input id="width" type="number" min="0.01" max="10000" step="0.1" placeholder="Optional"></div>
+      <div class="field"><label for="jobPrompt">Prompt</label><textarea id="jobPrompt" placeholder="Describe the 3D object you want to create...">Create a stylized Pikachu test model</textarea><small>Describe shape, proportions, style and intended result.</small></div>
+      <div class="field"><label for="jobIntended">Intended use</label><select id="jobIntended"><option value="rendering">Rendering</option><option value="3d_printing">3D printing</option><option value="game_asset">Game asset</option></select></div>
+      <div class="field"><label for="jobWidth">Target width (mm)</label><input id="jobWidth" type="number" min="0.01" max="10000" step="0.1" placeholder="Optional"></div>
     </div>
     <div class="actions"><button class="btn primary" id="create">Create Job</button><button class="btn success" id="pikachu">Create + Run Pikachu Test</button><button class="btn" id="autopilot">Research + Improve Pikachu</button></div>
     <div class="notice" id="notice"></div>
@@ -197,6 +235,25 @@ a{color:var(--primary)}
     <div class="job-picker"><select id="galleryJob"></select><button class="btn" id="rerun" disabled>Run Pikachu Test</button></div>
   </div>
   <div class="gallery" id="renders"></div>
+</section>
+
+<section class="tab" id="tab-iterations">
+  <div class="page-head">
+    <div><h2>Iterations</h2><p>Research, visual critique and geometry changes for the selected job.</p></div>
+    <div class="job-picker"><select id="iterationsJob"></select></div>
+  </div>
+  <div class="card"><div class="timeline" id="iterations"></div></div>
+</section>
+
+<section class="tab" id="tab-qa">
+  <div class="page-head">
+    <div><h2>Print QA</h2><p>Geometry diagnostics and experimental repair tools for the selected job.</p></div>
+    <div class="job-picker"><select id="qaJob"></select><button class="btn primary" id="repairPrint" disabled>Repair for Printing</button></div>
+  </div>
+  <div class="card">
+    <div id="qaSummary"></div>
+    <div class="notice" id="qaNotice"></div>
+  </div>
 </section>
 
 <section class="tab" id="tab-files">
@@ -216,137 +273,281 @@ a{color:var(--primary)}
 <div class="footer">Open prototype · job creation, test execution and downloads are currently public.</div>
 </div>
 <script>
-const esc=s=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const esc=value=>String(value??"").replace(/[&<>"']/g,ch=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[ch]));
 const fmt=n=>n<1024?n+" B":n<1048576?(n/1024).toFixed(1)+" KB":(n/1048576).toFixed(1)+" MB";
-const dateFmt=v=>{if(!v)return "—";try{return new Date(v).toLocaleString()}catch(e){return v}};
-let selectedJob=localStorage.getItem("selected3dJob")||null,lastData=null,busy=false,currentTab=localStorage.getItem("selected3dTab")||"overview";
+const dateFmt=value=>{if(!value)return "—";try{return new Date(value).toLocaleString()}catch(_){return value}};
+const byId=id=>document.getElementById(id);
 
-function setTab(name){
-  currentTab=name;localStorage.setItem("selected3dTab",name);
-  document.querySelectorAll(".tab").forEach(x=>x.classList.toggle("active",x.id==="tab-"+name));
-  document.querySelectorAll(".tab-btn").forEach(x=>x.classList.toggle("active",x.dataset.tab===name));
+const els={
+  total:byId("total"),running:byId("running"),failed:byId("failed"),stamp:byId("stamp"),
+  active:byId("active"),recent:byId("recent"),selectedChip:byId("selectedChip"),
+  jobPrompt:byId("jobPrompt"),jobIntended:byId("jobIntended"),jobWidth:byId("jobWidth"),
+  create:byId("create"),pikachu:byId("pikachu"),autopilot:byId("autopilot"),notice:byId("notice"),
+  galleryJob:byId("galleryJob"),renders:byId("renders"),rerun:byId("rerun"),
+  iterationsJob:byId("iterationsJob"),iterations:byId("iterations"),
+  filesJob:byId("filesJob"),artifacts:byId("artifacts"),
+  qaJob:byId("qaJob"),qaSummary:byId("qaSummary"),qaNotice:byId("qaNotice"),repairPrint:byId("repairPrint"),
+  jobs:byId("jobs")
+};
+const tabNames=new Set(["overview","new","gallery","iterations","files","qa","jobs"]);
+let selectedJob=localStorage.getItem("selected3dJob")||null;
+let lastData=null;
+let busy=false;
+
+function currentTab(){
+  const hash=location.hash.replace(/^#/,"");
+  return tabNames.has(hash)?hash:"overview";
 }
-document.querySelectorAll(".tab-btn").forEach(x=>x.onclick=()=>setTab(x.dataset.tab));
-document.querySelectorAll("[data-go]").forEach(x=>x.onclick=()=>setTab(x.dataset.go));
-setTab(currentTab);
+function setTab(name,{push=true}={}){
+  if(!tabNames.has(name))name="overview";
+  document.querySelectorAll(".tab").forEach(node=>node.classList.toggle("active",node.id==="tab-"+name));
+  document.querySelectorAll(".tab-btn").forEach(node=>node.classList.toggle("active",node.dataset.tab===name));
+  if(push&&location.hash!=="#"+name)history.replaceState(null,"","#"+name);
+}
+window.addEventListener("hashchange",()=>setTab(currentTab(),{push:false}));
+document.querySelectorAll(".tab-btn").forEach(button=>button.addEventListener("click",()=>setTab(button.dataset.tab)));
+document.querySelectorAll("[data-go]").forEach(button=>button.addEventListener("click",()=>setTab(button.dataset.go)));
+setTab(currentTab(),{push:false});
 
-function jobFromData(d){return d.jobs.find(j=>j.job_id===selectedJob)||d.active||d.jobs[0]||null}
-function fileUrl(job,cat,name){return "/dashboard/artifacts/"+encodeURIComponent(job)+"/"+encodeURIComponent(cat)+"/"+encodeURIComponent(name)}
-function selectJob(id,goTab){
-  selectedJob=id;localStorage.setItem("selected3dJob",id);
+function jobFromData(data){
+  if(!data||!Array.isArray(data.jobs))return null;
+  const chosen=data.jobs.find(job=>job.job_id===selectedJob);
+  return chosen||data.active||data.jobs[0]||null;
+}
+function fileUrl(job,category,name){
+  return "/dashboard/artifacts/"+encodeURIComponent(job)+"/"+encodeURIComponent(category)+"/"+encodeURIComponent(name);
+}
+function selectJob(id,tab){
+  if(!id)return;
+  selectedJob=id;
+  localStorage.setItem("selected3dJob",id);
   if(lastData)renderUI(lastData);
-  if(goTab)setTab(goTab);
+  if(tab)setTab(tab);
 }
-function badge(j){return '<span class="badge '+esc(j.state)+'">'+esc(j.state)+'</span>'}
-function showNotice(message,type){
-  notice.textContent=message;notice.className="notice show "+(type||"");
+function badge(job){
+  return '<span class="badge '+esc(job.state||"unknown")+'">'+esc(job.state||"unknown")+'</span>';
 }
-function populateSelectors(d,current){
-  const options=d.jobs.length?d.jobs.map(j=>'<option value="'+esc(j.job_id)+'">'+esc(j.prompt).slice(0,70)+' · '+esc(j.state)+'</option>').join(""):'<option value="">No jobs yet</option>';
-  [galleryJob,filesJob].forEach(sel=>{const old=sel.value;sel.innerHTML=options;if(current)sel.value=current.job_id;else if(old)sel.value=old});
+function showNotice(element,message,type){
+  element.textContent=message;
+  element.className="notice show "+(type||"");
+}
+function setBusy(value){
+  busy=value;
+  [els.create,els.pikachu,els.autopilot,els.rerun,els.repairPrint].forEach(button=>{
+    if(button)button.disabled=value;
+  });
+}
+function populateSelectors(data,current){
+  const options=data.jobs.length
+    ? data.jobs.map(job=>'<option value="'+esc(job.job_id)+'">'+esc(job.prompt).slice(0,76)+' · '+esc(job.state)+'</option>').join("")
+    : '<option value="">No jobs yet</option>';
+  [els.galleryJob,els.iterationsJob,els.filesJob,els.qaJob].forEach(select=>{
+    if(!select)return;
+    select.innerHTML=options;
+    if(current)select.value=current.job_id;
+  });
+}
+function renderIterations(current){
+  if(!current){els.iterations.innerHTML='<div class="empty">Select a job to view its history.</div>';return}
+  const history=(current.history||[]).slice().reverse();
+  if(!history.length){els.iterations.innerHTML='<div class="empty">No iteration history has been recorded yet.</div>';return}
+  els.iterations.innerHTML=history.map(event=>{
+    const eventName=esc(event.event||"event");
+    let body="";
+    if(event.event==="pikachu_iteration"){
+      const tuning=event.tuning||{};
+      body='<strong>Model iteration v'+esc(event.version||"?")+'</strong><div class="small">'+esc(event.prefix||"")+' · '+(event.renders||[]).length+' renders</div>'+
+        '<div class="param-grid">'+Object.entries(tuning).map(([key,value])=>'<span class="param">'+esc(key)+': '+esc(Number(value).toFixed(2))+'</span>').join("")+'</div>';
+    }else if(event.event==="research"){
+      body='<strong>Reference research</strong><div class="small">'+esc(event.query||"")+' · '+esc(event.added||0)+' images added · '+esc(event.provider||"")+'</div>';
+    }else if(event.event==="refinement_stop"){
+      body='<strong>Refinement stopped</strong><div class="small">'+esc(event.reason||"")+'</div>';
+    }else if(event.event==="status"){
+      body='<strong>'+esc(event.stage||event.state||"Status")+'</strong><div class="small">State: '+esc(event.state||"")+'</div>';
+    }else{
+      body='<strong>'+eventName.replaceAll("_"," ")+'</strong>';
+    }
+    return '<div class="timeline-item"><div class="timeline-step">#'+esc(event.seq||"")+'</div><div>'+body+'<div class="small" style="margin-top:6px">'+dateFmt(event.at)+'</div></div></div>';
+  }).join("");
+}
+function renderQA(current){
+  if(!current){
+    els.qaSummary.innerHTML='<div class="empty">Select a job to view geometry QA.</div>';
+    els.repairPrint.disabled=true;
+    return;
+  }
+  els.repairPrint.disabled=busy||!(current.artifacts?.scene||[]).some(file=>file.name.endsWith(".blend"));
+  const qa=current.qa;
+  if(!qa){
+    els.qaSummary.innerHTML='<div class="empty">No QA report yet. Run a benchmark/model build first.</div>';
+    return;
+  }
+  const ready=qa.print_ready===true;
+  const metrics=[
+    ["Mesh objects",qa.mesh_object_count??"—"],
+    ["Connected parts",qa.connected_components??qa.potentially_disconnected_parts??"—"],
+    ["Non-manifold edges",qa.non_manifold_edges??"—"],
+    ["Loose vertices",qa.loose_vertices??"—"]
+  ];
+  const dims=qa.dimensions_mm||qa.scene_dimensions_blender_units;
+  els.qaSummary.innerHTML=
+    '<div class="qa-status '+(ready?'good':'bad')+'"><strong>'+(ready?'Print-ready checks passed':'Not print-ready yet')+'</strong></div>'+
+    '<div class="qa-grid">'+metrics.map(([label,value])=>'<div class="qa-metric"><span class="small">'+esc(label)+'</span><b>'+esc(value)+'</b></div>').join("")+'</div>'+
+    (dims?'<div class="qa-note">Dimensions: '+esc(Array.isArray(dims)?dims.join(" × "):dims)+(qa.dimensions_mm?' mm':' Blender units')+'</div>':'')+
+    '<div class="qa-note">'+esc(qa.note||"")+'</div>'+
+    (current.qa_file?'<div class="actions"><a class="btn" download href="'+fileUrl(current.job_id,"exports",current.qa_file)+'">Download QA JSON</a></div>':'');
 }
 
-function renderUI(d){
-  lastData=d;
-  total.textContent=d.counts.total;running.textContent=d.counts.running;failed.textContent=d.counts.failed;
-  stamp.textContent=new Date(d.generated_at).toLocaleTimeString();
-  const current=jobFromData(d);
-  if(current&&!selectedJob){selectedJob=current.job_id;localStorage.setItem("selected3dJob",selectedJob)}
-  selectedChip.textContent=current?"Selected: "+current.prompt:"No job selected";
-  populateSelectors(d,current);
-  rerun.disabled=!current||busy;
+function renderUI(data){
+  lastData=data;
+  els.total.textContent=data.counts.total;
+  els.running.textContent=data.counts.running;
+  els.failed.textContent=data.counts.failed;
+  els.stamp.textContent=new Date(data.generated_at).toLocaleTimeString();
 
-  active.innerHTML=d.active
-    ? badge(d.active)+'<div class="active-title">'+esc(d.active.prompt)+'</div><div class="meta">'+esc(d.active.stage)+' · '+esc(d.active.job_id)+'</div><div class="actions"><button class="btn" onclick="selectJob(\''+esc(d.active.job_id)+'\',\'gallery\')">View Gallery</button></div>'
+  let current=jobFromData(data);
+  if(current&&(!selectedJob||!data.jobs.some(job=>job.job_id===selectedJob))){
+    selectedJob=current.job_id;
+    localStorage.setItem("selected3dJob",selectedJob);
+  }
+  current=jobFromData(data);
+  els.selectedChip.textContent=current?"Selected: "+current.prompt:"No job selected";
+  populateSelectors(data,current);
+  els.rerun.disabled=busy||!current;
+
+  els.active.innerHTML=data.active
+    ? badge(data.active)+'<div class="active-title">'+esc(data.active.prompt)+'</div><div class="meta">'+esc(data.active.stage)+' · '+esc(data.active.job_id)+'</div><div class="actions"><button class="btn" data-active-gallery="'+esc(data.active.job_id)+'">View Gallery</button></div>'
     : '<div class="empty">No jobs are currently running.</div>';
 
-  recent.innerHTML=d.jobs.length
-    ? d.jobs.slice(0,5).map(j=>'<div class="recent-item" data-select="'+esc(j.job_id)+'"><div class="recent-main"><strong>'+esc(j.prompt)+'</strong><span class="small">'+esc(j.stage)+' · '+dateFmt(j.updated_at)+'</span></div>'+badge(j)+'</div>').join("")
+  els.recent.innerHTML=data.jobs.length
+    ? data.jobs.slice(0,5).map(job=>'<div class="recent-item" data-select="'+esc(job.job_id)+'"><div class="recent-main"><strong>'+esc(job.prompt)+'</strong><span class="small">'+esc(job.stage)+' · '+dateFmt(job.updated_at)+'</span></div>'+badge(job)+'</div>').join("")
     : '<div class="empty">No jobs yet.</div>';
 
-  renders.innerHTML=current&&current.renders.length
-    ? current.renders.map(x=>'<div class="shot"><a class="imgwrap" target="_blank" href="/dashboard/renders/'+encodeURIComponent(current.job_id)+'/'+encodeURIComponent(x.name)+'"><img loading="lazy" src="/dashboard/renders/'+encodeURIComponent(current.job_id)+'/'+encodeURIComponent(x.name)+'?v='+encodeURIComponent(x.mtime)+'"></a><div class="shot-info"><span class="shot-name">'+esc(x.name)+'</span><a class="download" download href="'+fileUrl(current.job_id,"renders",x.name)+'">Download</a></div></div>').join("")
+  els.renders.innerHTML=current&&current.renders.length
+    ? current.renders.map(render=>'<div class="shot"><a class="imgwrap" target="_blank" href="/dashboard/renders/'+encodeURIComponent(current.job_id)+'/'+encodeURIComponent(render.name)+'"><img loading="lazy" src="/dashboard/renders/'+encodeURIComponent(current.job_id)+'/'+encodeURIComponent(render.name)+'?v='+encodeURIComponent(render.mtime)+'"></a><div class="shot-info"><span class="shot-name">'+esc(render.name)+'</span><a class="download" download href="'+fileUrl(current.job_id,"renders",render.name)+'">Download</a></div></div>').join("")
     : '<div class="empty" style="grid-column:1/-1">No renders are available for the selected job yet.</div>';
 
   if(current){
     const groups=[["renders","Renders"],["scene","Scene files"],["exports","Exports"]];
-    artifacts.innerHTML=groups.map(([cat,label])=>{const files=current.artifacts[cat]||[];return '<div class="file-group"><div class="file-group-head"><span>'+label+'</span><span class="small">'+files.length+' file'+(files.length===1?'':'s')+'</span></div>'+(files.length?files.map(f=>'<div class="file-row"><div class="file-name"><span>'+esc(f.name)+'</span><small>'+fmt(f.bytes)+'</small></div><a class="btn" download href="'+fileUrl(current.job_id,cat,f.name)+'">Download</a></div>').join(""):'<div class="file-row"><span class="small">No files yet</span></div>')+'</div>'}).join("");
+    els.artifacts.innerHTML=groups.map(([category,label])=>{
+      const files=current.artifacts[category]||[];
+      return '<div class="file-group"><div class="file-group-head"><span>'+label+'</span><span class="small">'+files.length+' file'+(files.length===1?'':'s')+'</span></div>'+
+        (files.length?files.map(file=>'<div class="file-row"><div class="file-name"><span>'+esc(file.name)+'</span><small>'+fmt(file.bytes)+'</small></div><a class="btn" download href="'+fileUrl(current.job_id,category,file.name)+'">Download</a></div>').join(""):'<div class="file-row"><span class="small">No files yet</span></div>')+
+        '</div>';
+    }).join("");
   }else{
-    artifacts.innerHTML='<div class="empty" style="grid-column:1/-1">Create or select a job to see generated files.</div>';
+    els.artifacts.innerHTML='<div class="empty" style="grid-column:1/-1">Create or select a job to see generated files.</div>';
   }
 
-  jobs.innerHTML=d.jobs.length
-    ? d.jobs.map(j=>'<tr class="clickable '+(j.job_id===selectedJob?'selected':'')+'" data-select="'+esc(j.job_id)+'"><td>'+badge(j)+'</td><td class="prompt-cell"><strong>'+esc(j.prompt)+'</strong><span class="small">'+esc(j.job_id)+'</span></td><td>'+esc(j.intended_use)+'</td><td>'+esc(j.stage)+'</td><td>'+dateFmt(j.updated_at)+'</td><td><button class="btn" data-gallery="'+esc(j.job_id)+'">Gallery</button></td></tr>').join("")
+  renderIterations(current);
+  renderQA(current);
+
+  els.jobs.innerHTML=data.jobs.length
+    ? data.jobs.map(job=>'<tr class="clickable '+(job.job_id===selectedJob?'selected':'')+'" data-select="'+esc(job.job_id)+'"><td>'+badge(job)+'</td><td class="prompt-cell"><strong>'+esc(job.prompt)+'</strong><span class="small">'+esc(job.job_id)+'</span></td><td>'+esc(job.intended_use)+'</td><td>'+esc(job.stage)+'</td><td>'+dateFmt(job.updated_at)+'</td><td><button class="btn" data-gallery="'+esc(job.job_id)+'">Gallery</button></td></tr>').join("")
     : '<tr><td colspan="6"><div class="empty">No jobs yet.</div></td></tr>';
 
-  document.querySelectorAll("[data-select]").forEach(el=>el.onclick=e=>{if(e.target.closest("[data-gallery]"))return;selectJob(el.dataset.select)});
-  document.querySelectorAll("[data-gallery]").forEach(el=>el.onclick=e=>{e.stopPropagation();selectJob(el.dataset.gallery,"gallery")});
+  document.querySelectorAll("[data-select]").forEach(node=>node.addEventListener("click",event=>{
+    if(event.target.closest("[data-gallery]"))return;
+    selectJob(node.dataset.select);
+  }));
+  document.querySelectorAll("[data-gallery]").forEach(node=>node.addEventListener("click",event=>{
+    event.stopPropagation();
+    selectJob(node.dataset.gallery,"gallery");
+  }));
+  document.querySelectorAll("[data-active-gallery]").forEach(node=>node.addEventListener("click",()=>selectJob(node.dataset.activeGallery,"gallery")));
 }
 
 async function tick(){
   try{
-    const r=await fetch("/dashboard/api",{cache:"no-store"});
-    if(!r.ok)throw new Error("Dashboard API "+r.status);
-    renderUI(await r.json());
-  }catch(e){stamp.textContent="Offline"}
+    const response=await fetch("/dashboard/api",{cache:"no-store"});
+    if(!response.ok)throw new Error("Dashboard API "+response.status);
+    renderUI(await response.json());
+  }catch(error){
+    els.stamp.textContent="Offline";
+    console.error(error);
+  }
 }
-
-async function newJob(runTest){
+async function createJob(runTest){
   if(busy)return;
-  const p=prompt.value.trim();
-  if(!p){showNotice("Prompt is required.","error");return}
-  busy=true;create.disabled=pikachu.disabled=autopilot.disabled=rerun.disabled=true;showNotice("Creating job...","busy");
+  const promptText=els.jobPrompt.value.trim();
+  if(!promptText){showNotice(els.notice,"Prompt is required.","error");setTab("new");return}
+  setBusy(true);
+  showNotice(els.notice,"Creating job...","busy");
   try{
-    const body={prompt:p,intended_use:intended.value};if(width.value)body.target_width_mm=Number(width.value);
-    let r=await fetch("/dashboard/jobs",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
-    if(!r.ok)throw new Error(await r.text());
-    const d=await r.json();selectedJob=d.job_id;localStorage.setItem("selected3dJob",selectedJob);showNotice("Job created successfully.","success");await tick();
+    const body={prompt:promptText,intended_use:els.jobIntended.value};
+    if(els.jobWidth.value)body.target_width_mm=Number(els.jobWidth.value);
+    let response=await fetch("/dashboard/jobs",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+    if(!response.ok)throw new Error(await response.text());
+    const result=await response.json();
+    selectJob(result.job_id);
+    showNotice(els.notice,"Job created successfully.","success");
+    await tick();
     if(runTest){
-      showNotice("Running Pikachu test. This can take a little while...","busy");setTab("gallery");
-      r=await fetch("/dashboard/jobs/"+encodeURIComponent(d.job_id)+"/pikachu",{method:"POST"});
-      if(!r.ok)throw new Error(await r.text());
-      showNotice("Pikachu test completed. Generated files are ready.","success");await tick();
+      showNotice(els.notice,"Running Pikachu test...","busy");
+      setTab("gallery");
+      response=await fetch("/dashboard/jobs/"+encodeURIComponent(result.job_id)+"/pikachu",{method:"POST"});
+      if(!response.ok)throw new Error(await response.text());
+      await tick();
+      showNotice(els.notice,"Pikachu test completed. Gallery and files are ready.","success");
     }
-  }catch(e){showNotice("Error: "+e.message,"error")}
-  finally{busy=false;create.disabled=pikachu.disabled=autopilot.disabled=false;rerun.disabled=!selectedJob;await tick()}
+  }catch(error){showNotice(els.notice,"Error: "+error.message,"error");setTab("new")}
+  finally{setBusy(false);await tick()}
 }
-
 async function runSelected(){
   if(!selectedJob||busy)return;
-  busy=true;create.disabled=pikachu.disabled=autopilot.disabled=rerun.disabled=true;showNotice("Running Pikachu test on selected job...","busy");setTab("gallery");
+  setBusy(true);setTab("gallery");
   try{
-    const r=await fetch("/dashboard/jobs/"+encodeURIComponent(selectedJob)+"/pikachu",{method:"POST"});
-    if(!r.ok)throw new Error(await r.text());
-    showNotice("Pikachu test completed.","success");
-  }catch(e){showNotice("Error: "+e.message,"error")}
-  finally{busy=false;create.disabled=pikachu.disabled=autopilot.disabled=false;rerun.disabled=false;await tick()}
+    const response=await fetch("/dashboard/jobs/"+encodeURIComponent(selectedJob)+"/pikachu",{method:"POST"});
+    if(!response.ok)throw new Error(await response.text());
+    await tick();
+  }catch(error){alert("Pikachu test failed: "+error.message)}
+  finally{setBusy(false);await tick()}
 }
-
-galleryJob.onchange=()=>selectJob(galleryJob.value);
-filesJob.onchange=()=>selectJob(filesJob.value);
 async function researchAndImprove(){
   if(busy)return;
-  const p=prompt.value.trim();
-  if(!p){showNotice("Prompt is required.","error");return}
-  busy=true;create.disabled=pikachu.disabled=autopilot.disabled=rerun.disabled=true;showNotice("Creating job...","busy");
+  const promptText=els.jobPrompt.value.trim();
+  if(!promptText){showNotice(els.notice,"Prompt is required.","error");setTab("new");return}
+  setBusy(true);showNotice(els.notice,"Creating job...","busy");
   try{
-    const body={prompt:p,intended_use:intended.value};if(width.value)body.target_width_mm=Number(width.value);
-    let r=await fetch("/dashboard/jobs",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
-    if(!r.ok)throw new Error(await r.text());
-    const d=await r.json();selectedJob=d.job_id;localStorage.setItem("selected3dJob",selectedJob);setTab("gallery");await tick();
-    showNotice("Researching references and running visual refinement...","busy");
-    r=await fetch("/dashboard/jobs/"+encodeURIComponent(d.job_id)+"/refine-pikachu",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({iterations:2,auto_research:true})});
-    if(!r.ok)throw new Error(await r.text());
-    showNotice("Research + refinement completed. Review Gallery and Files.","success");await tick();
-  }catch(e){showNotice("Error: "+e.message,"error")}
-  finally{busy=false;create.disabled=pikachu.disabled=autopilot.disabled=false;rerun.disabled=!selectedJob;await tick()}
+    const body={prompt:promptText,intended_use:els.jobIntended.value};
+    if(els.jobWidth.value)body.target_width_mm=Number(els.jobWidth.value);
+    let response=await fetch("/dashboard/jobs",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+    if(!response.ok)throw new Error(await response.text());
+    const result=await response.json();
+    selectJob(result.job_id,"iterations");
+    await tick();
+    showNotice(els.notice,"Researching references, critiquing renders and generating an improved iteration...","busy");
+    response=await fetch("/dashboard/jobs/"+encodeURIComponent(result.job_id)+"/refine-pikachu",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({iterations:2,auto_research:true})});
+    if(!response.ok)throw new Error(await response.text());
+    await tick();
+    showNotice(els.notice,"Research + refinement completed.","success");
+    setTab("gallery");
+  }catch(error){showNotice(els.notice,"Error: "+error.message,"error");setTab("new")}
+  finally{setBusy(false);await tick()}
+}
+async function repairForPrint(){
+  if(!selectedJob||busy)return;
+  setBusy(true);setTab("qa");showNotice(els.qaNotice,"Creating a repaired printable mesh using voxel remesh and geometry cleanup...","busy");
+  try{
+    const response=await fetch("/dashboard/jobs/"+encodeURIComponent(selectedJob)+"/repair-print",{method:"POST",headers:{"Content-Type":"application/json"},body:"{}"});
+    if(!response.ok)throw new Error(await response.text());
+    await tick();
+    showNotice(els.qaNotice,"Repair pass completed. Review the updated QA metrics before treating it as printable.","success");
+  }catch(error){showNotice(els.qaNotice,"Repair failed: "+error.message,"error")}
+  finally{setBusy(false);await tick()}
 }
 
-create.onclick=()=>newJob(false);
-pikachu.onclick=()=>newJob(true);
-autopilot.onclick=researchAndImprove;
-rerun.onclick=runSelected;
-tick();setInterval(tick,3000);
+[els.galleryJob,els.iterationsJob,els.filesJob,els.qaJob].forEach(select=>{
+  if(select)select.addEventListener("change",()=>selectJob(select.value));
+});
+els.create.addEventListener("click",()=>createJob(false));
+els.pikachu.addEventListener("click",()=>createJob(true));
+els.autopilot.addEventListener("click",researchAndImprove);
+els.rerun.addEventListener("click",runSelected);
+els.repairPrint.addEventListener("click",repairForPrint);
+
+tick();
+setInterval(tick,3000);
 </script>
 </body></html>"""
     )

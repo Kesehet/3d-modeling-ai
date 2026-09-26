@@ -1,0 +1,25 @@
+name: Build Pokemon Blender Assets
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  blender-assets:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Build Blender image
+        run: docker build -t pokemon-blender .
+      - name: Generate GLB assets
+        run: |
+          mkdir -p generated/assets
+          docker run --rm -v "$PWD:/work" pokemon-blender blender -b --factory-startup -P /work/tools/pokemon_game_assets.py -- /work/generated/assets
+      - name: List generated files
+        run: ls -lh generated/assets
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pokemon-blender-assets
+          path: generated/assets/*.glb
+          if-no-files-found: error

@@ -182,6 +182,44 @@ jobs:
           test "$(xxd -p -l 8 /tmp/smoke-test.png)" = "89504e470d0a1a0a"
           echo "Verified API -> worker -> MCP -> Blender -> PNG."
 
+      - name: Run live Pikachu regression
+        if: ${{ contains(github.event.head_commit.message || '', '[live-pikachu]') }}
+        env:
+          THREED_HOSTNAME: ${{ vars.THREED_HOSTNAME || '3d-modeling-ai.srv1058562.hstgr.cloud' }}
+        run: |
+          set -euo pipefail
+          BASE_URL="https://$THREED_HOSTNAME"
+          JOB_JSON=$(curl --fail --silent --show-error \
+            -H "Content-Type: application/json" \
+            -d '{"prompt":"Create a stylized Pikachu test model","intended_use":"rendering"}' \
+            "$BASE_URL/dashboard/jobs")
+          JOB_ID=$(echo "$JOB_JSON" | jq -r '.job_id')
+          test -n "$JOB_ID"
+          test "$JOB_ID" != "null"
+
+          RESULT=$(curl --fail --silent --show-error --max-time 600 \
+            -X POST "$BASE_URL/dashboard/jobs/$JOB_ID/pikachu")
+          echo "$RESULT" | jq .
+
+          for name in \
+            pikachu-front.png \
+            pikachu-front-left.png \
+            pikachu-left.png \
+            pikachu-back-left.png \
+            pikachu-back.png \
+            pikachu-back-right.png \
+            pikachu-right.png \
+            pikachu-front-right.png \
+            pikachu-top.png
+          do
+            curl --fail --silent --show-error --max-time 30 \
+              "$BASE_URL/dashboard/renders/$JOB_ID/$name" \
+              -o "/tmp/$name"
+            test "$(xxd -p -l 8 "/tmp/$name")" = "89504e470d0a1a0a"
+          done
+
+          echo "Live Pikachu regression passed for job $JOB_ID."
+
       - name: Remove disposable bootstrap
         if: always()
         env:

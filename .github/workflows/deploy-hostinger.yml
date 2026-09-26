@@ -223,6 +223,66 @@ jobs:
 
           echo "Live Pikachu regression passed for job $JOB_ID."
 
+      - name: Run live generic modeling regression
+        if: ${{ contains(github.event.head_commit.message || '', '[live-generic]') }}
+        env:
+          THREED_HOSTNAME: ${{ vars.THREED_HOSTNAME || '3d-modeling-ai.srv1058562.hstgr.cloud' }}
+        run: |
+          set -euo pipefail
+          BASE_URL="https://$THREED_HOSTNAME"
+          JOB_JSON=$(curl --fail --silent --show-error \
+            -H "Content-Type: application/json" \
+            -d '{"prompt":"Create a compact retro desk lamp with a round base, angled neck and dome shade","intended_use":"rendering"}' \
+            "$BASE_URL/dashboard/jobs")
+          JOB_ID=$(echo "$JOB_JSON" | jq -r '.job_id')
+          test -n "$JOB_ID"
+          test "$JOB_ID" != "null"
+
+          HTTP_CODE=$(curl --silent --show-error --max-time 900 \
+            -o /tmp/generic-result.json -w '%{http_code}' \
+            -H "Content-Type: application/json" \
+            -d '{"auto_research":true}' \
+            -X POST "$BASE_URL/dashboard/jobs/$JOB_ID/generate")
+          cat /tmp/generic-result.json | jq . || cat /tmp/generic-result.json
+          test "$HTTP_CODE" -ge 200
+          test "$HTTP_CODE" -lt 300
+          jq -e '.status.stage == "generic_rendered_v1"' /tmp/generic-result.json >/dev/null
+          jq -e '.renders | length == 9' /tmp/generic-result.json >/dev/null
+
+          curl --fail --silent --show-error --max-time 30 \
+            "$BASE_URL/dashboard/renders/$JOB_ID/model-v1-front.png" \
+            -o /tmp/model-v1-front.png
+          test "$(xxd -p -l 8 /tmp/model-v1-front.png)" = "89504e470d0a1a0a"
+
+          for path in \
+            "scene/model-v1.blend" \
+            "exports/model-v1.glb" \
+            "exports/model-v1.obj" \
+            "exports/model-v1.stl" \
+            "exports/model-v1-qa.json"
+          do
+            category=${path%%/*}
+            filename=${path#*/}
+            curl --fail --silent --show-error --max-time 30 \
+              "$BASE_URL/dashboard/artifacts/$JOB_ID/$category/$filename" \
+              -o "/tmp/$filename"
+            test -s "/tmp/$filename"
+          done
+
+          IMPROVE_CODE=$(curl --silent --show-error --max-time 900 \
+            -o /tmp/generic-improve.json -w '%{http_code}' \
+            -H "Content-Type: application/json" \
+            -d '{"iterations":1}' \
+            -X POST "$BASE_URL/dashboard/jobs/$JOB_ID/improve")
+          cat /tmp/generic-improve.json | jq . || cat /tmp/generic-improve.json
+          test "$IMPROVE_CODE" -ge 200
+          test "$IMPROVE_CODE" -lt 300
+          jq -e '.status.stage == "generic_refinement_complete"' /tmp/generic-improve.json >/dev/null
+
+          DASHBOARD=$(curl --fail --silent --show-error "$BASE_URL/dashboard/api")
+          echo "$DASHBOARD" | jq -e --arg id "$JOB_ID" '.jobs[] | select(.job_id == $id) | .renders | length >= 9' >/dev/null
+          echo "Live generic prompt -> research -> SceneSpec -> Blender -> files -> improve regression passed for job $JOB_ID."
+
       - name: Remove disposable bootstrap
         if: always()
         env:

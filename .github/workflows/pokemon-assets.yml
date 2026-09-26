@@ -10,14 +10,19 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - name: Build Blender image
-        run: docker build -t pokemon-blender .
+      - name: Install Blender
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y blender
+          blender --version
       - name: Generate GLB assets
         run: |
           mkdir -p generated/assets
-          docker run --rm -v "$PWD:/work" pokemon-blender blender -b --factory-startup -P /work/tools/pokemon_game_assets.py -- /work/generated/assets
-      - name: List generated files
-        run: ls -lh generated/assets
+          blender -b --factory-startup -P tools/pokemon_game_assets.py -- "$PWD/generated/assets"
+      - name: Verify assets
+        run: |
+          ls -lh generated/assets
+          test "$(find generated/assets -name '*.glb' | wc -l)" -ge 13
       - uses: actions/upload-artifact@v4
         with:
           name: pokemon-blender-assets

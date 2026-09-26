@@ -180,6 +180,42 @@ def _normalize_scene_spec_payload(data: object, fallback_title: str) -> dict:
                 return [float(value[0]), float(value[1]), float(value[2])]
             return default
 
+        def color_hex(value: object) -> str:
+            named = {
+                "white": "#F4F4F2",
+                "black": "#111111",
+                "gray": "#808080",
+                "grey": "#808080",
+                "darkgray": "#3B3F46",
+                "darkgrey": "#3B3F46",
+                "lightgray": "#C9CDD3",
+                "lightgrey": "#C9CDD3",
+                "orange": "#F97316",
+                "safetyorange": "#FF6700",
+                "red": "#DC2626",
+                "green": "#16A34A",
+                "blue": "#2563EB",
+                "yellow": "#FACC15",
+                "brown": "#7C4A2D",
+                "silver": "#A8AFB8",
+                "metal": "#737A84",
+            }
+            if isinstance(value, list) and len(value) >= 3:
+                components = [float(value[0]), float(value[1]), float(value[2])]
+                if max(components) <= 1.0:
+                    components = [component * 255 for component in components]
+                rgb = [max(0, min(255, round(component))) for component in components]
+                return f"#{rgb[0]:02X}{rgb[1]:02X}{rgb[2]:02X}"
+            text = str(value or "").strip()
+            if (
+                len(text) == 7
+                and text.startswith("#")
+                and all(character in "0123456789abcdefABCDEF" for character in text[1:])
+            ):
+                return text.upper()
+            key = "".join(character for character in text.lower() if character.isalnum())
+            return named.get(key, "#808080")
+
         objects.append(
             {
                 "name": str(item.get("name") or f"{shape}-{index + 1}")[:80],
@@ -187,7 +223,7 @@ def _normalize_scene_spec_payload(data: object, fallback_title: str) -> dict:
                 "location": vec3(location, [0.0, 0.0, 0.0]),
                 "scale": vec3(scale, [1.0, 1.0, 1.0]),
                 "rotation_deg": vec3(rotation, [0.0, 0.0, 0.0]),
-                "color": item.get("color", "#808080"),
+                "color": color_hex(item.get("color", "#808080")),
                 "bevel": bool(item.get("bevel", True)),
                 "smooth": bool(item.get("smooth", True)),
             }

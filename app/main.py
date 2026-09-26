@@ -23,7 +23,7 @@ from .config import (
     VISION_MODEL,
     WORKER_URL,
 )
-from .dashboard import dashboard_page, jobs_snapshot, public_render
+from .dashboard import dashboard_page, jobs_snapshot, public_artifact, public_render
 from .ollama import OllamaProxyClient, OllamaProxyError
 from .security import require_api_token
 
@@ -179,6 +179,22 @@ async def dashboard_api() -> dict:
 @app.get("/dashboard/renders/{job_id}/{filename}", include_in_schema=False)
 async def dashboard_render(job_id: str, filename: str) -> FileResponse:
     return FileResponse(public_render(job_id, filename))
+
+
+@app.get("/dashboard/artifacts/{job_id}/{category}/{filename}", include_in_schema=False)
+async def dashboard_artifact(job_id: str, category: str, filename: str) -> FileResponse:
+    path = public_artifact(job_id, category, filename)
+    return FileResponse(path, filename=path.name)
+
+
+@app.post("/dashboard/jobs", include_in_schema=False)
+async def dashboard_create_job(payload: JobCreate) -> dict:
+    return await create_job(payload)
+
+
+@app.post("/dashboard/jobs/{job_id}/pikachu", include_in_schema=False)
+async def dashboard_run_pikachu(job_id: str) -> dict:
+    return await generate_pikachu_test(job_id)
 
 
 @app.get("/health")

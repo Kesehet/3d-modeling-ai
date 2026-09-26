@@ -35,11 +35,26 @@ jobs:
             echo "ready=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Validate Hostinger compose
+      - name: Encode app secrets for Hostinger
         if: steps.secrets.outputs.ready == 'true'
+        id: encoded
         env:
           THREED_API_TOKEN: ${{ secrets.THREED_API_TOKEN }}
           OLLAMA_PROXY_API_KEY: ${{ secrets.OLLAMA_PROXY_API_KEY }}
+        run: |
+          set -euo pipefail
+          THREED_B64=$(printf '%s' "$THREED_API_TOKEN" | base64 -w0)
+          OLLAMA_B64=$(printf '%s' "$OLLAMA_PROXY_API_KEY" | base64 -w0)
+          echo "::add-mask::$THREED_B64"
+          echo "::add-mask::$OLLAMA_B64"
+          echo "threed=$THREED_B64" >> "$GITHUB_OUTPUT"
+          echo "ollama=$OLLAMA_B64" >> "$GITHUB_OUTPUT"
+
+      - name: Validate Hostinger compose
+        if: steps.secrets.outputs.ready == 'true'
+        env:
+          THREED_API_TOKEN_B64: ${{ steps.encoded.outputs.threed }}
+          OLLAMA_PROXY_API_KEY_B64: ${{ steps.encoded.outputs.ollama }}
           THREED_HOSTNAME: ${{ vars.THREED_HOSTNAME || '3d-modeling-ai.srv1058562.hstgr.cloud' }}
         run: docker compose -f compose.hostinger.yaml config
 
@@ -64,10 +79,10 @@ jobs:
           project-name: 3d-modeling-ai
           docker-compose-path: compose.hostinger.yaml
           environment-variables: |
-            THREED_API_TOKEN=${{ secrets.THREED_API_TOKEN }}
+            THREED_API_TOKEN_B64=${{ steps.encoded.outputs.threed }}
             THREED_HOST_PORT=18082
             THREED_HOSTNAME=${{ vars.THREED_HOSTNAME || '3d-modeling-ai.srv1058562.hstgr.cloud' }}
-            OLLAMA_PROXY_API_KEY=${{ secrets.OLLAMA_PROXY_API_KEY }}
+            OLLAMA_PROXY_API_KEY_B64=${{ steps.encoded.outputs.ollama }}
             REASONING_MODEL=${{ vars.REASONING_MODEL || 'gpt-oss:120b' }}
             VISION_MODEL=${{ vars.VISION_MODEL || 'qwen3-vl:235b-cloud' }}
             BLENDER_MCP_HEADLESS_TIMEOUT=3600

@@ -8,10 +8,10 @@ services:
     init: true
     command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8080"]
     environment:
-      THREED_API_TOKEN: ${THREED_API_TOKEN:?THREED_API_TOKEN must be set}
+      THREED_API_TOKEN_B64: ${THREED_API_TOKEN_B64:?THREED_API_TOKEN_B64 must be set}
       WORKER_URL: http://worker:8090
       JOBS_ROOT: /var/lib/3d-modeling-ai/jobs
-      OLLAMA_PROXY_API_KEY: ${OLLAMA_PROXY_API_KEY:?OLLAMA_PROXY_API_KEY must be set}
+      OLLAMA_PROXY_API_KEY_B64: ${OLLAMA_PROXY_API_KEY_B64:?OLLAMA_PROXY_API_KEY_B64 must be set}
       REASONING_MODEL: ${REASONING_MODEL:-gpt-oss:120b}
       VISION_MODEL: ${VISION_MODEL:-qwen3-vl:235b-cloud}
     ports:

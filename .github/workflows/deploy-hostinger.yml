@@ -12,35 +12,31 @@ concurrency:
   group: deploy-hostinger-3d-modeling-ai
   cancel-in-progress: true
 
+env:
+  VPS_ID: "1058562"
+  BOOTSTRAP_PROJECT: 3d-modeling-ai-bootstrap
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
     environment: production
     steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-
       - name: Check deployment secrets
-        id: secrets
         env:
-          HOSTINGER_API_KEY: ${{ secrets.HOSTINGER_API_KEY }}
-          THREED_API_TOKEN: ${{ secrets.THREED_API_TOKEN }}
-          OLLAMA_PROXY_API_KEY: ${{ secrets.OLLAMA_PROXY_API_KEY }}
+          HOSTINGER_API_KEY: ${ secrets.HOSTINGER_API_KEY }}
+          THREED_API_TOKEN: ${ secrets.THREED_API_TOKEN }}
+          OLLAMA_PROXY_API_KEY: ${ secrets.OLLAMA_PROXY_API_KEY }}
         run: |
           set -euo pipefail
-          if [ -z "$HOSTINGER_API_KEY" ] || [ -z "$THREED_API_TOKEN" ] || [ -z "$OLLAMA_PROXY_API_KEY" ]; then
-            echo "ready=false" >> "$GITHUB_OUTPUT"
-            echo "::warning::Deployment skipped: HOSTINGER_API_KEY, THREED_API_TOKEN, and OLLAMA_PROXY_API_KEY are required."
-          else
-            echo "ready=true" >> "$GITHUB_OUTPUT"
-          fi
+          test -n "$HOSTINGER_API_KEY"
+          test -n "$THREED_API_TOKEN"
+          test -n "$OLLAMA_PROXY_API_KEY"
 
-      - name: Encode app secrets for Hostinger
-        if: steps.secrets.outputs.ready == 'true'
+      - name: Encode app secrets
         id: encoded
         env:
-          THREED_API_TOKEN: ${{ secrets.THREED_API_TOKEN }}
-          OLLAMA_PROXY_API_KEY: ${{ secrets.OLLAMA_PROXY_API_KEY }}
+          THREED_API_TOKEN: ${ secrets.THREED_API_TOKEN }}
+          OLLAMA_PROXY_API_KEY: ${ secrets.OLLAMA_PROXY_API_KEY }}
         run: |
           set -euo pipefail
           THREED_B64=$(printf '%s' "$THREED_API_TOKEN" | base64 -w0)
@@ -50,105 +46,149 @@ jobs:
           echo "threed=$THREED_B64" >> "$GITHUB_OUTPUT"
           echo "ollama=$OLLAMA_B64" >> "$GITHUB_OUTPUT"
 
-      - name: Validate Hostinger compose
-        if: steps.secrets.outputs.ready == 'true'
+      - name: Prepare bootstrap compose
         env:
-          THREED_API_TOKEN_B64: ${{ steps.encoded.outputs.threed }}
-          OLLAMA_PROXY_API_KEY_B64: ${{ steps.encoded.outputs.ollama }}
-          THREED_HOSTNAME: ${{ vars.THREED_HOSTNAME || '3d-modeling-ai.srv1058562.hstgr.cloud' }}
-        run: docker compose -f compose.hostinger.yaml config
+          THREED_API_TOKEN_B64: ${ steps.encoded.outputs.threed }}
+          OLLAMA_PROXY_API_KEY_B64: ${ steps.encoded.outputs.ollama }}
+          THREED_HOSTNAME: ${ vars.THREED_HOSTNAME || '3d-modeling-ai.srv1058562.hstgr.cloud' }}
+        run: |
+          cat > "$RUNNER_TEMP/bootstrap.yml" <<'YAML'
+          services:
+            bootstrap:
+              image: docker:27-cli
+              restart: "no"
+              environment:
+                GITHUB_REPOSITORY: ${GITHUB_REPOSITORY:?required}
+                GITHUB_SHA: ${GITHUB_SHA:?required}
+                THREED_API_TOKEN_B64: ${THREED_API_TOKEN_B64:?required}
+                OLLAMA_PROXY_API_KEY_B64: ${OLLAMA_PROXY_API_KEY_B64:?required}
+                THREED_HOSTNAME: ${THREED_HOSTNAME:-3d-modeling-ai.srv1058562.hstgr.cloud}
+              volumes:
+                - /var/run/docker.sock:/var/run/docker.sock
+                - /opt/3d-modeling-ai:/workspace
+              command:
+                - /bin/sh
+                - -ec
+                - |
+                  apk add --no-cache curl tar >/dev/null
+                  curl --fail --location --silent --show-error \
+                    "https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_SHA}/scripts/vps_bootstrap.sh" \
+                    --output /tmp/vps_bootstrap.sh
+                  chmod +x /tmp/vps_bootstrap.sh
+                  exec /tmp/vps_bootstrap.sh
+          YAML
 
-      - name: Deploy isolated Hostinger Docker project
-        if: steps.secrets.outputs.ready == 'true'
-        uses: hostinger/deploy-on-vps@v2
-        with:
-          api-key: ${{ secrets.HOSTINGER_API_KEY }}
-          virtual-machine: "1058562"
-          project-name: 3d-modeling-ai
-          docker-compose-path: compose.hostinger.yaml
-          environment-variables: |
-            THREED_API_TOKEN_B64=${{ steps.encoded.outputs.threed }}
-            THREED_HOST_PORT=18082
-            THREED_HOSTNAME=${{ vars.THREED_HOSTNAME || '3d-modeling-ai.srv1058562.hstgr.cloud' }}
-            OLLAMA_PROXY_API_KEY_B64=${{ steps.encoded.outputs.ollama }}
-            REASONING_MODEL=${{ vars.REASONING_MODEL || 'gpt-oss:120b' }}
-            VISION_MODEL=${{ vars.VISION_MODEL || 'qwen3-vl:235b-cloud' }}
-            BLENDER_MCP_HEADLESS_TIMEOUT=3600
-            BLENDER_WORKER_MEMORY=4g
-            BLENDER_WORKER_CPUS=3.0
+          runtime_env=$(printf '%s\n' \
+            "GITHUB_REPOSITORY=$GITHUB_REPOSITORY" \
+            "GITHUB_SHA=$GITHUB_SHA" \
+            "THREED_API_TOKEN_B64=$THREED_API_TOKEN_B64" \
+            "OLLAMA_PROXY_API_KEY_B64=$OLLAMA_PROXY_API_KEY_B64" \
+            "THREED_HOSTNAME=$THREED_HOSTNAME")
+          jq -n \
+            --arg project_name "$BOOTSTRAP_PROJECT" \
+            --rawfile content "$RUNNER_TEMP/bootstrap.yml" \
+            --arg environment "$runtime_env" \
+            '{project_name:$project_name,content:$content,environment:$environment}' \
+            > "$RUNNER_TEMP/bootstrap-payload.json"
 
-      - name: Wait for healthy containers
-        if: steps.secrets.outputs.ready == 'true'
+      - name: Launch bootstrap through Hostinger
         env:
-          HOSTINGER_API_KEY: ${{ secrets.HOSTINGER_API_KEY }}
+          HOSTINGER_API_KEY: ${ secrets.HOSTINGER_API_KEY }}
         run: |
           set -euo pipefail
-          URL="https://developers.hostinger.com/api/vps/v1/virtual-machines/1058562/docker/3d-modeling-ai/containers"
-          sleep 10
+          base="https://developers.hostinger.com/api/vps/v1/virtual-machines/$VPS_ID/docker"
+          curl --silent --show-error --request DELETE \
+            --header "Authorization: Bearer $HOSTINGER_API_KEY" \
+            "$base/$BOOTSTRAP_PROJECT/down" >/dev/null 2>&1 || true
+          sleep 3
+          curl --fail --silent --show-error \
+            --request POST \
+            --header "Authorization: Bearer $HOSTINGER_API_KEY" \
+            --header 'Content-Type: application/json' \
+            --data-binary @"$RUNNER_TEMP/bootstrap-payload.json" \
+            "$base" >/dev/null
+          echo "Bootstrap submitted to VPS."
 
-          for attempt in $(seq 1 36); do
-            RESPONSE=$(curl --fail --silent --show-error -H "Authorization: Bearer $HOSTINGER_API_KEY" "$URL" || echo '[]')
-            echo "$RESPONSE" | jq -r '[.[] | "\(.name): state=\(.state), health=\(.health // "n/a")"] | join(" | ")'
-
-            FAILED=$(echo "$RESPONSE" | jq '[.[] | select(.state == "exited" or .state == "dead" or .health == "unhealthy")] | length')
-            if [ "$FAILED" -gt 0 ]; then
-              echo "$RESPONSE" | jq .
-              curl --silent --show-error \
-                -H "Authorization: Bearer $HOSTINGER_API_KEY" \
-                "https://developers.hostinger.com/api/vps/v1/virtual-machines/1058562/docker/3d-modeling-ai/logs" || true
-              exit 1
-            fi
-
-            if echo "$RESPONSE" | jq -e '
-              length >= 2 and
-              all(.[]; .state == "running" and (.health == null or .health == "" or .health == "healthy"))
-            ' >/dev/null; then
-              echo "3d-modeling-ai containers are running and healthy."
+      - name: Wait for VPS build and startup
+        env:
+          HOSTINGER_API_KEY: ${ secrets.HOSTINGER_API_KEY }}
+        run: |
+          set -euo pipefail
+          base="https://developers.hostinger.com/api/vps/v1/virtual-machines/$VPS_ID/docker"
+          for attempt in $(seq 1 180); do
+            containers=$(curl --silent --show-error --header "Authorization: Bearer $HOSTINGER_API_KEY" \
+              "$base/$BOOTSTRAP_PROJECT/containers" 2>/dev/null || echo '[]')
+            logs=$(curl --silent --show-error --header "Authorization: Bearer $HOSTINGER_API_KEY" \
+              "$base/$BOOTSTRAP_PROJECT/logs" 2>/dev/null || echo '[]')
+            if echo "$logs" | jq -e '[.[]?.entries[]?.line // ""] | any(. == "THREED_BOOTSTRAP_OK")' >/dev/null 2>&1; then
+              echo "VPS build and startup completed."
               exit 0
             fi
-
-            sleep 10
+            state=$(echo "$containers" | jq -r 'if type == "array" and length > 0 then .[0].state // "unknown" else "pending" end' 2>/dev/null || echo pending)
+            echo "Bootstrap attempt $attempt/180: state=$state"
+            if [ "$state" = exited ] || [ "$state" = dead ]; then
+              echo "Bootstrap failed. Recent VPS output:" >&2
+              echo "$logs" | jq -r '.[]?.entries[-240:][]? | "\(.timestamp // "") \(.line // "")"' || true
+              exit 1
+            fi
+            sleep 5
           done
-
-          echo "Timed out waiting for the Hostinger project to expose healthy containers." >&2
-          curl --silent --show-error \
-            -H "Authorization: Bearer $HOSTINGER_API_KEY" \
-            "https://developers.hostinger.com/api/vps/v1/virtual-machines/1058562/docker/3d-modeling-ai/logs" || true
+          echo "Bootstrap timed out." >&2
+          logs=$(curl --silent --show-error --header "Authorization: Bearer $HOSTINGER_API_KEY" \
+            "$base/$BOOTSTRAP_PROJECT/logs" 2>/dev/null || echo '[]')
+          echo "$logs" | jq -r '.[]?.entries[-240:][]? | "\(.timestamp // "") \(.line // "")"' || true
           exit 1
 
       - name: Verify public API and Blender MCP
-        if: steps.secrets.outputs.ready == 'true'
         env:
-          THREED_API_TOKEN: ${{ secrets.THREED_API_TOKEN }}
-          THREED_HOSTNAME: ${{ vars.THREED_HOSTNAME || '3d-modeling-ai.srv1058562.hstgr.cloud' }}
+          THREED_API_TOKEN: ${ secrets.THREED_API_TOKEN }}
+          THREED_HOSTNAME: ${ vars.THREED_HOSTNAME || '3d-modeling-ai.srv1058562.hstgr.cloud' }}
         run: |
           set -euo pipefail
           BASE_URL="https://$THREED_HOSTNAME"
-
-          for attempt in $(seq 1 36); do
-            if HEALTH=$(curl --fail --silent --show-error "$BASE_URL/health"); then
+          for attempt in $(seq 1 48); do
+            if HEALTH=$(curl --fail --silent --show-error --max-time 10 "$BASE_URL/health"); then
               echo "$HEALTH" | jq .
               if echo "$HEALTH" | jq -e '.ok == true' >/dev/null; then
                 break
               fi
             fi
-            if [ "$attempt" -eq 36 ]; then
+            if [ "$attempt" -eq 48 ]; then
               echo "Public API did not become healthy." >&2
               exit 1
             fi
             sleep 10
           done
 
-          JOB_JSON=$(curl --fail --silent --show-error             -H "Authorization: Bearer $THREED_API_TOKEN"             -H "Content-Type: application/json"             -d '{"prompt":"Deployment MCP smoke test cube","intended_use":"rendering"}'             "$BASE_URL/v1/jobs")
+          JOB_JSON=$(curl --fail --silent --show-error \
+            -H "Authorization: Bearer $THREED_API_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d '{"prompt":"Deployment MCP smoke test cube","intended_use":"rendering"}' \
+            "$BASE_URL/v1/jobs")
           JOB_ID=$(echo "$JOB_JSON" | jq -r '.job_id')
           test -n "$JOB_ID"
           test "$JOB_ID" != "null"
 
-          SMOKE=$(curl --fail --silent --show-error             -H "Authorization: Bearer $THREED_API_TOKEN"             -X POST             "$BASE_URL/v1/jobs/$JOB_ID/smoke-test")
+          SMOKE=$(curl --fail --silent --show-error \
+            -H "Authorization: Bearer $THREED_API_TOKEN" \
+            -X POST "$BASE_URL/v1/jobs/$JOB_ID/smoke-test")
           echo "$SMOKE" | jq .
           echo "$SMOKE" | jq -e '.status.stage == "mcp_smoke_test_complete"' >/dev/null
 
-          curl --fail --silent --show-error             -H "Authorization: Bearer $THREED_API_TOKEN"             "$BASE_URL/v1/jobs/$JOB_ID/artifacts/renders/smoke-test.png"             -o /tmp/smoke-test.png
-
+          curl --fail --silent --show-error \
+            -H "Authorization: Bearer $THREED_API_TOKEN" \
+            "$BASE_URL/v1/jobs/$JOB_ID/artifacts/renders/smoke-test.png" \
+            -o /tmp/smoke-test.png
           test "$(xxd -p -l 8 /tmp/smoke-test.png)" = "89504e470d0a1a0a"
-          echo "Verified API -> Blender worker -> MCP -> headless Blender -> PNG render."
+          echo "Verified API -> worker -> MCP -> Blender -> PNG."
+
+      - name: Remove disposable bootstrap
+        if: always()
+        env:
+          HOSTINGER_API_KEY: ${ secrets.HOSTINGER_API_KEY }}
+        run: |
+          set +e
+          curl --silent --show-error --request DELETE \
+            --header "Authorization: Bearer $HOSTINGER_API_KEY" \
+            "https://developers.hostinger.com/api/vps/v1/virtual-machines/$VPS_ID/docker/$BOOTSTRAP_PROJECT/down" >/dev/null || true
+          rm -f "$RUNNER_TEMP/bootstrap.yml" "$RUNNER_TEMP/bootstrap-payload.json" 2>/dev/null || true

@@ -58,21 +58,9 @@ jobs:
           THREED_HOSTNAME: ${{ vars.THREED_HOSTNAME || '3d-modeling-ai.srv1058562.hstgr.cloud' }}
         run: docker compose -f compose.hostinger.yaml config
 
-      - name: Capture current container generation
-        if: steps.secrets.outputs.ready == 'true'
-        id: previous
-        env:
-          HOSTINGER_API_KEY: ${{ secrets.HOSTINGER_API_KEY }}
-        run: |
-          set -euo pipefail
-          URL="https://developers.hostinger.com/api/vps/v1/virtual-machines/1058562/docker/3d-modeling-ai/containers"
-          RESPONSE=$(curl --fail --silent --show-error -H "Authorization: Bearer $HOSTINGER_API_KEY" "$URL" || echo '[]')
-          IDS=$(echo "$RESPONSE" | jq -r 'map(.id) | join(",")')
-          echo "ids=$IDS" >> "$GITHUB_OUTPUT"
-
       - name: Deploy isolated Hostinger Docker project
         if: steps.secrets.outputs.ready == 'true'
-        uses: hostinger/deploy-on-vps@b0868cec74bfa63af6bfa7bdb0dfee2f9bef13ea
+        uses: hostinger/deploy-on-vps@v2
         with:
           api-key: ${{ secrets.HOSTINGER_API_KEY }}
           virtual-machine: "1058562"
@@ -89,43 +77,43 @@ jobs:
             BLENDER_WORKER_MEMORY=4g
             BLENDER_WORKER_CPUS=3.0
 
-      - name: Wait for new containers
+      - name: Wait for healthy containers
         if: steps.secrets.outputs.ready == 'true'
         env:
           HOSTINGER_API_KEY: ${{ secrets.HOSTINGER_API_KEY }}
-          PREVIOUS_IDS: ${{ steps.previous.outputs.ids }}
         run: |
           set -euo pipefail
           URL="https://developers.hostinger.com/api/vps/v1/virtual-machines/1058562/docker/3d-modeling-ai/containers"
-          sleep 15
+          sleep 10
 
-          for attempt in $(seq 1 60); do
+          for attempt in $(seq 1 36); do
             RESPONSE=$(curl --fail --silent --show-error -H "Authorization: Bearer $HOSTINGER_API_KEY" "$URL" || echo '[]')
-            NEW=$(echo "$RESPONSE" | jq --arg previous "$PREVIOUS_IDS" '
-              ($previous | split(",") | map(select(length > 0))) as $old |
-              [.[] | select(.id as $id | ($old | index($id) | not))]
-            ')
             echo "$RESPONSE" | jq -r '[.[] | "\(.name): state=\(.state), health=\(.health // "n/a")"] | join(" | ")'
 
-            FAILED=$(echo "$NEW" | jq '[.[] | select(.state == "exited" or .state == "dead" or .health == "unhealthy")] | length')
+            FAILED=$(echo "$RESPONSE" | jq '[.[] | select(.state == "exited" or .state == "dead" or .health == "unhealthy")] | length')
             if [ "$FAILED" -gt 0 ]; then
-              echo "$NEW" | jq .
-              curl --silent --show-error                 -H "Authorization: Bearer $HOSTINGER_API_KEY"                 "https://developers.hostinger.com/api/vps/v1/virtual-machines/1058562/docker/3d-modeling-ai/logs" || true
+              echo "$RESPONSE" | jq .
+              curl --silent --show-error \
+                -H "Authorization: Bearer $HOSTINGER_API_KEY" \
+                "https://developers.hostinger.com/api/vps/v1/virtual-machines/1058562/docker/3d-modeling-ai/logs" || true
               exit 1
             fi
 
-            if echo "$NEW" | jq -e '
+            if echo "$RESPONSE" | jq -e '
               length >= 2 and
               all(.[]; .state == "running" and (.health == null or .health == "" or .health == "healthy"))
             ' >/dev/null; then
-              echo "3d-modeling-ai is running on a new container generation."
+              echo "3d-modeling-ai containers are running and healthy."
               exit 0
             fi
+
             sleep 10
           done
 
-          echo "Timed out waiting for healthy containers." >&2
-          curl --silent --show-error             -H "Authorization: Bearer $HOSTINGER_API_KEY"             "https://developers.hostinger.com/api/vps/v1/virtual-machines/1058562/docker/3d-modeling-ai/logs" || true
+          echo "Timed out waiting for the Hostinger project to expose healthy containers." >&2
+          curl --silent --show-error \
+            -H "Authorization: Bearer $HOSTINGER_API_KEY" \
+            "https://developers.hostinger.com/api/vps/v1/virtual-machines/1058562/docker/3d-modeling-ai/logs" || true
           exit 1
 
       - name: Verify public API and Blender MCP

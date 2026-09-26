@@ -1,0 +1,43 @@
+services:
+  api:
+    build:
+      context: .
+      args:
+        BLENDER_MCP_COMMIT: ${BLENDER_MCP_UPSTREAM_COMMIT:-428f60cdb819c55c69d67eef681f0318e464e0e9}
+    image: 3d-modeling-ai:local
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8080"]
+    environment:
+      THREED_API_TOKEN: ${THREED_API_TOKEN:-change-me}
+      WORKER_URL: http://worker:8090
+      JOBS_ROOT: /var/lib/3d-modeling-ai/jobs
+      OLLAMA_PROXY_BASE_URL: ${OLLAMA_PROXY_BASE_URL:-}
+      OLLAMA_PROXY_API_KEY: ${OLLAMA_PROXY_API_KEY:-}
+      REASONING_MODEL: ${REASONING_MODEL:-gpt-oss:120b}
+      VISION_MODEL: ${VISION_MODEL:-qwen3-vl:235b-cloud}
+    ports:
+      - "${THREED_HOST_PORT:-18082}:8080"
+    volumes:
+      - jobs-data:/var/lib/3d-modeling-ai/jobs
+    depends_on:
+      worker:
+        condition: service_healthy
+
+  worker:
+    image: 3d-modeling-ai:local
+    command: ["uvicorn", "app.worker:app", "--host", "0.0.0.0", "--port", "8090"]
+    environment:
+      JOBS_ROOT: /var/lib/3d-modeling-ai/jobs
+      BLENDER_BIN: /usr/bin/blender
+      BLENDER_MCP_HEADLESS: "1"
+      BLENDER_MCP_HEADLESS_TIMEOUT: ${BLENDER_MCP_HEADLESS_TIMEOUT:-3600}
+    volumes:
+      - jobs-data:/var/lib/3d-modeling-ai/jobs
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/health', timeout=5).read()"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+volumes:
+  jobs-data:

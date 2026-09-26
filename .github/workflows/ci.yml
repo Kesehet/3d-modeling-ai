@@ -1,0 +1,37 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: pip install ".[dev]"
+      - name: Ruff
+        run: ruff check app tests
+      - name: Tests
+        run: pytest -q
+      - name: Compile
+        run: python -m compileall -q app
+
+  compose:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Validate local compose
+        run: docker compose -f compose.yaml config
+      - name: Validate Hostinger compose
+        env:
+          THREED_API_TOKEN: ci-placeholder
+          THREED_HOSTNAME: 3d-modeling-ai.example.invalid
+        run: docker compose -f compose.hostinger.yaml config

@@ -1,0 +1,112 @@
+name: Deploy Hostinger VPS
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-hostinger-3d-modeling-ai
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Check deployment secrets
+        id: secrets
+        env:
+          HOSTINGER_API_KEY: ${{ secrets.HOSTINGER_API_KEY }}
+          THREED_API_TOKEN: ${{ secrets.THREED_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "$HOSTINGER_API_KEY" ] || [ -z "$THREED_API_TOKEN" ]; then
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::Deployment skipped: add HOSTINGER_API_KEY and THREED_API_TOKEN secrets to this repository."
+          else
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Validate Hostinger compose
+        if: steps.secrets.outputs.ready == 'true'
+        env:
+          THREED_API_TOKEN: ${{ secrets.THREED_API_TOKEN }}
+          THREED_HOSTNAME: ${{ vars.THREED_HOSTNAME || '3d-modeling-ai.srv1058562.hstgr.cloud' }}
+        run: docker compose -f compose.hostinger.yaml config
+
+      - name: Capture current container generation
+        if: steps.secrets.outputs.ready == 'true'
+        id: previous
+        env:
+          HOSTINGER_API_KEY: ${{ secrets.HOSTINGER_API_KEY }}
+        run: |
+          set -euo pipefail
+          URL="https://developers.hostinger.com/api/vps/v1/virtual-machines/1058562/docker/3d-modeling-ai/containers"
+          RESPONSE=$(curl --fail --silent --show-error -H "Authorization: Bearer $HOSTINGER_API_KEY" "$URL" || echo '[]')
+          IDS=$(echo "$RESPONSE" | jq -r 'map(.id) | join(",")')
+          echo "ids=$IDS" >> "$GITHUB_OUTPUT"
+
+      - name: Deploy isolated Hostinger Docker project
+        if: steps.secrets.outputs.ready == 'true'
+        uses: hostinger/deploy-on-vps@b0868cec74bfa63af6bfa7bdb0dfee2f9bef13ea
+        with:
+          api-key: ${{ secrets.HOSTINGER_API_KEY }}
+          virtual-machine: "1058562"
+          project-name: 3d-modeling-ai
+          docker-compose-path: compose.hostinger.yaml
+          environment-variables: |
+            THREED_API_TOKEN=${{ secrets.THREED_API_TOKEN }}
+            THREED_HOST_PORT=18082
+            THREED_HOSTNAME=${{ vars.THREED_HOSTNAME || '3d-modeling-ai.srv1058562.hstgr.cloud' }}
+            OLLAMA_PROXY_BASE_URL=${{ secrets.OLLAMA_PROXY_BASE_URL }}
+            OLLAMA_PROXY_API_KEY=${{ secrets.OLLAMA_PROXY_API_KEY }}
+            REASONING_MODEL=${{ vars.REASONING_MODEL || 'gpt-oss:120b' }}
+            VISION_MODEL=${{ vars.VISION_MODEL || 'qwen3-vl:235b-cloud' }}
+            BLENDER_MCP_UPSTREAM_COMMIT=428f60cdb819c55c69d67eef681f0318e464e0e9
+            BLENDER_MCP_HEADLESS_TIMEOUT=3600
+            BLENDER_WORKER_MEMORY=4g
+            BLENDER_WORKER_CPUS=3.0
+
+      - name: Wait for new containers
+        if: steps.secrets.outputs.ready == 'true'
+        env:
+          HOSTINGER_API_KEY: ${{ secrets.HOSTINGER_API_KEY }}
+          PREVIOUS_IDS: ${{ steps.previous.outputs.ids }}
+        run: |
+          set -euo pipefail
+          URL="https://developers.hostinger.com/api/vps/v1/virtual-machines/1058562/docker/3d-modeling-ai/containers"
+          sleep 15
+
+          for attempt in $(seq 1 60); do
+            RESPONSE=$(curl --fail --silent --show-error -H "Authorization: Bearer $HOSTINGER_API_KEY" "$URL" || echo '[]')
+            NEW=$(echo "$RESPONSE" | jq --arg previous "$PREVIOUS_IDS" '
+              ($previous | split(",") | map(select(length > 0))) as $old |
+              [.[] | select(.id as $id | ($old | index($id) | not))]
+            ')
+            echo "$RESPONSE" | jq -r '[.[] | "\(.name): state=\(.state), health=\(.health // "n/a")"] | join(" | ")'
+
+            FAILED=$(echo "$NEW" | jq '[.[] | select(.state == "exited" or .state == "dead" or .health == "unhealthy")] | length')
+            if [ "$FAILED" -gt 0 ]; then
+              echo "$NEW" | jq .
+              exit 1
+            fi
+
+            if echo "$NEW" | jq -e '
+              length >= 2 and
+              all(.[]; .state == "running" and (.health == null or .health == "" or .health == "healthy"))
+            ' >/dev/null; then
+              echo "3d-modeling-ai is running on a new container generation."
+              exit 0
+            fi
+            sleep 10
+          done
+
+          echo "Timed out waiting for healthy containers." >&2
+          exit 1

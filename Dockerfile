@@ -1,0 +1,49 @@
+FROM ubuntu:24.04
+
+ARG BLENDER_MCP_COMMIT=428f60cdb819c55c69d67eef681f0318e464e0e9
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PATH=/opt/venv/bin:$PATH \
+    BLENDER_BIN=/usr/bin/blender \
+    BLENDER_MCP_HEADLESS=1 \
+    HOME=/tmp/home
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        blender \
+        ca-certificates \
+        curl \
+        git \
+        python3 \
+        python3-pip \
+        python3-venv \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN python3 -m venv /opt/venv \
+    && /opt/venv/bin/pip install --upgrade pip setuptools wheel
+
+# "Fork" the selected upstream into the runtime in a reproducible way.
+# We intentionally pin the exact commit instead of following upstream main.
+RUN git clone https://github.com/djeada/blender-mcp-server.git /opt/blender-mcp \
+    && cd /opt/blender-mcp \
+    && git checkout "$BLENDER_MCP_COMMIT" \
+    && /opt/venv/bin/pip install .
+
+WORKDIR /app
+COPY pyproject.toml ./
+COPY app ./app
+RUN /opt/venv/bin/pip install .
+
+RUN groupadd --system threed \
+    && useradd --system --gid threed --create-home --home-dir /home/threed threed \
+    && mkdir -p /var/lib/3d-modeling-ai/jobs /tmp/home \
+    && chown -R threed:threed /app /var/lib/3d-modeling-ai /tmp/home /home/threed
+
+USER threed
+
+EXPOSE 8080 8090
+
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8080"]

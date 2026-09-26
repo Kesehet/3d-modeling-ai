@@ -123,6 +123,21 @@ def _write_llm_log(root: Path, prefix: str, payload: dict) -> str:
     return filename
 
 
+def _worker_blender_error(result: dict) -> str | None:
+    if result.get("is_error"):
+        return "Blender MCP reported a tool error."
+    for item in result.get("content", []):
+        if not isinstance(item, str):
+            continue
+        try:
+            payload = json.loads(item)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict) and payload.get("error"):
+            return str(payload["error"])
+    return None
+
+
 def _image_info(data: bytes) -> tuple[str, str, int, int]:
     try:
         with Image.open(BytesIO(data)) as image:
@@ -476,6 +491,11 @@ async def generate_pikachu_test(job_id: str) -> dict:
         _write_status(root, state="failed", stage="pikachu_build", error=str(exc))
         raise HTTPException(status_code=502, detail=f"Pikachu Blender build failed: {exc}") from exc
 
+    blender_error = _worker_blender_error(result)
+    if blender_error:
+        _write_status(root, state="failed", stage="pikachu_build", error=blender_error)
+        raise HTTPException(status_code=502, detail=f"Blender script failed: {blender_error}")
+
     expected = [
         "pikachu-front.png",
         "pikachu-front-left.png",
@@ -556,6 +576,11 @@ __result__ = {"blend_path": args["blend_path"], "render_path": args["render_path
     except (httpx.HTTPError, ValueError) as exc:
         _write_status(root, state="failed", stage="mcp_smoke_test", error=str(exc))
         raise HTTPException(status_code=502, detail=f"Blender worker failed: {exc}") from exc
+
+    blender_error = _worker_blender_error(result)
+    if blender_error:
+        _write_status(root, state="failed", stage="mcp_smoke_test", error=blender_error)
+        raise HTTPException(status_code=502, detail=f"Blender script failed: {blender_error}")
 
     status = _write_status(
         root,

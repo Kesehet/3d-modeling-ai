@@ -24,9 +24,9 @@ from .config import (
     WORKER_URL,
 )
 from .dashboard import dashboard_page, jobs_snapshot, public_artifact, public_render
+from .generic_builder import generic_scene_script
 from .history import append_history, load_history
 from .ollama import OllamaProxyClient, OllamaProxyError
-from .generic_builder import generic_scene_script
 from .repair import print_repair_script
 from .research import research_web_references, write_research_manifest
 from .security import require_api_token

@@ -33,5 +33,6 @@ jobs:
       - name: Validate Hostinger compose
         env:
           THREED_API_TOKEN: ci-placeholder
+          OLLAMA_PROXY_API_KEY: ci-placeholder
           THREED_HOSTNAME: 3d-modeling-ai.example.invalid
         run: docker compose -f compose.hostinger.yaml config

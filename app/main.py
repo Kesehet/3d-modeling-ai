@@ -413,6 +413,61 @@ def _normalize_scene_spec_payload(data: object, fallback_title: str) -> dict:
     return normalized
 
 
+def _scene_spec_semantic_tokens(spec: GenericSceneSpec) -> set[str]:
+    ignored = {
+        "left", "right", "front", "rear", "back", "top", "bottom",
+        "upper", "lower", "inner", "outer", "main", "small", "large",
+        "primary", "secondary", "part", "object", "segment", "side",
+    }
+    tokens: set[str] = set()
+    for obj in spec.objects:
+        normalized = "".join(character if character.isalnum() else " " for character in obj.name.lower())
+        for token in normalized.split():
+            if len(token) >= 3 and not token.isdigit() and token not in ignored:
+                tokens.add(token)
+    return tokens
+
+
+def _scene_spec_regression_reasons(
+    current: GenericSceneSpec,
+    revised: GenericSceneSpec,
+) -> list[str]:
+    """Conservative pre-render guard against destructive LLM SceneSpec rewrites."""
+    reasons: list[str] = []
+    current_count = len(current.objects)
+    revised_count = len(revised.objects)
+
+    if current_count >= 5:
+        minimum_count = max(3, (current_count * 4 + 4) // 5)  # ceil(80%)
+        if revised_count < minimum_count:
+            reasons.append(
+                f"object count collapsed from {current_count} to {revised_count}; "
+                f"minimum safe count is {minimum_count}"
+            )
+
+    current_tokens = _scene_spec_semantic_tokens(current)
+    revised_tokens = _scene_spec_semantic_tokens(revised)
+    if len(current_tokens) >= 4:
+        minimum_tokens = max(3, (len(current_tokens) * 2 + 2) // 3)  # ceil(2/3)
+        retained = len(current_tokens & revised_tokens)
+        if retained < minimum_tokens:
+            lost = sorted(current_tokens - revised_tokens)
+            reasons.append(
+                "semantic part coverage regressed: "
+                f"retained {retained}/{len(current_tokens)} tokens; "
+                f"lost {', '.join(lost[:12])}"
+            )
+
+    current_rods = sum(1 for obj in current.objects if obj.shape == "rod")
+    revised_rods = sum(1 for obj in revised.objects if obj.shape == "rod")
+    if current_rods >= 2 and revised_rods < max(1, current_rods // 2):
+        reasons.append(
+            f"connector/limb rods collapsed from {current_rods} to {revised_rods}"
+        )
+
+    return reasons
+
+
 class ModelingStage(BaseModel):
     name: str
     objective: str
@@ -1027,11 +1082,15 @@ async def _build_generic_scene_spec(job_id: str, auto_research: bool) -> Generic
         "You are a 3D blockout planner. Return a safe declarative scene made only from the allowed "
         "primitive types in the supplied JSON schema. Use the exact keys title, objects, name, shape, "
         "location, scale, rotation_deg, start, end, radius, color, bevel, and smooth. Use shape='rod' "
-        "with start/end/radius for limbs, handles, struts, antennas, and connectors because it aligns "
-        "itself between two points. Do not output Python. Build a recognizable model "
-        "using as few primitives as practical while preserving silhouette and major parts. Coordinates "
-        "should normally stay within -8..8. Place the subject around the origin and keep its lowest major "
-        "geometry near Z=0. Use meaningful semantic object names and realistic relative proportions."
+        "with start/end/radius for limbs, handles, stems, necks, struts, antennas, and connectors because "
+        "it aligns itself between two points. Do not output Python. Build a recognizable model with enough "
+        "separate primitives to represent EVERY requested major part and silhouette-defining feature. Never "
+        "collapse distinct requested parts into a generic blob merely to reduce primitive count. Major parts "
+        "that are physically connected must touch or overlap their parent geometry; do not leave floating "
+        "stems, necks, limbs, handles, shades, ears, tails, or connectors. Coordinates should normally stay "
+        "within -8..8. Place the subject around the origin and keep its lowest major geometry near Z=0. "
+        "Use meaningful semantic object names and realistic relative proportions. Before returning JSON, "
+        "mentally inventory the requested parts and verify that each is represented in objects."
     )
     prompt = (
         f"User request: {job_request.get('prompt', '')}\n"
@@ -1040,7 +1099,10 @@ async def _build_generic_scene_spec(job_id: str, auto_research: bool) -> Generic
         f"Visual reference analysis: {json.dumps(visual_context, ensure_ascii=False)}\n"
         f"Web research context: {json.dumps(research_context, ensure_ascii=False)}\n"
         "Create a primitive-based blockout scene specification. If the subject is organic, approximate "
-        "it with overlapping ellipsoids/cones. If hard-surface, prefer cubes/cylinders/torus forms."
+        "it with overlapping ellipsoids/cones while keeping distinct head/body/limb/appendage/face forms "
+        "when the prompt calls for them. If hard-surface, use cubes/cylinders/torus/rods as needed and keep "
+        "the mechanical connection chain explicit (for example base -> stem/neck -> joint -> shade). "
+        "Favor recognizability, requested-part coverage and physical connectivity over primitive count."
     )
     try:
         result = await OllamaProxyClient().chat_json(
@@ -1194,6 +1256,7 @@ async def refine_generic_scene(job_id: str, request: GenericRefineRequest) -> di
     current_payload = json.loads(spec_files[-1].read_text(encoding="utf-8"))
     current_spec = GenericSceneSpec.model_validate(current_payload["spec"])
     completed = []
+    rejected: dict | None = None
 
     for _ in range(request.iterations):
         vision = await analyze_vision(
@@ -1220,15 +1283,22 @@ async def refine_generic_scene(job_id: str, request: GenericRefineRequest) -> di
 
         system = (
             "Revise a safe declarative 3D SceneSpec using the visual critique. Return JSON only matching "
-            "the supplied schema. You may add, remove, resize, rotate, recolor, or reposition objects, but "
-            "you may only use the schema's allowed primitive shapes. Prefer rod objects for articulated limbs, "
-            "struts and connectors when two endpoints are known. Preserve good geometry and make the "
-            "smallest changes that address the critique. Do not output Python."
+            "the supplied schema. This is a SURGICAL REPAIR, not a redesign. Preserve every unaffected "
+            "current object and its semantic role. Fix only the 1-3 highest-priority visible defects per pass. "
+            "Do not simplify the model, remove defining parts, or replace a detailed assembly with generic "
+            "blobs. You may add, resize, rotate, recolor, or reposition objects; remove an object only when "
+            "the critique explicitly identifies it as wrong or redundant. You may only use the schema's "
+            "allowed primitive shapes. Prefer rod objects for articulated limbs, stems, necks, struts and "
+            "connectors when two endpoints are known. Connected parts must touch or overlap their parent "
+            "geometry rather than float. Preserve good geometry and make the smallest changes that address "
+            "the critique. Do not output Python."
         )
         prompt = (
             f"Current SceneSpec: {json.dumps(current_spec.model_dump(), ensure_ascii=False)}\n"
             f"Visual critique: {json.dumps(report, ensure_ascii=False)}\n"
-            "Return the improved full SceneSpec."
+            "Return the improved full SceneSpec. Keep unaffected object names and parts. Do not reduce the "
+            "overall part inventory unless the critique explicitly requires removal. The candidate will be "
+            "rejected automatically if it loses too many existing semantic parts."
         )
         try:
             result = await OllamaProxyClient().chat_json(
@@ -1248,6 +1318,22 @@ async def refine_generic_scene(job_id: str, request: GenericRefineRequest) -> di
             append_history(root, "generic_refinement_stop", reason="revised SceneSpec was unchanged")
             break
 
+        regression_reasons = _scene_spec_regression_reasons(current_spec, revised)
+        if regression_reasons:
+            rejected = {
+                "reasons": regression_reasons,
+                "current_object_count": len(current_spec.objects),
+                "candidate_object_count": len(revised.objects),
+            }
+            append_history(
+                root,
+                "generic_refinement_rejected",
+                reasons=regression_reasons,
+                current_object_count=len(current_spec.objects),
+                candidate_object_count=len(revised.objects),
+            )
+            break
+
         version = 1 + len(list((root / "scene").glob("model-v*.blend")))
         build = await _execute_generic_spec(job_id, revised, version=version)
         append_history(
@@ -1261,8 +1347,14 @@ async def refine_generic_scene(job_id: str, request: GenericRefineRequest) -> di
         completed.append({"vision": vision, "spec": revised.model_dump(), "build": build})
         current_spec = revised
 
-    status = _write_status(root, state="ready", stage="generic_refinement_complete")
-    return {"job_id": job_id, "iterations": completed, "status": status}
+    stage = "generic_refinement_preserved_previous" if rejected else "generic_refinement_complete"
+    status = _write_status(root, state="ready", stage=stage)
+    return {
+        "job_id": job_id,
+        "iterations": completed,
+        "rejected": rejected,
+        "status": status,
+    }
 
 
 @app.post("/v1/jobs/{job_id}/improve", dependencies=[Depends(require_api_token)])

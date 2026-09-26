@@ -3,7 +3,7 @@
 ## Phase 0 — Bootstrap and VPS foundation
 
 - [x] Define two-service architecture: public orchestrator + private Blender worker.
-- [x] Pin `djeada/blender-mcp-server` to commit `428f60cdb819c55c69d67eef681f0318e464e0e9`.
+- [x] Pin and vendor `djeada/blender-mcp-server` at commit `428f60cdb819c55c69d67eef681f0318e464e0e9`.
 - [x] Add Blender + MCP Docker image.
 - [x] Add local Compose stack.
 - [x] Add Hostinger Compose stack using the existing Traefik/VPS pattern.
@@ -12,29 +12,29 @@
 - [x] Add internal MCP client -> Blender MCP -> headless Blender tool-call path.
 - [x] Add an end-to-end smoke test that creates a cube, saves a `.blend`, and renders a PNG through MCP.
 - [x] Add CI and Hostinger deployment workflow.
-- [ ] Add `HOSTINGER_API_KEY` and `THREED_API_TOKEN` to this repository's GitHub Actions secrets.
-- [ ] Set production `OLLAMA_PROXY_BASE_URL` and `OLLAMA_PROXY_API_KEY` secrets.
+- [x] Add `HOSTINGER_API_KEY`, `THREED_API_TOKEN`, and `OLLAMA_PROXY_API_KEY` repository secrets.
+- [x] Hardcode Ollama proxy base URL to `https://mediapitch.in/ollama-proxy`.
 - [ ] Run the first VPS smoke test and verify the render artifact.
 
 ## Phase 1 — Job ingestion
 
-- [ ] Add reference-image upload endpoint with size/type limits.
-- [ ] Store image metadata and hashes.
+- [x] Add reference-image upload endpoint with size/type limits.
+- [x] Store image metadata and SHA-256 hashes.
 - [ ] Add job cancellation and deletion.
-- [ ] Add artifact download endpoints.
+- [x] Add artifact listing/download endpoints.
 - [ ] Add structured job/event history.
 - [ ] Add concurrency lock so one worker cannot mutate the same scene twice.
 
 ## Phase 2 — Ollama orchestration
 
-- [ ] Add Ollama proxy client.
-- [ ] Add planner prompt/schema for modeling stages.
-- [ ] Add vision-model call supporting multiple reference/render images.
-- [ ] Default vision model to Qwen3-VL through the Ollama proxy.
-- [ ] Add structured visual critique schema: object, issue, severity, suggested change.
+- [x] Add Ollama proxy client using Bearer auth and `/api/chat` with `/api/generate` fallback.
+- [x] Add planner schema and endpoint for modeling stages.
+- [x] Add vision-model call supporting multiple reference/render images.
+- [x] Default vision model to Qwen3-VL through the Ollama proxy.
+- [x] Add structured visual critique schema: object, issue, severity, suggested change.
 - [ ] Add iteration budget and stopping rules.
 - [ ] Add checkpoint rollback when a visual score/regression gets worse.
-- [ ] Persist every model prompt/response for debugging.
+- [x] Persist planner/vision model responses and usage metadata for debugging.
 
 ## Phase 3 — Blender modeling tools
 
@@ -92,7 +92,7 @@
 
 - [ ] One disposable Blender worker container per job.
 - [ ] CPU/memory/time quotas per job.
-- [ ] Disable worker outbound Internet access by default.
+- [x] Disable worker outbound Internet access by default.
 - [ ] Queue with Redis or Postgres.
 - [ ] Store large artifacts in object storage.
 - [ ] Automatic cleanup/retention policy.

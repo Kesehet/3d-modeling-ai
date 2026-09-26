@@ -25,11 +25,12 @@ jobs:
         env:
           HOSTINGER_API_KEY: ${{ secrets.HOSTINGER_API_KEY }}
           THREED_API_TOKEN: ${{ secrets.THREED_API_TOKEN }}
+          OLLAMA_PROXY_API_KEY: ${{ secrets.OLLAMA_PROXY_API_KEY }}
         run: |
           set -euo pipefail
-          if [ -z "$HOSTINGER_API_KEY" ] || [ -z "$THREED_API_TOKEN" ]; then
+          if [ -z "$HOSTINGER_API_KEY" ] || [ -z "$THREED_API_TOKEN" ] || [ -z "$OLLAMA_PROXY_API_KEY" ]; then
             echo "ready=false" >> "$GITHUB_OUTPUT"
-            echo "::warning::Deployment skipped: add HOSTINGER_API_KEY and THREED_API_TOKEN secrets to this repository."
+            echo "::warning::Deployment skipped: HOSTINGER_API_KEY, THREED_API_TOKEN, and OLLAMA_PROXY_API_KEY are required."
           else
             echo "ready=true" >> "$GITHUB_OUTPUT"
           fi
@@ -38,6 +39,7 @@ jobs:
         if: steps.secrets.outputs.ready == 'true'
         env:
           THREED_API_TOKEN: ${{ secrets.THREED_API_TOKEN }}
+          OLLAMA_PROXY_API_KEY: ${{ secrets.OLLAMA_PROXY_API_KEY }}
           THREED_HOSTNAME: ${{ vars.THREED_HOSTNAME || '3d-modeling-ai.srv1058562.hstgr.cloud' }}
         run: docker compose -f compose.hostinger.yaml config
 
@@ -65,11 +67,9 @@ jobs:
             THREED_API_TOKEN=${{ secrets.THREED_API_TOKEN }}
             THREED_HOST_PORT=18082
             THREED_HOSTNAME=${{ vars.THREED_HOSTNAME || '3d-modeling-ai.srv1058562.hstgr.cloud' }}
-            OLLAMA_PROXY_BASE_URL=${{ secrets.OLLAMA_PROXY_BASE_URL }}
             OLLAMA_PROXY_API_KEY=${{ secrets.OLLAMA_PROXY_API_KEY }}
             REASONING_MODEL=${{ vars.REASONING_MODEL || 'gpt-oss:120b' }}
             VISION_MODEL=${{ vars.VISION_MODEL || 'qwen3-vl:235b-cloud' }}
-            BLENDER_MCP_UPSTREAM_COMMIT=428f60cdb819c55c69d67eef681f0318e464e0e9
             BLENDER_MCP_HEADLESS_TIMEOUT=3600
             BLENDER_WORKER_MEMORY=4g
             BLENDER_WORKER_CPUS=3.0
@@ -95,6 +95,7 @@ jobs:
             FAILED=$(echo "$NEW" | jq '[.[] | select(.state == "exited" or .state == "dead" or .health == "unhealthy")] | length')
             if [ "$FAILED" -gt 0 ]; then
               echo "$NEW" | jq .
+              curl --silent --show-error                 -H "Authorization: Bearer $HOSTINGER_API_KEY"                 "https://developers.hostinger.com/api/vps/v1/virtual-machines/1058562/docker/3d-modeling-ai/logs" || true
               exit 1
             fi
 
@@ -109,4 +110,42 @@ jobs:
           done
 
           echo "Timed out waiting for healthy containers." >&2
+          curl --silent --show-error             -H "Authorization: Bearer $HOSTINGER_API_KEY"             "https://developers.hostinger.com/api/vps/v1/virtual-machines/1058562/docker/3d-modeling-ai/logs" || true
           exit 1
+
+      - name: Verify public API and Blender MCP
+        if: steps.secrets.outputs.ready == 'true'
+        env:
+          THREED_API_TOKEN: ${{ secrets.THREED_API_TOKEN }}
+          THREED_HOSTNAME: ${{ vars.THREED_HOSTNAME || '3d-modeling-ai.srv1058562.hstgr.cloud' }}
+        run: |
+          set -euo pipefail
+          BASE_URL="https://$THREED_HOSTNAME"
+
+          for attempt in $(seq 1 36); do
+            if HEALTH=$(curl --fail --silent --show-error "$BASE_URL/health"); then
+              echo "$HEALTH" | jq .
+              if echo "$HEALTH" | jq -e '.ok == true' >/dev/null; then
+                break
+              fi
+            fi
+            if [ "$attempt" -eq 36 ]; then
+              echo "Public API did not become healthy." >&2
+              exit 1
+            fi
+            sleep 10
+          done
+
+          JOB_JSON=$(curl --fail --silent --show-error             -H "Authorization: Bearer $THREED_API_TOKEN"             -H "Content-Type: application/json"             -d '{"prompt":"Deployment MCP smoke test cube","intended_use":"rendering"}'             "$BASE_URL/v1/jobs")
+          JOB_ID=$(echo "$JOB_JSON" | jq -r '.job_id')
+          test -n "$JOB_ID"
+          test "$JOB_ID" != "null"
+
+          SMOKE=$(curl --fail --silent --show-error             -H "Authorization: Bearer $THREED_API_TOKEN"             -X POST             "$BASE_URL/v1/jobs/$JOB_ID/smoke-test")
+          echo "$SMOKE" | jq .
+          echo "$SMOKE" | jq -e '.status.stage == "mcp_smoke_test_complete"' >/dev/null
+
+          curl --fail --silent --show-error             -H "Authorization: Bearer $THREED_API_TOKEN"             "$BASE_URL/v1/jobs/$JOB_ID/artifacts/renders/smoke-test.png"             -o /tmp/smoke-test.png
+
+          test "$(xxd -p -l 8 /tmp/smoke-test.png)" = "89504e470d0a1a0a"
+          echo "Verified API -> Blender worker -> MCP -> headless Blender -> PNG render."

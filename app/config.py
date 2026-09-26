@@ -11,7 +11,9 @@ def env(name: str, default: str = "") -> str:
 JOBS_ROOT = Path(env("JOBS_ROOT", "/var/lib/3d-modeling-ai/jobs")).resolve()
 WORKER_URL = env("WORKER_URL", "http://worker:8090").rstrip("/")
 API_TOKEN = env("THREED_API_TOKEN", "")
-OLLAMA_PROXY_BASE_URL = env("OLLAMA_PROXY_BASE_URL", "").rstrip("/")
+
+# This is intentionally fixed to our existing MediaPitch Ollama proxy.
+OLLAMA_PROXY_BASE_URL = "https://mediapitch.in/ollama-proxy"
 OLLAMA_PROXY_API_KEY = env("OLLAMA_PROXY_API_KEY", "")
 REASONING_MODEL = env("REASONING_MODEL", "gpt-oss:120b")
 VISION_MODEL = env("VISION_MODEL", "qwen3-vl:235b-cloud")

@@ -3,8 +3,6 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-      args:
-        BLENDER_MCP_COMMIT: ${BLENDER_MCP_UPSTREAM_COMMIT:-428f60cdb819c55c69d67eef681f0318e464e0e9}
     image: 3d-modeling-ai:local
     restart: unless-stopped
     init: true
@@ -13,8 +11,7 @@ services:
       THREED_API_TOKEN: ${THREED_API_TOKEN:?THREED_API_TOKEN must be set}
       WORKER_URL: http://worker:8090
       JOBS_ROOT: /var/lib/3d-modeling-ai/jobs
-      OLLAMA_PROXY_BASE_URL: ${OLLAMA_PROXY_BASE_URL:-}
-      OLLAMA_PROXY_API_KEY: ${OLLAMA_PROXY_API_KEY:-}
+      OLLAMA_PROXY_API_KEY: ${OLLAMA_PROXY_API_KEY:?OLLAMA_PROXY_API_KEY must be set}
       REASONING_MODEL: ${REASONING_MODEL:-gpt-oss:120b}
       VISION_MODEL: ${VISION_MODEL:-qwen3-vl:235b-cloud}
     ports:

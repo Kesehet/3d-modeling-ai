@@ -132,6 +132,70 @@ class GenericSceneSpec(BaseModel):
     objects: list[SceneObjectSpec] = Field(min_length=1, max_length=40)
 
 
+def _normalize_scene_spec_payload(data: object, fallback_title: str) -> dict:
+    if not isinstance(data, dict):
+        raise ValueError("SceneSpec response is not a JSON object.")
+
+    normalized = dict(data)
+    normalized.setdefault("title", (fallback_title.strip() or "Generated model")[:120])
+    normalized.setdefault("rationale", "")
+    normalized.setdefault("presentation_base", True)
+
+    allowed_shapes = {"sphere", "cube", "cylinder", "cone", "torus"}
+    shape_aliases = {
+        "ellipsoid": "sphere",
+        "ball": "sphere",
+        "box": "cube",
+        "rounded_cube": "cube",
+        "disc": "cylinder",
+        "disk": "cylinder",
+        "tube": "cylinder",
+        "ring": "torus",
+    }
+
+    raw_objects = normalized.get("objects")
+    if not isinstance(raw_objects, list):
+        raise ValueError("SceneSpec objects must be a list.")
+
+    objects = []
+    for index, raw in enumerate(raw_objects[:40]):
+        if not isinstance(raw, dict):
+            continue
+        item = dict(raw)
+        shape = item.get("shape", item.get("type", "cube"))
+        shape = str(shape).lower().strip()
+        shape = shape_aliases.get(shape, shape)
+        if shape not in allowed_shapes:
+            shape = "cube"
+
+        location = item.get("location", item.get("position", item.get("center", [0, 0, 0])))
+        scale = item.get("scale", item.get("size", [1, 1, 1]))
+        rotation = item.get("rotation_deg", item.get("rotation", item.get("rotation_degrees", [0, 0, 0])))
+
+        def vec3(value: object, default: list[float]) -> list[float]:
+            if isinstance(value, (int, float)):
+                return [float(value), float(value), float(value)]
+            if isinstance(value, list) and len(value) >= 3:
+                return [float(value[0]), float(value[1]), float(value[2])]
+            return default
+
+        objects.append(
+            {
+                "name": str(item.get("name") or f"{shape}-{index + 1}")[:80],
+                "shape": shape,
+                "location": vec3(location, [0.0, 0.0, 0.0]),
+                "scale": vec3(scale, [1.0, 1.0, 1.0]),
+                "rotation_deg": vec3(rotation, [0.0, 0.0, 0.0]),
+                "color": item.get("color", "#808080"),
+                "bevel": bool(item.get("bevel", True)),
+                "smooth": bool(item.get("smooth", True)),
+            }
+        )
+
+    normalized["objects"] = objects
+    return normalized
+
+
 class ModelingStage(BaseModel):
     name: str
     objective: str
@@ -677,7 +741,8 @@ async def _build_generic_scene_spec(job_id: str, auto_research: bool) -> Generic
 
     system = (
         "You are a 3D blockout planner. Return a safe declarative scene made only from the allowed "
-        "primitive types in the supplied JSON schema. Do not output Python. Build a recognizable model "
+        "primitive types in the supplied JSON schema. Use the exact keys title, objects, name, shape, "
+        "location, scale, rotation_deg, color, bevel, and smooth. Do not output Python. Build a recognizable model "
         "using as few primitives as practical while preserving silhouette and major parts. Coordinates "
         "should normally stay within -8..8. Place the subject around the origin and keep its lowest major "
         "geometry near Z=0. Use meaningful semantic object names and realistic relative proportions."
@@ -699,8 +764,12 @@ async def _build_generic_scene_spec(job_id: str, auto_research: bool) -> Generic
             schema=GenericSceneSpec.model_json_schema(),
             temperature=0.1,
         )
-        spec = GenericSceneSpec.model_validate(result.data)
-    except (OllamaProxyError, httpx.HTTPError, ValidationError, ValueError) as exc:
+        normalized = _normalize_scene_spec_payload(
+            result.data,
+            str(job_request.get("prompt") or "Generated model"),
+        )
+        spec = GenericSceneSpec.model_validate(normalized)
+    except (OllamaProxyError, httpx.HTTPError, ValidationError, ValueError, TypeError) as exc:
         raise HTTPException(status_code=502, detail=f"Generic scene planning failed: {exc}") from exc
 
     payload = {
@@ -882,8 +951,9 @@ async def refine_generic_scene(job_id: str, request: GenericRefineRequest) -> di
                 schema=GenericSceneSpec.model_json_schema(),
                 temperature=0.1,
             )
-            revised = GenericSceneSpec.model_validate(result.data)
-        except (OllamaProxyError, httpx.HTTPError, ValidationError, ValueError) as exc:
+            normalized = _normalize_scene_spec_payload(result.data, current_spec.title)
+            revised = GenericSceneSpec.model_validate(normalized)
+        except (OllamaProxyError, httpx.HTTPError, ValidationError, ValueError, TypeError) as exc:
             append_history(root, "generic_refinement_failed", error=str(exc))
             raise HTTPException(status_code=502, detail=f"Generic refinement failed: {exc}") from exc
 

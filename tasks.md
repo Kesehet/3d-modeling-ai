@@ -21,12 +21,12 @@ This file is the working definition of "done" for the project. A level is only c
 - Current live regression mainly proves that files/renders exist; it does not prove that the candidate is visually or structurally better.
 
 ### P0 recovery tasks
-- [ ] Freeze new roadmap feature work until the quality regression gate passes.
-- [ ] Preserve the last known-good SceneSpec/version as the active model; a refinement candidate must not replace it automatically.
-- [ ] Add a structural regression guard that rejects destructive SceneSpec rewrites (major object-count collapse / loss of semantic parts).
-- [ ] Strengthen generic planning so every requested major part is explicitly represented instead of optimizing for the fewest primitives.
-- [ ] Require connected/contact-aware blockouts: necks, limbs, handles, stems, antennas and similar parts must touch/overlap their parent geometry instead of floating.
-- [ ] Make refinement surgical: fix the 1–3 highest-priority defects while preserving unaffected geometry instead of rewriting the whole model.
+- [x] Freeze new roadmap feature work until the quality regression gate passes.
+- [x] Preserve the last known-good SceneSpec/version as the active model; a structurally destructive refinement candidate is rejected before render/promotion.
+- [x] Add a structural regression guard that rejects destructive SceneSpec rewrites (major object-count collapse / loss of semantic parts / connector collapse).
+- [x] Strengthen generic planning so every requested major part is explicitly represented instead of optimizing for the fewest primitives.
+- [x] Require connected/contact-aware blockouts in planner/refinement instructions: necks, limbs, handles, stems, antennas and similar parts must touch/overlap their parent geometry instead of floating.
+- [x] Make refinement surgical: fix the 1–3 highest-priority defects while preserving unaffected geometry instead of rewriting the whole model.
 - [ ] Ensure visual QA evaluates the newest candidate render set with references and does not accidentally mix stale iterations as the "current" model.
 - [ ] Compare candidate `vN` against the previous accepted version and roll back/reject the candidate when quality regresses.
 - [ ] Add quality regression subjects: stylized Pikachu, articulated retro desk lamp, sneaker, office chair, and a complex creature/robot.

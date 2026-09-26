@@ -30,7 +30,7 @@ REASONING_MODEL=gpt-oss:120b
 VISION_MODEL=qwen3-vl:235b-cloud
 BLENDER_MCP_HEADLESS_TIMEOUT=3600
 BLENDER_WORKER_MEMORY=4g
-BLENDER_WORKER_CPUS=3.0
+BLENDER_WORKER_CPUS=1.5
 EOF
 
 docker network inspect traefik-proxy >/dev/null 2>&1 || docker network create traefik-proxy >/dev/null

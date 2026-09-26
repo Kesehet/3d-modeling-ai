@@ -7,7 +7,7 @@ import uuid
 from datetime import UTC, datetime
 from io import BytesIO
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 
 import httpx
 from fastapi import Depends, FastAPI, File, HTTPException, UploadFile
@@ -227,7 +227,7 @@ async def get_job(job_id: str) -> dict:
 @app.post("/v1/jobs/{job_id}/references", dependencies=[Depends(require_api_token)])
 async def upload_references(
     job_id: str,
-    files: list[UploadFile] = File(...),
+    files: Annotated[list[UploadFile], File()],
 ) -> dict:
     root = _require_job(job_id)
     if not files or len(files) > MAX_REFERENCE_FILES:

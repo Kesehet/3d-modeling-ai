@@ -134,7 +134,7 @@ class GenericSceneSpec(BaseModel):
 
 def _normalize_scene_spec_payload(data: object, fallback_title: str) -> dict:
     if not isinstance(data, dict):
-        raise ValueError("SceneSpec response is not a JSON object.")
+        raise TypeError("SceneSpec response is not a JSON object.")
 
     normalized = dict(data)
     normalized.setdefault("title", (fallback_title.strip() or "Generated model")[:120])
@@ -155,7 +155,7 @@ def _normalize_scene_spec_payload(data: object, fallback_title: str) -> dict:
 
     raw_objects = normalized.get("objects")
     if not isinstance(raw_objects, list):
-        raise ValueError("SceneSpec objects must be a list.")
+        raise TypeError("SceneSpec objects must be a list.")
 
     objects = []
     for index, raw in enumerate(raw_objects[:40]):

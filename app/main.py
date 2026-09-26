@@ -49,7 +49,7 @@ async def health() -> dict:
             response = await client.get(f"{WORKER_URL}/health")
             response.raise_for_status()
             worker = response.json()
-    except Exception as exc:
+    except (httpx.HTTPError, ValueError) as exc:
         worker = {"ok": False, "error": str(exc)}
     return {"ok": bool(worker.get("ok")), "service": "3d-modeling-ai", "worker": worker}
 
@@ -143,7 +143,7 @@ __result__ = {"blend_path": args["blend_path"], "render_path": args["render_path
             response = await client.post(f"{WORKER_URL}/v1/mcp/call", json=request_payload)
             response.raise_for_status()
             result = response.json()
-    except Exception as exc:
+    except (httpx.HTTPError, ValueError) as exc:
         _write_status(root, state="failed", stage="mcp_smoke_test", error=str(exc))
         raise HTTPException(status_code=502, detail=f"Blender worker failed: {exc}") from exc
 

@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import shutil
-import subprocess
 from typing import Any
 
 from fastapi import FastAPI, HTTPException
@@ -45,17 +45,33 @@ async def health() -> dict:
         return {"ok": False, "blender": blender, "mcp_server": mcp_server}
 
     try:
-        proc = subprocess.run(
-            [BLENDER_BIN, "--version"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            check=True,
+        proc = await asyncio.create_subprocess_exec(
+            BLENDER_BIN,
+            "--version",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
         )
-        version = proc.stdout.splitlines()[0] if proc.stdout else "unknown"
-    except Exception as exc:
+    except OSError as exc:
         return {"ok": False, "blender": blender, "mcp_server": mcp_server, "error": str(exc)}
 
+    try:
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=10)
+    except TimeoutError:
+        proc.kill()
+        await proc.wait()
+        return {
+            "ok": False,
+            "blender": blender,
+            "mcp_server": mcp_server,
+            "error": "Blender version check timed out",
+        }
+
+    if proc.returncode != 0:
+        error = stderr.decode("utf-8", errors="replace").strip() or f"Blender exited with {proc.returncode}"
+        return {"ok": False, "blender": blender, "mcp_server": mcp_server, "error": error}
+
+    output = stdout.decode("utf-8", errors="replace")
+    version = output.splitlines()[0] if output else "unknown"
     return {"ok": True, "blender": version, "mcp_server": mcp_server}
 
 
@@ -80,11 +96,10 @@ async def call_mcp(payload: ToolCall) -> dict:
     )
 
     try:
-        async with stdio_client(params) as (read, write):
-            async with ClientSession(read, write) as session:
-                await session.initialize()
-                result = await session.call_tool(payload.tool, arguments=arguments)
-    except Exception as exc:
+        async with stdio_client(params) as (read, write), ClientSession(read, write) as session:
+            await session.initialize()
+            result = await session.call_tool(payload.tool, arguments=arguments)
+    except Exception as exc:  # noqa: BLE001 - external MCP process boundary
         raise HTTPException(status_code=500, detail=f"MCP tool call failed: {exc}") from exc
 
     content = []

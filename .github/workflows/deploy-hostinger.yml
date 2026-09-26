@@ -197,9 +197,12 @@ jobs:
           test -n "$JOB_ID"
           test "$JOB_ID" != "null"
 
-          RESULT=$(curl --fail --silent --show-error --max-time 600 \
+          HTTP_CODE=$(curl --silent --show-error --max-time 600 \
+            -o /tmp/pikachu-result.json -w '%{http_code}' \
             -X POST "$BASE_URL/dashboard/jobs/$JOB_ID/pikachu")
-          echo "$RESULT" | jq .
+          cat /tmp/pikachu-result.json | jq . || cat /tmp/pikachu-result.json
+          test "$HTTP_CODE" -ge 200
+          test "$HTTP_CODE" -lt 300
 
           for name in \
             pikachu-front.png \

@@ -186,7 +186,7 @@ a{color:var(--primary)}
       <div class="field"><label for="intended">Intended use</label><select id="intended"><option value="rendering">Rendering</option><option value="3d_printing">3D printing</option><option value="game_asset">Game asset</option></select></div>
       <div class="field"><label for="width">Target width (mm)</label><input id="width" type="number" min="0.01" max="10000" step="0.1" placeholder="Optional"></div>
     </div>
-    <div class="actions"><button class="btn primary" id="create">Create Job</button><button class="btn success" id="pikachu">Create + Run Pikachu Test</button></div>
+    <div class="actions"><button class="btn primary" id="create">Create Job</button><button class="btn success" id="pikachu">Create + Run Pikachu Test</button><button class="btn" id="autopilot">Research + Improve Pikachu</button></div>
     <div class="notice" id="notice"></div>
   </div>
 </section>
@@ -295,7 +295,7 @@ async function newJob(runTest){
   if(busy)return;
   const p=prompt.value.trim();
   if(!p){showNotice("Prompt is required.","error");return}
-  busy=true;create.disabled=pikachu.disabled=rerun.disabled=true;showNotice("Creating job...","busy");
+  busy=true;create.disabled=pikachu.disabled=autopilot.disabled=rerun.disabled=true;showNotice("Creating job...","busy");
   try{
     const body={prompt:p,intended_use:intended.value};if(width.value)body.target_width_mm=Number(width.value);
     let r=await fetch("/dashboard/jobs",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
@@ -308,24 +308,43 @@ async function newJob(runTest){
       showNotice("Pikachu test completed. Generated files are ready.","success");await tick();
     }
   }catch(e){showNotice("Error: "+e.message,"error")}
-  finally{busy=false;create.disabled=pikachu.disabled=false;rerun.disabled=!selectedJob;await tick()}
+  finally{busy=false;create.disabled=pikachu.disabled=autopilot.disabled=false;rerun.disabled=!selectedJob;await tick()}
 }
 
 async function runSelected(){
   if(!selectedJob||busy)return;
-  busy=true;create.disabled=pikachu.disabled=rerun.disabled=true;showNotice("Running Pikachu test on selected job...","busy");setTab("gallery");
+  busy=true;create.disabled=pikachu.disabled=autopilot.disabled=rerun.disabled=true;showNotice("Running Pikachu test on selected job...","busy");setTab("gallery");
   try{
     const r=await fetch("/dashboard/jobs/"+encodeURIComponent(selectedJob)+"/pikachu",{method:"POST"});
     if(!r.ok)throw new Error(await r.text());
     showNotice("Pikachu test completed.","success");
   }catch(e){showNotice("Error: "+e.message,"error")}
-  finally{busy=false;create.disabled=pikachu.disabled=false;rerun.disabled=false;await tick()}
+  finally{busy=false;create.disabled=pikachu.disabled=autopilot.disabled=false;rerun.disabled=false;await tick()}
 }
 
 galleryJob.onchange=()=>selectJob(galleryJob.value);
 filesJob.onchange=()=>selectJob(filesJob.value);
+async function researchAndImprove(){
+  if(busy)return;
+  const p=prompt.value.trim();
+  if(!p){showNotice("Prompt is required.","error");return}
+  busy=true;create.disabled=pikachu.disabled=autopilot.disabled=rerun.disabled=true;showNotice("Creating job...","busy");
+  try{
+    const body={prompt:p,intended_use:intended.value};if(width.value)body.target_width_mm=Number(width.value);
+    let r=await fetch("/dashboard/jobs",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+    if(!r.ok)throw new Error(await r.text());
+    const d=await r.json();selectedJob=d.job_id;localStorage.setItem("selected3dJob",selectedJob);setTab("gallery");await tick();
+    showNotice("Researching references and running visual refinement...","busy");
+    r=await fetch("/dashboard/jobs/"+encodeURIComponent(d.job_id)+"/refine-pikachu",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({iterations:2,auto_research:true})});
+    if(!r.ok)throw new Error(await r.text());
+    showNotice("Research + refinement completed. Review Gallery and Files.","success");await tick();
+  }catch(e){showNotice("Error: "+e.message,"error")}
+  finally{busy=false;create.disabled=pikachu.disabled=autopilot.disabled=false;rerun.disabled=!selectedJob;await tick()}
+}
+
 create.onclick=()=>newJob(false);
 pikachu.onclick=()=>newJob(true);
+autopilot.onclick=researchAndImprove;
 rerun.onclick=runSelected;
 tick();setInterval(tick,3000);
 </script>

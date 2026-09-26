@@ -139,7 +139,7 @@ def public_render(job_id: str, filename: str) -> Path:
 
 def dashboard_page() -> HTMLResponse:
     return HTMLResponse(
-        """<!doctype html>
+        r"""<!doctype html>
 <html>
 <head>
 <meta charset="utf-8">

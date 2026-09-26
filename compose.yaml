@@ -10,7 +10,8 @@ services:
       JOBS_ROOT: /var/lib/3d-modeling-ai/jobs
       OLLAMA_PROXY_API_KEY: ${OLLAMA_PROXY_API_KEY:-}
       REASONING_MODEL: ${REASONING_MODEL:-gpt-oss:120b}
-      VISION_MODEL: ${VISION_MODEL:-qwen3-vl:235b-cloud}
+      VISION_MODEL: ${VISION_MODEL:-glm-5.3-flash:cloud}
+      VISION_MODEL_FALLBACKS: ${VISION_MODEL_FALLBACKS:-gemma4:cloud,minimax-m3:cloud,gemma3:12b}
     ports:
       - "${THREED_HOST_PORT:-18082}:8080"
     volumes:

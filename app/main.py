@@ -22,6 +22,7 @@ from .config import (
     OLLAMA_PROXY_BASE_URL,
     REASONING_MODEL,
     VISION_MODEL,
+    VISION_MODELS,
     WORKER_URL,
 )
 from .dashboard import dashboard_page, jobs_snapshot, public_artifact, public_render
@@ -444,6 +445,7 @@ async def capabilities() -> dict:
     return {
         "reasoning_model": REASONING_MODEL,
         "vision_model": VISION_MODEL,
+        "vision_models": list(VISION_MODELS),
         "ollama_proxy": OLLAMA_PROXY_BASE_URL,
         "blender_mcp": "djeada/blender-mcp-server@428f60cdb819c55c69d67eef681f0318e464e0e9",
         "stage": "vision-and-planning",
@@ -687,22 +689,49 @@ async def analyze_vision(job_id: str, request: VisionAnalyzeRequest) -> dict:
         "Give concrete changes that the Blender planner can act on."
     )
 
-    try:
-        ollama_result = await OllamaProxyClient().chat_json(
-            model=VISION_MODEL,
-            system=system,
-            prompt=prompt,
-            images=images,
-            schema=VisionReport.model_json_schema(),
-            temperature=0.1,
+    ollama_result = None
+    report = None
+    selected_model = None
+    errors: list[str] = []
+    client = OllamaProxyClient()
+    for candidate_model in VISION_MODELS:
+        try:
+            candidate_result = await client.chat_json(
+                model=candidate_model,
+                system=system,
+                prompt=prompt,
+                images=images,
+                schema=VisionReport.model_json_schema(),
+                temperature=0.1,
+            )
+            candidate_report = VisionReport.model_validate(candidate_result.data)
+        except (OllamaProxyError, httpx.HTTPError, ValidationError, ValueError) as exc:
+            errors.append(f"{candidate_model}: {exc}")
+            continue
+        ollama_result = candidate_result
+        report = candidate_report
+        selected_model = candidate_model
+        break
+
+    if ollama_result is None or report is None or selected_model is None:
+        detail = " | ".join(errors[-4:])
+        raise HTTPException(
+            status_code=502,
+            detail=f"Vision analysis failed across configured models: {detail}",
         )
-        report = VisionReport.model_validate(ollama_result.data)
-    except (OllamaProxyError, httpx.HTTPError, ValidationError, ValueError) as exc:
-        raise HTTPException(status_code=502, detail=f"Vision analysis failed: {exc}") from exc
+
+    if selected_model != VISION_MODEL:
+        append_history(
+            root,
+            "vision_model_fallback",
+            requested=VISION_MODEL,
+            selected=selected_model,
+            errors=errors,
+        )
 
     payload = {
         "job_id": job_id,
-        "model": VISION_MODEL,
+        "model": selected_model,
         "endpoint": ollama_result.endpoint,
         "stage": request.stage,
         "images": labels,

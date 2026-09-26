@@ -32,5 +32,14 @@ API_TOKEN = secret_env("THREED_API_TOKEN")
 OLLAMA_PROXY_BASE_URL = "https://mediapitch.in/ollama-proxy"
 OLLAMA_PROXY_API_KEY = secret_env("OLLAMA_PROXY_API_KEY")
 REASONING_MODEL = env("REASONING_MODEL", "gpt-oss:120b")
-VISION_MODEL = env("VISION_MODEL", "qwen3-vl:235b-cloud")
+VISION_MODEL = env("VISION_MODEL", "glm-5.3-flash:cloud")
+VISION_MODEL_FALLBACKS = tuple(
+    model.strip()
+    for model in env(
+        "VISION_MODEL_FALLBACKS",
+        "gemma4:cloud,minimax-m3:cloud,gemma3:12b",
+    ).split(",")
+    if model.strip()
+)
+VISION_MODELS = tuple(dict.fromkeys((VISION_MODEL, *VISION_MODEL_FALLBACKS)))
 BLENDER_BIN = env("BLENDER_BIN", "/home/headless/blender/blender")

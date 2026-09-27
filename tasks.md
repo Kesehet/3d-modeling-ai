@@ -60,6 +60,27 @@ Work these in order. The hourly production-fix automation should choose the firs
 - [ ] Add additional unseen holdouts: teapot, desk fan, bicycle and one household appliance.
 - [ ] Do not add subject-specific geometry code to make any holdout pass.
 
+### Recursive component-job architecture
+
+For complex subjects, stop treating every feature as an in-place edit to one giant scene. Major reusable/identity-bearing components should be modeled in isolated child workspaces, recursively decomposed when useful, accepted independently, then installed into the parent assembly.
+
+Example: `Toyota Prius -> wheel assembly -> tire + rim + visible fasteners`. The wheel is not eligible for installation on the Prius until its required child components and component-level multi-angle QA pass.
+
+- [ ] Add component-job workspace/manifest linked to parent job + parent feature.
+- [ ] Let the feature planner mark major features as `component_job` versus `in_place`.
+- [ ] Allow component jobs to create their own feature plans recursively.
+- [ ] Enforce recursion depth, child-count and model/render budgets.
+- [ ] Inherit/crop/select parent references for the component instead of blindly researching from scratch.
+- [ ] Give every component its own accepted-best checkpoint, renders, QA and failure history.
+- [ ] Block parent feature acceptance until all required child components are accepted.
+- [ ] Freeze an accepted component artifact before parent assembly.
+- [ ] Add deterministic assembly metadata: anchor, orientation, scale, symmetry/count and parent target region.
+- [ ] Install the frozen component into the parent scene without allowing the child worker to rewrite unrelated parent geometry.
+- [ ] Re-run parent-level QA after assembly; rollback the installation if whole-object recognizability regresses.
+- [ ] Reuse one accepted component for repeated instances where appropriate (e.g. four wheels) rather than rebuilding it four times.
+- [ ] Show the component tree in the dashboard: parent -> children -> acceptance state -> installed version.
+- [ ] Add a recursive production benchmark: Prius body + independently accepted wheel assembly, with wheel decomposed into tire/rim/fasteners.
+
 ### P0 recovery tasks
 - [x] Freeze unrelated roadmap feature work until the generic path generalizes.
 - [x] Keep references visible per job so failures can be audited against what the model actually saw.

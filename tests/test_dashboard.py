@@ -31,6 +31,18 @@ def test_dashboard_job_detail_exposes_reference_images():
     assert 'Used in latest vision pass' in html
 
 
+def test_dashboard_uses_live_mobile_model_viewer():
+    html = dashboard_page().body.decode("utf-8")
+    assert 'model-viewer/4.3.1/model-viewer.min.js' in html
+    assert 'id="liveModelViewer"' in html
+    assert 'touch-action="pan-y"' in html
+    assert 'Live 3D model' in html
+    assert 'Auto-refreshing' in html
+    assert 'job.latest_model' in html
+    assert 'QA renders & checkpoints' in html
+    assert '@media(max-width:520px)' in html
+
+
 def test_dashboard_surfaces_quality_gate_and_allows_vision_retry():
     html = dashboard_page().body.decode("utf-8")
     assert 'id="qualityBanner"' in html
@@ -116,6 +128,6 @@ def test_dashboard_exposes_feature_worker_state_and_disables_cache():
 
     assert 'AI feature sub-jobs' in html
     assert 'Feature coordinator' in html
-    assert 'CLIENT_UI_VERSION="feature-workers-v3"' in html
+    assert 'CLIENT_UI_VERSION="live-model-viewer-v1"' in html
     assert 'data.ui_version' in html
     assert response.headers["cache-control"] == "no-store, no-cache, must-revalidate"

@@ -52,6 +52,7 @@ from .feature_tasks import (
     save_feature_plan,
 )
 from .generic_builder import generic_scene_script
+from .hard_surface_builder import hard_surface_cage_script
 from .history import append_history, load_history
 from .mesh_builder import adaptive_loft_script
 from .ollama import OllamaProxyClient, OllamaProxyError
@@ -862,6 +863,40 @@ class AdaptiveLoftSpec(BaseModel):
     smooth: bool = True
     presentation_base: bool = True
     sections: list[LoftSection] = Field(min_length=4, max_length=12)
+    attachments: list[SceneObjectSpec] = Field(default_factory=list, max_length=24)
+
+
+class CageStation(BaseModel):
+    position: float = Field(ge=-10.0, le=10.0)
+    # Each pair is [half_width_from_mirror_plane, height]. The first and last
+    # points lie on the mirror plane so the mirrored cage closes cleanly.
+    profile: list[tuple[float, float]] = Field(min_length=4, max_length=8)
+
+
+class BooleanCutterSpec(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    shape: Literal["cube", "cylinder", "sphere"] = "cube"
+    location: list[float] = Field(min_length=3, max_length=3)
+    scale: list[float] = Field(min_length=3, max_length=3)
+    rotation_deg: list[float] = Field(
+        default_factory=lambda: [0.0, 0.0, 0.0],
+        min_length=3,
+        max_length=3,
+    )
+
+
+class HardSurfaceCageSpec(BaseModel):
+    title: str = Field(min_length=1, max_length=120)
+    rationale: str = Field(default="", max_length=2400)
+    axis: Literal["x", "y"] = "y"
+    color: str = Field(default="#B8BDC6", pattern=r"^#[0-9A-Fa-f]{6}$")
+    subdivision_levels: int = Field(default=1, ge=0, le=2)
+    bevel_width: float = Field(default=0.04, ge=0.0, le=0.3)
+    bevel_segments: int = Field(default=2, ge=1, le=4)
+    smooth: bool = True
+    presentation_base: bool = True
+    stations: list[CageStation] = Field(min_length=4, max_length=16)
+    cutters: list[BooleanCutterSpec] = Field(default_factory=list, max_length=16)
     attachments: list[SceneObjectSpec] = Field(default_factory=list, max_length=24)
 
 

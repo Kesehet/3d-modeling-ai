@@ -40,6 +40,17 @@ class FeatureTask(BaseModel):
     last_error: str = Field(default="", max_length=1000)
 
 
+class FeatureEvaluation(BaseModel):
+    feature_id: str = Field(min_length=1, max_length=80)
+    passed: bool = False
+    visible: bool = False
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    regression_detected: bool = False
+    summary: str = Field(default="", max_length=1600)
+    problems: list[str] = Field(default_factory=list, max_length=12)
+    protected_geometry_notes: list[str] = Field(default_factory=list, max_length=12)
+
+
 class FeaturePlan(BaseModel):
     subject: str = Field(default="", max_length=160)
     coordinator_notes: str = Field(default="", max_length=2000)

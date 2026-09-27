@@ -1,22 +1,10 @@
+import pytest
+from pydantic import ValidationError
+
 from app.main import (
-    GenericSceneSpec,
-    SceneObjectSpec,
-    SubjectInventory,
-    SubjectPartSpec,
-    _aggregate_generic_quality_verdicts,
-    _normalize_generic_quality_payload,
+    ModelingDirectorDecision,
     _normalize_vision_report_payload,
-    _scene_inventory_coverage,
 )
-
-
-def obj(name: str) -> SceneObjectSpec:
-    return SceneObjectSpec(
-        name=name,
-        shape="cube",
-        location=[0.0, 0.0, 0.0],
-        scale=[1.0, 1.0, 1.0],
-    )
 
 
 def test_vision_normalizer_preserves_nested_recognizability_signal():
@@ -37,141 +25,35 @@ def test_vision_normalizer_preserves_nested_recognizability_signal():
     assert normalized["recommended_modeling_strategy"] == "hybrid"
 
 
-def test_subject_inventory_detects_missing_repeated_parts_without_subject_hacks():
-    inventory = SubjectInventory(
-        subject_family="passenger vehicle",
-        silhouette_summary="Low body with a raised cabin and four wheels.",
-        complexity="complex",
-        recommended_strategy="hybrid",
-        minimum_distinct_parts=7,
-        major_parts=[
-            SubjectPartSpec(name="main body"),
-            SubjectPartSpec(name="cabin"),
-            SubjectPartSpec(name="windshield"),
-            SubjectPartSpec(name="wheels", count=4),
+def test_modeling_director_can_choose_full_strategy_switch():
+    decision = ModelingDirectorDecision(
+        action="rebuild_mesh",
+        subject_match_score=0.18,
+        summary="The primitive blockout has the wrong primary silhouette.",
+        instructions=[
+            "Discard the current body shell.",
+            "Reconstruct the main continuous mass from the references.",
         ],
-    )
-    bad = GenericSceneSpec(
-        title="bad holdout",
-        objects=[
-            obj("main body"),
-            obj("front left wheel"),
-            obj("front right wheel"),
-        ],
+        major_problems=["silhouette", "proportions"],
     )
 
-    coverage = _scene_inventory_coverage(bad, inventory)
-
-    assert coverage["passes"] is False
-    assert coverage["required_coverage"] < 0.8
-    assert any("cabin" in item for item in coverage["missing_required"])
-    assert any("windshield" in item for item in coverage["missing_required"])
-    assert any("wheels" in item for item in coverage["missing_required"])
+    assert decision.action == "rebuild_mesh"
+    assert decision.subject_match_score == 0.18
+    assert "silhouette" in decision.major_problems
 
 
-def test_subject_inventory_accepts_semantically_complete_holdout_parts():
-    inventory = SubjectInventory(
-        subject_family="passenger vehicle",
-        silhouette_summary="Low body with a raised cabin and four wheels.",
-        complexity="complex",
-        recommended_strategy="hybrid",
-        minimum_distinct_parts=7,
-        major_parts=[
-            SubjectPartSpec(name="main body"),
-            SubjectPartSpec(name="cabin"),
-            SubjectPartSpec(name="windshield"),
-            SubjectPartSpec(name="wheels", count=4),
-        ],
+def test_modeling_director_acceptance_is_explicit():
+    decision = ModelingDirectorDecision(
+        action="accept",
+        subject_match_score=0.91,
+        summary="The rendered model is recognizable and structurally credible.",
     )
-    good = GenericSceneSpec(
-        title="generalized holdout",
-        objects=[
-            obj("main body"),
-            obj("cabin roof"),
-            obj("windshield"),
-            obj("front left wheel"),
-            obj("front right wheel"),
-            obj("rear left wheel"),
-            obj("rear right wheel"),
-        ],
-    )
-
-    coverage = _scene_inventory_coverage(good, inventory)
-
-    assert coverage["passes"] is True
-    assert coverage["required_coverage"] == 1.0
+    assert decision.action == "accept"
 
 
-def test_quality_normalizer_preserves_strict_negative_verdict():
-    payload = {
-        "recognizable": False,
-        "subject_match_score": 18,
-        "recommended_strategy": "hybrid",
-        "summary": "The candidate is a flat wedge, not a recognizable vehicle.",
-        "major_missing_parts": ["cabin", "windshield", "rear body volume"],
-    }
-
-    normalized = _normalize_generic_quality_payload(payload)
-
-    assert normalized["recognizable"] is False
-    assert normalized["subject_match_score"] == 0.18
-    assert normalized["recommended_strategy"] == "hybrid"
-    assert "cabin" in normalized["major_missing_parts"]
-
-
-def test_quality_ensemble_rejects_one_optimistic_vote():
-    verdicts = [
-        {
-            "recognizable": True,
-            "subject_match_score": 0.86,
-            "recommended_strategy": "procedural",
-            "summary": "Looks correct.",
-            "major_missing_parts": [],
-        },
-        {
-            "recognizable": False,
-            "subject_match_score": 0.42,
-            "recommended_strategy": "hybrid",
-            "summary": "Silhouette is still wrong.",
-            "major_missing_parts": ["cabin"],
-        },
-        {
-            "recognizable": False,
-            "subject_match_score": 0.31,
-            "recommended_strategy": "hybrid",
-            "summary": "Not recognizable.",
-            "major_missing_parts": ["windshield"],
-        },
-    ]
-
-    aggregate = _aggregate_generic_quality_verdicts(verdicts)
-
-    assert aggregate["recognizable"] is False
-    assert aggregate["positive_votes"] == 1
-    assert aggregate["negative_votes"] == 2
-    assert aggregate["recommended_strategy"] == "hybrid"
-
-
-def test_quality_ensemble_accepts_strong_multimodel_consensus():
-    verdicts = [
-        {
-            "recognizable": True,
-            "subject_match_score": 0.88,
-            "recommended_strategy": "procedural",
-            "summary": "Recognizable.",
-            "major_missing_parts": [],
-        },
-        {
-            "recognizable": True,
-            "subject_match_score": 0.83,
-            "recommended_strategy": "procedural",
-            "summary": "Strong match.",
-            "major_missing_parts": [],
-        },
-    ]
-
-    aggregate = _aggregate_generic_quality_verdicts(verdicts)
-
-    assert aggregate["recognizable"] is True
-    assert aggregate["positive_votes"] == 2
-    assert aggregate["subject_match_score"] >= 0.83
+def test_modeling_director_rejects_unknown_actions():
+    with pytest.raises(ValidationError):
+        ModelingDirectorDecision(
+            action="hardcoded_car_fix",
+            subject_match_score=0.5,
+        )

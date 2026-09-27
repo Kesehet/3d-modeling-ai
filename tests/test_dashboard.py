@@ -1,4 +1,7 @@
-from app.dashboard import dashboard_page
+import json
+from datetime import UTC, datetime, timedelta
+
+from app.dashboard import dashboard_page, reconcile_running_status
 
 
 def test_dashboard_is_gallery_first():
@@ -42,3 +45,64 @@ def test_dashboard_offers_mesh_fallback_instead_of_dead_end():
     assert 'AI rebuild as mesh' in html
     assert 'adaptive_mesh_needs_refinement' in html
     assert 'AI improve mesh' in html
+
+
+
+def test_stale_running_job_is_reconciled_to_failed(tmp_path):
+    root = tmp_path / "job-1"
+    root.mkdir()
+    now = datetime(2026, 9, 27, 10, 0, tzinfo=UTC)
+    status = {
+        "job_id": "job-1",
+        "state": "running",
+        "stage": "generic_build_v2",
+        "updated_at": (now - timedelta(hours=3)).isoformat(),
+    }
+    (root / "status.json").write_text(json.dumps(status), encoding="utf-8")
+
+    reconciled = reconcile_running_status(root, status, now=now)
+
+    assert reconciled["state"] == "failed"
+    assert reconciled["stage"] == "generic_build_v2"
+    assert reconciled["interrupted"] is True
+    assert reconciled["interrupted_stage"] == "generic_build_v2"
+    persisted = json.loads((root / "status.json").read_text(encoding="utf-8"))
+    assert persisted["state"] == "failed"
+    history = json.loads((root / "history.json").read_text(encoding="utf-8"))
+    assert history[-1]["event"] == "stale_running_recovered"
+
+
+def test_recent_running_job_is_not_reconciled(tmp_path):
+    root = tmp_path / "job-2"
+    root.mkdir()
+    now = datetime(2026, 9, 27, 10, 0, tzinfo=UTC)
+    status = {
+        "job_id": "job-2",
+        "state": "running",
+        "stage": "generic_build_v1",
+        "updated_at": (now - timedelta(minutes=10)).isoformat(),
+    }
+    (root / "status.json").write_text(json.dumps(status), encoding="utf-8")
+
+    reconciled = reconcile_running_status(root, status, now=now)
+
+    assert reconciled["state"] == "running"
+    assert json.loads((root / "status.json").read_text(encoding="utf-8"))["state"] == "running"
+
+
+def test_restart_force_reconciles_even_recent_running_job(tmp_path):
+    root = tmp_path / "job-3"
+    root.mkdir()
+    now = datetime(2026, 9, 27, 10, 0, tzinfo=UTC)
+    status = {
+        "job_id": "job-3",
+        "state": "running",
+        "stage": "agent_selected_procedural",
+        "updated_at": (now - timedelta(seconds=5)).isoformat(),
+    }
+    (root / "status.json").write_text(json.dumps(status), encoding="utf-8")
+
+    reconciled = reconcile_running_status(root, status, now=now, force=True)
+
+    assert reconciled["state"] == "failed"
+    assert "restarted" in reconciled["error"].lower()

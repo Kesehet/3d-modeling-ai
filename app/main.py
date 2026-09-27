@@ -4863,6 +4863,29 @@ async def _execute_generic_spec(
     blend_path = root / "scene" / f"{prefix}.blend"
     qa_path = root / "exports" / f"{prefix}-qa.json"
 
+    # Versioned model artifacts are immutable checkpoints. Never overwrite a
+    # baseline/candidate in place; rollback depends on these files remaining intact.
+    existing_outputs = [
+        blend_path,
+        qa_path,
+        *[
+            root / "renders" / f"{prefix}-{view}.png"
+            for view in (
+                "front", "front-left", "left", "back-left", "back",
+                "back-right", "right", "front-right", "top",
+            )
+        ],
+    ]
+    collisions = [path.name for path in existing_outputs if path.exists()]
+    if collisions:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Refusing to overwrite immutable model version {version}: "
+                + ", ".join(collisions[:5])
+            ),
+        )
+
     _write_status(root, state="running", stage=f"generic_build_v{version}")
     payload = {
         "tool": "blender_python_exec",
@@ -5784,6 +5807,18 @@ async def _execute_hard_surface_cage(
     }
 
 
+
+def _next_model_version(root: Path) -> int:
+    """Return a collision-free next model version from persisted blend artifacts."""
+
+    versions = [
+        int(match.group(1))
+        for path in (root / "scene").glob("model-v*.blend")
+        if (match := re.fullmatch(r"model-v(\d+)\.blend", path.name))
+    ]
+    return max(versions or [0]) + 1
+
+
 def _working_hard_surface_cage_spec(
     root: Path,
     status_payload: dict,
@@ -6120,14 +6155,7 @@ async def _refine_hard_surface_cage_incrementally(
             "status": status,
         }
 
-    version = 1 + max(
-        [
-            int(match.group(1))
-            for path in (root / "scene").glob("model-v*.blend")
-            if (match := re.search(r"model-v(\d+)\.blend$", path.name))
-        ]
-        or [0]
-    )
+    version = _next_model_version(root)
     build = await _execute_hard_surface_cage(
         job_id,
         candidate_spec,
@@ -6377,12 +6405,7 @@ async def _generate_hard_surface_cage(
             reason=reason,
             feature_task=feature_task,
         )
-        existing_versions = [
-            int(match.group(1))
-            for path in (root / "scene").glob("model-v*.blend")
-            if (match := re.search(r"model-v(\\d+)\\.blend$", path.name))
-        ]
-        version = max(existing_versions or [0]) + 1
+        version = _next_model_version(root)
         build = await _execute_hard_surface_cage(
             job_id,
             spec,

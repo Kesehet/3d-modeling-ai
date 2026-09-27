@@ -2,6 +2,7 @@ import json
 
 from app.feature_tasks import FeaturePlan, save_feature_plan
 from app.main import (
+    _assembled_parent_requires_safe_stop,
     _auto_improve_goal_reached,
     _auto_improve_progress_signature,
     _feature_queue_is_blocked,
@@ -221,3 +222,54 @@ def test_feature_queue_reports_failed_required_dependency(tmp_path):
     assert blocked is True
     assert "body" in unresolved
     assert "wheels" in unresolved
+
+
+
+def test_assembled_parent_stops_before_destructive_global_rebuild(tmp_path):
+    plan = FeaturePlan.model_validate(
+        {
+            "plan_version": 3,
+            "subject": "Toyota Prius",
+            "features": [
+                {
+                    "id": "body",
+                    "name": "Body shell",
+                    "required": True,
+                    "status": "accepted",
+                    "accepted_version": 2,
+                    "acceptance_verified": True,
+                    "acceptance_score": 0.9,
+                },
+                {
+                    "id": "wheel",
+                    "name": "Wheel assembly",
+                    "required": True,
+                    "build_mode": "component_job",
+                    "status": "accepted",
+                    "accepted_version": 3,
+                    "acceptance_verified": True,
+                    "acceptance_score": 0.9,
+                },
+            ],
+        }
+    )
+    save_feature_plan(tmp_path, plan)
+    status = {
+        "stage": "component_assembly_accepted",
+        "quality_gate": {"recognizable": False, "subject_match_score": 0.67},
+        "generic_model": {
+            "version": 3,
+            "assembled_components": [
+                {
+                    "feature_id": "wheel",
+                    "child_job_id": "child-wheel",
+                    "parent_version": 3,
+                }
+            ],
+        },
+    }
+
+    assert _assembled_parent_requires_safe_stop(tmp_path, status) is True
+
+    status["quality_gate"]["recognizable"] = True
+    assert _assembled_parent_requires_safe_stop(tmp_path, status) is False

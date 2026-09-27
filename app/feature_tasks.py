@@ -254,7 +254,7 @@ def refresh_feature_states(plan: FeaturePlan) -> FeaturePlan:
     feature_ids = {feature.id for feature in plan.features}
 
     for feature in plan.features:
-        if feature.status in {"accepted", "running", "failed"}:
+        if feature.status in {"accepted", "running", "blocked", "failed"}:
             continue
         if any(dep not in feature_ids for dep in feature.depends_on):
             feature.status = "blocked"

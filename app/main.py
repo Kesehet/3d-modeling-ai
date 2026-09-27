@@ -3982,6 +3982,8 @@ async def _build_generic_scene_spec(job_id: str, auto_research: bool) -> Generic
                 str(job_request.get("prompt") or "Generated model"),
             )
             candidate_spec = GenericSceneSpec.model_validate(normalized)
+            if job_request.get("component_job") is True:
+                candidate_spec.presentation_base = False
         except (OllamaProxyError, httpx.HTTPError, ValidationError, ValueError, TypeError) as exc:
             planning_errors.append(f"{candidate_model}: {exc}")
             continue
@@ -4368,6 +4370,8 @@ async def _build_adaptive_loft_spec(
                 str(job_request.get("prompt") or "Adaptive mesh"),
             )
             spec = AdaptiveLoftSpec.model_validate(normalized)
+            if job_request.get("component_job") is True:
+                spec.presentation_base = False
         except (OllamaProxyError, httpx.HTTPError, ValidationError, ValueError, TypeError) as exc:
             errors.append(f"{candidate_model}: {exc}")
             continue
@@ -4594,6 +4598,8 @@ async def _revise_adaptive_loft_spec(
                 str(job_request.get("prompt") or current_spec.title),
             )
             revised = AdaptiveLoftSpec.model_validate(normalized)
+            if job_request.get("component_job") is True:
+                revised.presentation_base = False
         except (OllamaProxyError, httpx.HTTPError, ValidationError, ValueError, TypeError) as exc:
             errors.append(f"{candidate_model}: {exc}")
             continue

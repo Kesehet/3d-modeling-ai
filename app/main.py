@@ -58,6 +58,8 @@ from .security import require_api_token
 
 app = FastAPI(title="3D Modeling AI", version="0.2.0")
 AUTO_IMPROVE_TASKS: dict[str, asyncio.Task[None]] = {}
+FEATURE_MAX_ATTEMPTS = 3
+AUTO_IMPROVE_HARD_ROUND_CAP = 60
 
 
 @app.on_event("startup")
@@ -69,6 +71,52 @@ async def reconcile_interrupted_jobs_after_restart() -> None:
         for root in JOBS_ROOT.iterdir():
             if not root.is_dir():
                 continue
+
+            plan = load_feature_plan(root)
+            if plan is not None and plan.plan_version < 2:
+                source = root / "feature-plan.json"
+                backup = root / "feature-plan-v1-legacy.json"
+                try:
+                    if backup.exists():
+                        backup.unlink()
+                    source.replace(backup)
+                except OSError:
+                    source.unlink(missing_ok=True)
+
+                append_history(
+                    root,
+                    "legacy_feature_plan_archived",
+                    previous_version=plan.plan_version,
+                    reason="strict visually-verifiable feature plan required",
+                )
+
+                status = _read_status(root)
+                auto = status.get("auto_improve")
+                if isinstance(auto, dict) and auto.get("enabled") is True:
+                    try:
+                        requested_rounds = int(auto.get("max_rounds") or 30)
+                    except (TypeError, ValueError):
+                        requested_rounds = 30
+                    requested_rounds = max(1, min(30, requested_rounds))
+                    _write_status(
+                        root,
+                        auto_improve=_auto_improve_payload(
+                            state="scheduled",
+                            current_round=0,
+                            max_rounds=requested_rounds,
+                            reason=(
+                                "Replanning the legacy feature backlog with strict "
+                                "reference-based acceptance."
+                            ),
+                        ),
+                    )
+                    append_history(
+                        root,
+                        "auto_improve_rearmed_for_feature_plan_v2",
+                        requested_rounds=requested_rounds,
+                    )
+                continue
+
             reset = invalidate_unverified_acceptances(root)
             if reset:
                 append_history(
@@ -1265,6 +1313,28 @@ def _auto_improve_progress_signature(root: Path, status: dict) -> tuple[object, 
     )
 
 
+def _remaining_feature_attempt_budget(root: Path) -> int:
+    plan = load_feature_plan(root)
+    if plan is None or plan.plan_version < 2:
+        return 0
+
+    remaining = 0
+    for feature in plan.features:
+        if feature.status in {"accepted", "blocked", "failed"}:
+            continue
+        remaining += max(0, FEATURE_MAX_ATTEMPTS - int(feature.attempts))
+    return remaining
+
+
+def _feature_queue_is_blocked(root: Path) -> tuple[bool, list[str]]:
+    summary = feature_plan_summary(root)
+    if not summary:
+        return False, []
+    unresolved = list(summary.get("required_unresolved") or [])
+    no_worker_available = not summary.get("active_feature_id") and not summary.get("next_feature_id")
+    return bool(unresolved and no_worker_available), unresolved
+
+
 def _auto_improve_payload(
     *,
     state: str,
@@ -1287,13 +1357,42 @@ async def _run_auto_improve(job_id: str, max_rounds: int) -> None:
     if not root.is_dir():
         return
 
+    requested_rounds = max(1, min(30, int(max_rounds)))
+    round_limit = requested_rounds
+    round_number = 0
     no_progress_rounds = 0
     consecutive_errors = 0
-    append_history(root, "auto_improve_started", max_rounds=max_rounds)
+    append_history(root, "auto_improve_started", requested_rounds=requested_rounds)
 
-    for round_number in range(1, max_rounds + 1):
+    while round_number < round_limit:
         if not root.is_dir():
             return
+
+        blocked, unresolved = _feature_queue_is_blocked(root)
+        if blocked:
+            status = _read_status(root)
+            _write_status(
+                root,
+                state="ready" if isinstance(status.get("generic_model"), dict) else status.get("state", "ready"),
+                auto_improve=_auto_improve_payload(
+                    state="feature_blocked",
+                    current_round=round_number,
+                    max_rounds=round_limit,
+                    reason=(
+                        "Required feature work cannot continue because a dependency "
+                        "failed strict QA: " + ", ".join(unresolved[:8])
+                    ),
+                ),
+            )
+            append_history(
+                root,
+                "auto_improve_stopped",
+                round=round_number,
+                reason="required feature dependency failed",
+                unresolved_features=unresolved[:16],
+            )
+            return
+
         before = _read_status(root)
         if _auto_improve_goal_reached(root, before):
             _write_status(
@@ -1301,19 +1400,20 @@ async def _run_auto_improve(job_id: str, max_rounds: int) -> None:
                 state="ready",
                 auto_improve=_auto_improve_payload(
                     state="completed",
-                    current_round=round_number - 1,
-                    max_rounds=max_rounds,
+                    current_round=round_number,
+                    max_rounds=round_limit,
                     reason="Quality gate and visible-feature backlog are satisfied.",
                 ),
             )
             append_history(
                 root,
                 "auto_improve_completed",
-                rounds=round_number - 1,
+                rounds=round_number,
                 reason="quality gate satisfied",
             )
             return
 
+        round_number += 1
         before_signature = _auto_improve_progress_signature(root, before)
         _write_status(
             root,
@@ -1321,15 +1421,15 @@ async def _run_auto_improve(job_id: str, max_rounds: int) -> None:
             auto_improve=_auto_improve_payload(
                 state="running",
                 current_round=round_number,
-                max_rounds=max_rounds,
-                reason="Applying the AI director's latest visual diagnosis.",
+                max_rounds=round_limit,
+                reason="Working the next strict feature/refinement task.",
             ),
         )
         append_history(
             root,
             "auto_improve_round_started",
             round=round_number,
-            max_rounds=max_rounds,
+            max_rounds=round_limit,
             quality_summary=(
                 before.get("quality_gate", {}).get("summary")
                 if isinstance(before.get("quality_gate"), dict)
@@ -1352,7 +1452,7 @@ async def _run_auto_improve(job_id: str, max_rounds: int) -> None:
                 auto_improve=_auto_improve_payload(
                     state="retrying" if consecutive_errors < 2 else "stopped",
                     current_round=round_number,
-                    max_rounds=max_rounds,
+                    max_rounds=round_limit,
                     reason=detail or exc.__class__.__name__,
                 ),
             )
@@ -1384,15 +1484,15 @@ async def _run_auto_improve(job_id: str, max_rounds: int) -> None:
                 auto_improve=_auto_improve_payload(
                     state="completed",
                     current_round=round_number,
-                    max_rounds=max_rounds,
-                    reason="AI fixed the diagnosed issues enough to pass the quality gate.",
+                    max_rounds=round_limit,
+                    reason="AI satisfied the strict feature backlog and quality gate.",
                 ),
             )
             append_history(
                 root,
                 "auto_improve_completed",
                 rounds=round_number,
-                reason="quality gate satisfied",
+                reason="strict feature backlog and quality gate satisfied",
             )
             return
 
@@ -1401,17 +1501,32 @@ async def _run_auto_improve(job_id: str, max_rounds: int) -> None:
         else:
             no_progress_rounds = 0
 
+        # Thirty rounds is the initial user-requested budget, not a reason to
+        # abandon a healthy feature queue halfway through. Extend only by the
+        # finite attempts that remain in the strict feature plan, with a hard
+        # global safety cap.
+        remaining_feature_attempts = _remaining_feature_attempt_budget(root)
+        if remaining_feature_attempts:
+            computed_limit = min(
+                AUTO_IMPROVE_HARD_ROUND_CAP,
+                round_number + remaining_feature_attempts + 2,
+            )
+            round_limit = max(round_limit, requested_rounds, computed_limit)
+
         _write_status(
             root,
             state="ready",
             auto_improve=_auto_improve_payload(
                 state="running",
                 current_round=round_number,
-                max_rounds=max_rounds,
+                max_rounds=round_limit,
                 reason=(
                     f"No measurable progress for {no_progress_rounds} consecutive round(s)."
                     if no_progress_rounds
-                    else "The best-so-far model changed; continuing with the next diagnosed issue."
+                    else (
+                        f"Continuing strict feature queue; "
+                        f"{remaining_feature_attempts} feature attempt(s) remain."
+                    )
                 ),
             ),
         )
@@ -1419,19 +1534,48 @@ async def _run_auto_improve(job_id: str, max_rounds: int) -> None:
             root,
             "auto_improve_round_completed",
             round=round_number,
+            max_rounds=round_limit,
+            remaining_feature_attempts=remaining_feature_attempts,
             no_progress_rounds=no_progress_rounds,
             progress_changed=after_signature != before_signature,
         )
 
-        if no_progress_rounds >= 3:
+        blocked, unresolved = _feature_queue_is_blocked(root)
+        if blocked:
+            _write_status(
+                root,
+                state="ready",
+                auto_improve=_auto_improve_payload(
+                    state="feature_blocked",
+                    current_round=round_number,
+                    max_rounds=round_limit,
+                    reason=(
+                        "Required feature work stopped because a prerequisite "
+                        "failed strict QA: " + ", ".join(unresolved[:8])
+                    ),
+                ),
+            )
+            append_history(
+                root,
+                "auto_improve_stopped",
+                round=round_number,
+                reason="required feature dependency failed",
+                unresolved_features=unresolved[:16],
+            )
+            return
+
+        if no_progress_rounds >= FEATURE_MAX_ATTEMPTS:
             _write_status(
                 root,
                 state="ready",
                 auto_improve=_auto_improve_payload(
                     state="stalled",
                     current_round=round_number,
-                    max_rounds=max_rounds,
-                    reason="Stopped after three rounds with no measurable progress to avoid destructive looping.",
+                    max_rounds=round_limit,
+                    reason=(
+                        "Stopped after three rounds with no accepted best-so-far "
+                        "progress to avoid wasting vision/model tokens."
+                    ),
                 ),
             )
             append_history(
@@ -1449,17 +1593,20 @@ async def _run_auto_improve(job_id: str, max_rounds: int) -> None:
         root,
         state="ready" if isinstance(final_status.get("generic_model"), dict) else final_status.get("state", "ready"),
         auto_improve=_auto_improve_payload(
-            state="max_rounds_reached",
-            current_round=max_rounds,
-            max_rounds=max_rounds,
-            reason="Reached the autonomous refinement cap.",
+            state="safety_cap_reached",
+            current_round=round_number,
+            max_rounds=round_limit,
+            reason=(
+                "Reached the hard autonomous safety cap before strict completion. "
+                "The system will not spend more tokens automatically."
+            ),
         ),
     )
     append_history(
         root,
         "auto_improve_stopped",
-        round=max_rounds,
-        reason="maximum rounds reached",
+        round=round_number,
+        reason="hard safety cap reached",
     )
 
 
@@ -2779,14 +2926,33 @@ async def _evaluate_feature_candidate(
     root = _require_job(job_id)
     job_request = json.loads((root / "request.json").read_text(encoding="utf-8"))
     views = _feature_diagnostic_views(feature_task)
+    reference_paths: list[Path] = []
+    for record in _usable_reference_index(root):
+        stored_name = str(record.get("stored_name") or "")
+        if not stored_name:
+            continue
+        path = root / "references" / Path(stored_name).name
+        if path.is_file() and path.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp"}:
+            reference_paths.append(path)
     reference_paths = sorted(
-        [
-            path
-            for path in (root / "references").glob("*")
-            if path.is_file() and path.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp"}
-        ],
+        reference_paths,
         key=lambda path: path.stat().st_mtime,
     )[-3:]
+    if not reference_paths:
+        return {
+            "feature_id": feature_task.id,
+            "passed": False,
+            "visible": False,
+            "criteria_satisfied": False,
+            "subject_recognizable": False,
+            "confidence": 0.0,
+            "reference_match_score": 0.0,
+            "regression_detected": False,
+            "summary": "Strict feature QA has no verified reference image to compare against.",
+            "problems": ["no verified reference images"],
+            "protected_geometry_notes": [],
+            "model": None,
+        }
     baseline_paths = (
         [
             root / "renders" / f"model-v{baseline_version}-{view}.png"
@@ -2804,7 +2970,10 @@ async def _evaluate_feature_candidate(
             "feature_id": feature_task.id,
             "passed": False,
             "visible": False,
+            "criteria_satisfied": False,
+            "subject_recognizable": False,
             "confidence": 0.0,
+            "reference_match_score": 0.0,
             "regression_detected": True,
             "summary": "Feature QA could not run because comparison renders are missing.",
             "problems": ["missing comparison renders"],
@@ -2891,7 +3060,10 @@ async def _evaluate_feature_candidate(
         "feature_id": feature_task.id,
         "passed": False,
         "visible": False,
+        "criteria_satisfied": False,
+        "subject_recognizable": False,
         "confidence": 0.0,
+        "reference_match_score": 0.0,
         "regression_detected": True,
         "summary": "Feature QA failed across configured vision models.",
         "problems": errors[-4:] or ["feature QA unavailable"],

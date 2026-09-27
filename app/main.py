@@ -2779,13 +2779,47 @@ async def _refine_adaptive_mesh(job_id: str, *, decision: dict) -> dict:
 
     baseline_version, current_spec = active
     previous_model = dict(previous_status.get("generic_model") or {})
+    feature_task = begin_feature(root)
+    if feature_task is not None:
+        append_history(
+            root,
+            "feature_subjob_started",
+            feature_id=feature_task.id,
+            feature_name=feature_task.name,
+            attempt=feature_task.attempts,
+            strategy=feature_task.strategy,
+            dependencies=feature_task.depends_on,
+        )
     _write_status(
         root,
         state="running",
         stage="adaptive_mesh_refining",
         modeling_strategy="adaptive_loft",
     )
-    revised = await _revise_adaptive_loft_spec(job_id, current_spec, decision)
+    try:
+        revised = await _revise_adaptive_loft_spec(
+            job_id,
+            current_spec,
+            decision,
+            feature_task=feature_task,
+        )
+    except Exception as exc:
+        if feature_task is not None:
+            finish_feature(
+                root,
+                feature_task.id,
+                accepted=False,
+                version=None,
+                error=str(exc),
+            )
+            append_history(
+                root,
+                "feature_subjob_failed",
+                feature_id=feature_task.id,
+                feature_name=feature_task.name,
+                error=str(exc),
+            )
+        raise
     if revised.model_dump() == current_spec.model_dump():
         append_history(
             root,
@@ -2793,6 +2827,21 @@ async def _refine_adaptive_mesh(job_id: str, *, decision: dict) -> dict:
             version=baseline_version,
             reason="AI returned an unchanged adaptive mesh spec",
         )
+        if feature_task is not None:
+            finish_feature(
+                root,
+                feature_task.id,
+                accepted=False,
+                version=None,
+                summary="The feature worker returned an unchanged mesh specification.",
+            )
+            append_history(
+                root,
+                "feature_subjob_retry",
+                feature_id=feature_task.id,
+                feature_name=feature_task.name,
+                reason="unchanged mesh specification",
+            )
         return {
             "job_id": job_id,
             "status": _write_status(
@@ -2859,6 +2908,22 @@ async def _refine_adaptive_mesh(job_id: str, *, decision: dict) -> dict:
             recognizable=recognizable,
             comparison_summary=comparison.get("summary"),
         )
+        if feature_task is not None:
+            finish_feature(
+                root,
+                feature_task.id,
+                accepted=True,
+                version=version,
+                summary=str(comparison.get("summary") or quality.get("summary") or ""),
+            )
+            append_history(
+                root,
+                "feature_subjob_accepted",
+                feature_id=feature_task.id,
+                feature_name=feature_task.name,
+                version=version,
+                comparison_summary=comparison.get("summary"),
+            )
     else:
         status = _write_status(
             root,
@@ -2889,6 +2954,22 @@ async def _refine_adaptive_mesh(job_id: str, *, decision: dict) -> dict:
             candidate_version=version,
             comparison_summary=comparison.get("summary"),
         )
+        if feature_task is not None:
+            finish_feature(
+                root,
+                feature_task.id,
+                accepted=False,
+                version=None,
+                summary=str(comparison.get("summary") or ""),
+                error="Candidate did not beat the best-so-far mesh.",
+            )
+            append_history(
+                root,
+                "feature_subjob_retry",
+                feature_id=feature_task.id,
+                feature_name=feature_task.name,
+                reason="candidate did not beat best-so-far mesh",
+            )
 
     build["comparison"] = comparison
     build["quality_gate"] = quality
@@ -3275,6 +3356,8 @@ async def generate_generic_scene_api(job_id: str, request: GenericGenerateReques
 
 async def refine_generic_scene(job_id: str, request: GenericRefineRequest) -> dict:
     root = _require_job(job_id)
+    if load_feature_plan(root) is None:
+        await _ensure_feature_plan(job_id, _load_subject_inventory(root))
     status_path = root / "status.json"
     status_payload: dict = {}
     if status_path.exists():
@@ -3349,6 +3432,17 @@ async def refine_generic_scene(job_id: str, request: GenericRefineRequest) -> di
     completed: list[dict] = []
 
     for offset in range(request.iterations):
+        feature_task = begin_feature(root)
+        if feature_task is not None:
+            append_history(
+                root,
+                "feature_subjob_started",
+                feature_id=feature_task.id,
+                feature_name=feature_task.name,
+                attempt=feature_task.attempts,
+                strategy=feature_task.strategy,
+                dependencies=feature_task.depends_on,
+            )
         decision = await _ask_modeling_director(
             job_id,
             stage=f"agent_refinement_{offset + 1}",
@@ -3356,6 +3450,22 @@ async def refine_generic_scene(job_id: str, request: GenericRefineRequest) -> di
             include_renders=True,
         )
         if decision["action"] == "accept":
+            if feature_task is not None:
+                finish_feature(
+                    root,
+                    feature_task.id,
+                    accepted=True,
+                    version=current_version,
+                    summary=str(decision.get("summary") or "Director accepted the current feature."),
+                )
+                append_history(
+                    root,
+                    "feature_subjob_accepted",
+                    feature_id=feature_task.id,
+                    feature_name=feature_task.name,
+                    version=current_version,
+                    accepted_without_rebuild=True,
+                )
             break
         if decision["action"] in {"build_mesh", "rebuild_mesh"}:
             append_history(
@@ -3394,6 +3504,7 @@ async def refine_generic_scene(job_id: str, request: GenericRefineRequest) -> di
             f"AI director decision: {json.dumps(decision, ensure_ascii=False)}\n"
             f"AI-generated subject inventory: "
             f"{json.dumps(inventory.model_dump() if inventory else {}, ensure_ascii=False)}\n"
+            f"ACTIVE FEATURE SUB-JOB: {json.dumps(feature_task.model_dump() if feature_task else {}, ensure_ascii=False)}\n"
             f"Universal coordinate guidance:\n{_generic_spatial_guidance('')}\n"
             f"Images in order: {labels}\n"
             "Return the complete next SceneSpec. Spend the available token budget on concrete geometry."
@@ -3424,12 +3535,40 @@ async def refine_generic_scene(job_id: str, request: GenericRefineRequest) -> di
             break
 
         if revised is None or selected_model is None:
-            raise HTTPException(
-                status_code=502,
-                detail="AI SceneSpec revision failed across configured models: " + " | ".join(errors[-4:]),
-            )
+            detail = "AI SceneSpec revision failed across configured models: " + " | ".join(errors[-4:])
+            if feature_task is not None:
+                finish_feature(
+                    root,
+                    feature_task.id,
+                    accepted=False,
+                    version=None,
+                    error=detail,
+                )
+                append_history(
+                    root,
+                    "feature_subjob_failed",
+                    feature_id=feature_task.id,
+                    feature_name=feature_task.name,
+                    error=detail,
+                )
+            raise HTTPException(status_code=502, detail=detail)
         if revised.model_dump() == current_spec.model_dump():
             append_history(root, "agent_refinement_stop", reason="AI returned an unchanged SceneSpec")
+            if feature_task is not None:
+                finish_feature(
+                    root,
+                    feature_task.id,
+                    accepted=False,
+                    version=None,
+                    summary="The feature worker returned an unchanged SceneSpec.",
+                )
+                append_history(
+                    root,
+                    "feature_subjob_retry",
+                    feature_id=feature_task.id,
+                    feature_name=feature_task.name,
+                    reason="unchanged SceneSpec",
+                )
             break
 
         version = 1 + len(list((root / "scene").glob("model-v*.blend")))
@@ -3442,6 +3581,21 @@ async def refine_generic_scene(job_id: str, request: GenericRefineRequest) -> di
             object_count=len(revised.objects),
             director_summary=decision.get("summary"),
         )
+        if feature_task is not None:
+            finish_feature(
+                root,
+                feature_task.id,
+                accepted=True,
+                version=version,
+                summary=str(decision.get("summary") or ""),
+            )
+            append_history(
+                root,
+                "feature_subjob_accepted",
+                feature_id=feature_task.id,
+                feature_name=feature_task.name,
+                version=version,
+            )
         completed.append(
             {
                 "director": decision,

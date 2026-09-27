@@ -6,8 +6,8 @@ classification rules: a benchmark only runs when its key is requested directly.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import re
+from dataclasses import dataclass
 
 
 @dataclass(frozen=True)
@@ -35,9 +35,9 @@ BENCHMARKS: dict[str, BenchmarkProfile] = {
             "body": ("body", "torso"),
             "ears": ("ear",),
             "eyes": ("eye",),
-            "cheeks": ("cheek",),
-            "arms": ("arm",),
-            "feet": ("foot", "feet"),
+            "cheeks": ("cheek", "face patch", "red patch"),
+            "arms": ("arm", "forelimb", "hand"),
+            "feet": ("foot", "feet", "hind leg"),
             "tail": ("tail",),
         },
         visual_requirements=(
@@ -60,10 +60,10 @@ BENCHMARKS: dict[str, BenchmarkProfile] = {
         min_objects=5,
         required_part_groups={
             "base": ("base",),
-            "stem": ("stem", "post", "upright"),
-            "neck": ("neck", "arm"),
+            "stem": ("stem", "post", "upright", "pole", "shaft", "support"),
+            "neck": ("neck", "arm", "boom"),
             "joint": ("joint", "pivot", "hinge"),
-            "shade": ("shade", "dome", "lamphead", "lamp head"),
+            "shade": ("shade", "dome", "lamphead", "lamp head", "hood"),
         },
         visual_requirements=(
             "round weighted base",
@@ -83,13 +83,13 @@ BENCHMARKS: dict[str, BenchmarkProfile] = {
         ),
         min_objects=8,
         required_part_groups={
-            "sole": ("sole", "midsole", "outsole"),
+            "sole": ("sole", "midsole", "outsole", "platform"),
             "toe": ("toe",),
-            "upper": ("upper",),
+            "upper": ("upper", "shoe body", "body"),
             "heel": ("heel",),
             "tongue": ("tongue",),
             "opening": ("opening", "collar"),
-            "laces": ("lace", "laces"),
+            "laces": ("lace", "laces", "cord", "string"),
         },
         visual_requirements=(
             "layered sole",
@@ -108,11 +108,11 @@ BENCHMARKS: dict[str, BenchmarkProfile] = {
         ),
         min_objects=11,
         required_part_groups={
-            "seat": ("seat",),
+            "seat": ("seat", "cushion"),
             "backrest": ("backrest", "back"),
-            "armrests": ("armrest", "arm rest"),
+            "armrests": ("armrest", "arm rest", "arm support"),
             "column": ("column", "lift", "post"),
-            "base": ("base", "spoke"),
+            "base": ("base", "spoke", "star"),
             "wheels": ("wheel", "caster"),
         },
         visual_requirements=(
@@ -138,11 +138,11 @@ BENCHMARKS: dict[str, BenchmarkProfile] = {
             "legs": ("leg", "thigh", "shin"),
             "joints": ("joint", "knee", "hip"),
             "feet": ("foot", "feet"),
-            "camera head": ("camera", "head"),
+            "camera head": ("camera", "head", "optic"),
             "sensors": ("sensor", "pod"),
             "antenna": ("antenna", "mast"),
             "battery": ("battery", "pack"),
-            "tool arm": ("tool", "arm"),
+            "tool arm": ("tool", "arm", "manipulator"),
         },
         visual_requirements=(
             "armored torso",

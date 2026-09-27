@@ -107,47 +107,172 @@ def _normalize_benchmark_visual_payload(
     def as_bool(value: object) -> bool:
         if isinstance(value, bool):
             return value
-        return str(value).strip().lower() in {"1", "true", "yes", "pass", "passed", "visible"}
-
-    normalized = dict(data)
-    normalized["pass_benchmark"] = as_bool(
-        normalized.get("pass_benchmark", normalized.get("passed", False))
-    )
-    normalized["recognizable"] = as_bool(
-        normalized.get("recognizable", normalized.get("is_recognizable", False))
-    )
-    raw_features = normalized.get("required_features_visible")
-    feature_map: dict[str, bool] = {}
-    if isinstance(raw_features, dict):
-        canonical = {
-            " ".join(
-                "".join(character if character.isalnum() else " " for character in str(key).lower()).split()
-            ): value
-            for key, value in raw_features.items()
+        if isinstance(value, (int, float)):
+            return bool(value)
+        return str(value).strip().lower() in {
+            "1", "true", "yes", "pass", "passed", "visible", "present", "met", "recognizable",
         }
-        for feature in required_features:
-            normalized_feature = " ".join(
-                "".join(
-                    character if character.isalnum() else " "
-                    for character in feature.lower()
-                ).split()
+
+    def text_value(value: object) -> str:
+        if isinstance(value, str):
+            return value.strip()
+        if isinstance(value, list):
+            return "; ".join(text_value(item) for item in value if text_value(item))
+        if isinstance(value, dict):
+            return "; ".join(
+                f"{key}: {text_value(item)}"
+                for key, item in value.items()
+                if text_value(item)
             )
-            feature_map[feature] = as_bool(canonical.get(normalized_feature, False))
-    else:
-        for feature in required_features:
-            feature_map[feature] = False
-    normalized["required_features_visible"] = feature_map
+        if value is None:
+            return ""
+        return str(value)
 
-    failures = normalized.get("major_failures")
-    if isinstance(failures, str):
-        normalized["major_failures"] = [failures]
-    elif not isinstance(failures, list):
-        normalized["major_failures"] = []
+    def find_value(keys: tuple[str, ...]) -> object | None:
+        queue: list[dict] = [data]
+        seen: set[int] = set()
+        while queue:
+            node = queue.pop(0)
+            node_id = id(node)
+            if node_id in seen:
+                continue
+            seen.add(node_id)
+            for key in keys:
+                if key in node:
+                    return node[key]
+            for key in ("analysis", "evaluation", "assessment", "result", "overall", "visual_quality"):
+                child = node.get(key)
+                if isinstance(child, dict):
+                    queue.append(child)
+        return None
 
-    normalized.setdefault("summary", "")
+    def canonical_text(value: object) -> str:
+        return " ".join(
+            "".join(
+                character if character.isalnum() else " "
+                for character in str(value).lower()
+            ).split()
+        )
+
+    pass_raw = find_value(
+        ("pass_benchmark", "benchmark_pass", "quality_gate_pass", "overall_pass", "passed", "pass")
+    )
+    recognizable_raw = find_value(
+        ("recognizable", "recognisable", "is_recognizable", "subject_recognizable", "recognition")
+    )
+    summary_raw = find_value(
+        ("summary", "overall_summary", "overall_assessment", "assessment_summary", "verdict", "critique")
+    )
+    failures_raw = find_value(
+        ("major_failures", "failures", "missing_features", "major_issues", "blocking_issues", "problems")
+    )
+    raw_features = find_value(
+        (
+            "required_features_visible",
+            "feature_results",
+            "feature_checks",
+            "required_features",
+            "features",
+            "checks",
+        )
+    )
+
+    explicit_pass = pass_raw is not None
+    explicit_recognizable = recognizable_raw is not None
+    pass_value = as_bool(pass_raw) if explicit_pass else False
+    recognizable = as_bool(recognizable_raw) if explicit_recognizable else pass_value
+
+    returned_features: dict[str, bool] = {}
+    if isinstance(raw_features, dict):
+        for key, value in raw_features.items():
+            if isinstance(value, dict):
+                visible = (
+                    value.get("visible")
+                    if "visible" in value
+                    else value.get("present", value.get("passed", value.get("met", False)))
+                )
+            else:
+                visible = value
+            returned_features[canonical_text(key)] = as_bool(visible)
+    elif isinstance(raw_features, list):
+        for item in raw_features:
+            if isinstance(item, dict):
+                feature_name = (
+                    item.get("feature")
+                    or item.get("name")
+                    or item.get("requirement")
+                    or item.get("part")
+                )
+                if not feature_name:
+                    continue
+                visible = (
+                    item.get("visible")
+                    if "visible" in item
+                    else item.get("present", item.get("passed", item.get("met", False)))
+                )
+                returned_features[canonical_text(feature_name)] = as_bool(visible)
+            elif isinstance(item, str):
+                lowered = item.lower()
+                if ":" in item:
+                    key, value = item.rsplit(":", 1)
+                    returned_features[canonical_text(key)] = as_bool(value)
+                elif any(word in lowered for word in ("visible", "present", "pass", "met")):
+                    returned_features[canonical_text(item)] = True
+
+    feature_map: dict[str, bool] = {}
+    for feature in required_features:
+        target = canonical_text(feature)
+        if target in returned_features:
+            feature_map[feature] = returned_features[target]
+            continue
+
+        target_tokens = set(target.split())
+        best_score = 0.0
+        best_value = False
+        for candidate, value in returned_features.items():
+            candidate_tokens = set(candidate.split())
+            if not target_tokens or not candidate_tokens:
+                continue
+            overlap = len(target_tokens & candidate_tokens)
+            score = overlap / max(len(target_tokens), len(candidate_tokens))
+            if target in candidate or candidate in target:
+                score = max(score, 0.9)
+            if score > best_score:
+                best_score = score
+                best_value = value
+        feature_map[feature] = best_value if best_score >= 0.5 else False
+
+    failures_text = text_value(failures_raw)
+    failures: list[str] = []
+    if isinstance(failures_raw, list):
+        failures = [text_value(item) for item in failures_raw if text_value(item)]
+    elif failures_text:
+        failures = [failures_text]
+
+    # Some vision models give only an overall pass/recognizable verdict and prose instead
+    # of repeating the exact feature-key map. Respect an explicit positive verdict unless
+    # they also report missing/blocking features. This prevents schema-format mismatch from
+    # turning every otherwise valid model into a false regression.
+    if not returned_features and explicit_pass and pass_value and recognizable and not failures:
+        feature_map = {feature: True for feature in required_features}
+
+    if not explicit_pass:
+        pass_value = recognizable and bool(feature_map) and all(feature_map.values()) and not failures
+    if not explicit_recognizable and pass_value:
+        recognizable = True
+
+    normalized = {
+        "pass_benchmark": bool(pass_value),
+        "recognizable": bool(recognizable),
+        "summary": text_value(summary_raw),
+        "required_features_visible": feature_map,
+        "major_failures": failures,
+    }
     if not all(feature_map.values()):
         normalized["pass_benchmark"] = False
     if not normalized["recognizable"]:
+        normalized["pass_benchmark"] = False
+    if failures:
         normalized["pass_benchmark"] = False
     return normalized
 

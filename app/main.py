@@ -3337,6 +3337,10 @@ async def _ask_modeling_director(
         action = decision.action
         if not include_renders and action == "accept":
             action = "build_procedural"
+        elif include_renders and action == "accept" and feature_task is not None:
+            # The whole object cannot be declared finished while the coordinator
+            # still has an unresolved visible feature sub-job.
+            action = "refine_mesh" if current_strategy == "adaptive_loft" else "revise_procedural"
         payload = {
             **decision.model_dump(),
             "action": action,

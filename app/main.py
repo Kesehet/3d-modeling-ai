@@ -3831,9 +3831,9 @@ async def _refine_adaptive_mesh(
             baseline_version=baseline_version,
             candidate_version=version,
         )
-        feature_passed = bool(
-            feature_evaluation.get("passed")
-            and not feature_evaluation.get("regression_detected")
+        feature_passed = _feature_evaluation_accepts(
+            feature_task,
+            feature_evaluation,
         )
         comparison = {
             "candidate_is_better": feature_passed,
@@ -3920,6 +3920,15 @@ async def _refine_adaptive_mesh(
                     or comparison.get("summary")
                     or quality.get("summary")
                     or ""
+                ),
+                verified=True,
+                acceptance_score=float(
+                    (feature_evaluation or {}).get("reference_match_score") or 0.0
+                ),
+                acceptance_model=(
+                    str((feature_evaluation or {}).get("model"))
+                    if (feature_evaluation or {}).get("model")
+                    else None
                 ),
             )
             append_history(
@@ -4090,8 +4099,7 @@ async def _generate_adaptive_mesh_fallback(
         quality = dict(previous_quality)
         feature_passed = bool(
             feature_evaluation
-            and feature_evaluation.get("passed")
-            and not feature_evaluation.get("regression_detected")
+            and _feature_evaluation_accepts(feature_task, feature_evaluation)
         )
         quality["summary"] = (
             (feature_evaluation or {}).get("summary")
@@ -4202,7 +4210,16 @@ async def _generate_adaptive_mesh_fallback(
             accepted=accepted_feature,
             version=version if accepted_feature else None,
             summary=str((feature_evaluation or {}).get("summary") or quality.get("summary") or ""),
-            error="" if accepted_feature else "Focused feature QA did not pass.",
+            error="" if accepted_feature else "Strict focused feature QA did not pass.",
+            verified=accepted_feature,
+            acceptance_score=float(
+                (feature_evaluation or {}).get("reference_match_score") or 0.0
+            ),
+            acceptance_model=(
+                str((feature_evaluation or {}).get("model"))
+                if (feature_evaluation or {}).get("model")
+                else None
+            ),
         )
         append_history(
             root,

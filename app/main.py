@@ -551,6 +551,23 @@ class GenericRefineRequest(BaseModel):
     iterations: int = Field(default=1, ge=1, le=3)
 
 
+class SubjectPartSpec(BaseModel):
+    name: str = Field(min_length=1, max_length=100)
+    count: int = Field(default=1, ge=1, le=12)
+    importance: Literal["required", "important", "detail"] = "required"
+    shape_hint: str = Field(default="", max_length=160)
+    placement_hint: str = Field(default="", max_length=240)
+
+
+class SubjectInventory(BaseModel):
+    subject_family: str = Field(default="unknown", max_length=100)
+    silhouette_summary: str = Field(default="", max_length=1200)
+    complexity: Literal["simple", "moderate", "complex"] = "moderate"
+    recommended_strategy: Literal["procedural", "base_mesh", "hybrid"] = "procedural"
+    minimum_distinct_parts: int = Field(default=4, ge=2, le=32)
+    major_parts: list[SubjectPartSpec] = Field(min_length=2, max_length=24)
+
+
 class SceneObjectSpec(BaseModel):
     name: str = Field(min_length=1, max_length=80)
     shape: Literal["sphere", "cube", "cylinder", "cone", "torus", "rod", "beam", "frustum", "wedge"]
@@ -570,6 +587,135 @@ class GenericSceneSpec(BaseModel):
     rationale: str = Field(default="", max_length=2000)
     presentation_base: bool = True
     objects: list[SceneObjectSpec] = Field(min_length=1, max_length=40)
+
+
+def _semantic_name_tokens(value: str) -> set[str]:
+    ignored = {
+        "left", "right", "front", "rear", "back", "top", "bottom",
+        "upper", "lower", "inner", "outer", "main", "small", "large",
+        "primary", "secondary", "part", "object", "segment", "side",
+    }
+    normalized = "".join(character if character.isalnum() else " " for character in value.lower())
+    tokens: set[str] = set()
+    for raw in normalized.split():
+        if len(raw) < 3 or raw.isdigit() or raw in ignored:
+            continue
+        token = raw
+        if len(token) > 4 and token.endswith("ies"):
+            token = token[:-3] + "y"
+        elif len(token) > 4 and token.endswith("es"):
+            token = token[:-2]
+        elif len(token) > 3 and token.endswith("s"):
+            token = token[:-1]
+        if token and token not in ignored:
+            tokens.add(token)
+    return tokens
+
+
+def _scene_inventory_coverage(spec: GenericSceneSpec, inventory: SubjectInventory) -> dict:
+    object_tokens = [
+        (obj.name, _semantic_name_tokens(obj.name))
+        for obj in spec.objects
+    ]
+    part_rows = []
+    required_total = 0
+    required_covered = 0
+    for part in inventory.major_parts:
+        tokens = _semantic_name_tokens(part.name)
+        matches = [
+            name for name, candidate_tokens in object_tokens
+            if tokens and (tokens & candidate_tokens)
+        ]
+        needed = max(1, part.count)
+        covered_count = min(len(matches), needed)
+        covered = covered_count >= needed
+        if part.importance == "required":
+            required_total += needed
+            required_covered += covered_count
+        part_rows.append(
+            {
+                "name": part.name,
+                "importance": part.importance,
+                "required_count": needed,
+                "matched_count": len(matches),
+                "matched_objects": matches[:12],
+                "covered": covered,
+            }
+        )
+
+    ratio = 1.0 if required_total == 0 else required_covered / required_total
+    minimum_parts_ok = len(spec.objects) >= inventory.minimum_distinct_parts
+    missing_required = [
+        f"{row['name']} ({row['matched_count']}/{row['required_count']})"
+        for row in part_rows
+        if row["importance"] == "required" and not row["covered"]
+    ]
+    return {
+        "required_coverage": round(ratio, 4),
+        "minimum_distinct_parts": inventory.minimum_distinct_parts,
+        "object_count": len(spec.objects),
+        "minimum_parts_ok": minimum_parts_ok,
+        "missing_required": missing_required,
+        "parts": part_rows,
+        "passes": bool(ratio >= 0.80 and minimum_parts_ok),
+    }
+
+
+async def _build_subject_inventory(
+    root: Path,
+    job_request: dict,
+    visual_context: dict,
+    research_context: dict,
+) -> SubjectInventory | None:
+    system = (
+        "You create a subject-part inventory for a general 3D modeling agent. Return JSON only matching "
+        "the schema. Identify the minimum set of visually distinct major parts needed for an unfamiliar "
+        "viewer to recognize the requested subject. This is not a benchmark-specific checklist. Use the "
+        "prompt, reference analysis and research evidence together. Group micro-details, but keep separate "
+        "silhouette-defining masses, repeated structural parts, openings/windows/screens, wheels/feet/legs, "
+        "handles/appendages and other identity-critical features. Set counts for repeated parts when visible "
+        "identity depends on them. Recommend base_mesh or hybrid when rearranging simple primitives is unlikely "
+        "to reproduce the subject's silhouette accurately."
+    )
+    prompt = (
+        f"User request: {job_request.get('prompt', '')}\n"
+        f"Intended use: {job_request.get('intended_use', '')}\n"
+        f"Reference analysis: {json.dumps(visual_context, ensure_ascii=False)}\n"
+        f"Research context: {json.dumps(research_context, ensure_ascii=False)}\n"
+        "Return a conservative major-part inventory. Do not add brand trivia or invisible internal components."
+    )
+    try:
+        result = await OllamaProxyClient().chat_json(
+            model=REASONING_MODEL,
+            system=system,
+            prompt=prompt,
+            schema=SubjectInventory.model_json_schema(),
+            temperature=0.0,
+        )
+        inventory = SubjectInventory.model_validate(result.data)
+    except (OllamaProxyError, httpx.HTTPError, ValidationError, ValueError, TypeError) as exc:
+        append_history(root, "subject_inventory_failed", error=str(exc))
+        return None
+
+    payload = {
+        "model": REASONING_MODEL,
+        "inventory": inventory.model_dump(),
+        "created_at": datetime.now(UTC).isoformat(),
+    }
+    (root / "subject-inventory.json").write_text(
+        json.dumps(payload, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    append_history(
+        root,
+        "subject_inventory",
+        family=inventory.subject_family,
+        complexity=inventory.complexity,
+        strategy=inventory.recommended_strategy,
+        minimum_distinct_parts=inventory.minimum_distinct_parts,
+        major_parts=len(inventory.major_parts),
+    )
+    return inventory
 
 
 def _normalize_scene_spec_payload(data: object, fallback_title: str) -> dict:

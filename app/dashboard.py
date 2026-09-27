@@ -57,11 +57,19 @@ def jobs_snapshot() -> dict:
                 continue
 
             artifacts = {category: _artifact_rows(root, category) for category in PUBLIC_ARTIFACT_CATEGORIES}
-            renders = [
+            all_renders = [
                 item
                 for item in artifacts["renders"]
                 if Path(item["name"]).suffix.lower() in IMAGE_SUFFIXES
-            ][:64]
+            ]
+            active_generic = status.get("generic_model") if isinstance(status.get("generic_model"), dict) else {}
+            active_version = active_generic.get("version")
+            if isinstance(active_version, int):
+                prefix = f"model-v{active_version}-"
+                accepted_renders = [item for item in all_renders if item["name"].startswith(prefix)]
+                renders = accepted_renders or all_renders[:64]
+            else:
+                renders = all_renders[:64]
 
             history: list[dict] = []
             history_path = root / "history.json"
@@ -80,6 +88,10 @@ def jobs_snapshot() -> dict:
                 key=lambda item: item.stat().st_mtime,
                 reverse=True,
             )
+            if isinstance(active_version, int):
+                active_qa = root / "exports" / f"model-v{active_version}-qa.json"
+                if active_qa.is_file():
+                    qa_files = [active_qa] + [path for path in qa_files if path != active_qa]
             for qa_path in qa_files:
                 try:
                     parsed_qa = json.loads(qa_path.read_text(encoding="utf-8"))

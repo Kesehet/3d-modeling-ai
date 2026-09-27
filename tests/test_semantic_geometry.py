@@ -132,8 +132,8 @@ def test_pikachu_tail_uses_all_four_attached_beam_segments():
     tails = [item for item in result["objects"] if "tail segment" in item["name"]]
     assert len(tails) == 4
     assert all(item["shape"] == "beam" for item in tails)
-    for previous, current in zip(tails, tails[1:]):
-        assert previous["end"] == current["start"]
+    for index in range(len(tails) - 1):
+        assert tails[index]["end"] == tails[index + 1]["start"]
 
 
 def test_sneaker_assembly_creates_missing_foot_opening_and_layers():

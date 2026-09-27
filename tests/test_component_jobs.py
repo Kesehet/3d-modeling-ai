@@ -5,7 +5,12 @@ from fastapi import HTTPException
 
 from app import main
 from app.component_assembly import component_assembly_script
-from app.feature_tasks import FeaturePlan, load_feature_plan, normalize_feature_plan_payload, save_feature_plan
+from app.feature_tasks import (
+    FeaturePlan,
+    load_feature_plan,
+    normalize_feature_plan_payload,
+    save_feature_plan,
+)
 
 
 def _parent_job(tmp_path, monkeypatch, *, depth=0):

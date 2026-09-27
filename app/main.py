@@ -2736,6 +2736,38 @@ def _feature_diagnostic_views(feature_task: FeatureTask) -> tuple[str, ...]:
     return ("front-left", "left", "back-right")
 
 
+def _feature_evaluation_accepts(
+    feature_task: FeatureTask,
+    evaluation: dict,
+) -> bool:
+    try:
+        confidence = float(evaluation.get("confidence") or 0.0)
+    except (TypeError, ValueError):
+        confidence = 0.0
+    try:
+        match_score = float(evaluation.get("reference_match_score") or 0.0)
+    except (TypeError, ValueError):
+        match_score = 0.0
+
+    feature_text = " ".join(
+        [feature_task.name, feature_task.category, *feature_task.target_regions]
+    ).lower()
+    primary_shape = (
+        feature_task.strategy == "base_mesh_region"
+        or any(token in feature_text for token in ("silhouette", "body shell", "main body", "primary body"))
+    )
+    minimum_match = 0.82 if primary_shape else 0.72
+
+    return bool(
+        evaluation.get("passed") is True
+        and evaluation.get("visible") is True
+        and evaluation.get("criteria_satisfied") is True
+        and evaluation.get("regression_detected") is not True
+        and confidence >= 0.75
+        and match_score >= minimum_match
+    )
+
+
 async def _evaluate_feature_candidate(
     job_id: str,
     feature_task: FeatureTask,
@@ -2783,12 +2815,17 @@ async def _evaluate_feature_candidate(
     images = _encode_vision_images(image_paths)
     labels = [f"{path.parent.name}/{path.name}" for path in image_paths]
     system = (
-        "You are the visual QA reviewer for ONE feature sub-job in an autonomous 3D modeling pipeline. "
-        "Compare the candidate against the references and, when supplied, the baseline; judge the active feature's "
-        "acceptance criteria specifically. Set passed=true only when that feature is visibly improved or already "
-        "convincingly satisfied in the candidate AND unrelated protected geometry has not materially regressed. "
-        "Minor changes to supporting surfaces are allowed when required by dependencies. Do not require a tiny "
-        "feature to cause a large whole-object score change. Return JSON only matching the supplied schema."
+        "You are the strict visual QA reviewer for ONE feature sub-job in an autonomous 3D modeling pipeline. "
+        "Compare the candidate against the exact references and, when supplied, the baseline. ACCEPTANCE IS ABSOLUTE, "
+        "NOT RELATIVE: a feature being better than the baseline is never enough by itself. Set passed=true and "
+        "criteria_satisfied=true only when the candidate visibly satisfies ALL acceptance criteria that can be judged "
+        "from the supplied pixels. Set visible=true only when the feature itself is clearly visible in the candidate. "
+        "reference_match_score is an absolute 0..1 score for how closely this feature matches the reference appearance, "
+        "shape, placement, count and proportions. If a criterion demands precision that cannot actually be verified "
+        "from these images (for example exact millimetres or a 1% tolerance), do NOT pretend it was measured: set "
+        "criteria_satisfied=false and explain the unverifiable criterion. If the candidate merely improved but remains "
+        "wrong, passed MUST be false. If unrelated protected geometry regressed, regression_detected must be true. "
+        "Return JSON only matching the supplied schema."
     )
     comparison_context = (
         f"Reference images come first. Then BASELINE v{baseline_version} views {list(views)}. "
@@ -2801,8 +2838,8 @@ async def _evaluate_feature_candidate(
         f"Images in order: {labels}\n"
         + comparison_context
         + f"Then CANDIDATE v{candidate_version} views {list(views)}.\n"
-        + "Check the feature's target_regions, owner_scope and acceptance_criteria. Mention any protected geometry "
-        + "that regressed."
+        + "Check every acceptance criterion explicitly. Passing means DONE, not just improved. "
+        + "Mention any unmet/unverifiable criterion in problems and any protected geometry regression separately."
     )
 
     client = OllamaProxyClient()

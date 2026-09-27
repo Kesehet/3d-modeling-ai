@@ -95,3 +95,20 @@ def test_modeling_director_normalizes_aliases_and_dict_lists():
     assert decision.action == "build_mesh"
     assert decision.instructions == ["Rebuild the roofline", "Fix wheel arches"]
     assert decision.major_problems == ["Cabin silhouette is wrong"]
+
+
+
+def test_modeling_director_accepts_mesh_refinement_action():
+    raw = {
+        "action": "refine mesh",
+        "subject_match_score": 0.58,
+        "summary": "The body is recognizable but the proportions need targeted editing.",
+        "instructions": ["Lower the roofline", "Lengthen the hood"],
+    }
+    decision = ModelingDirectorDecision.model_validate(
+        _normalize_modeling_director_payload(raw)
+    )
+
+    assert decision.action == "refine_mesh"
+    assert decision.subject_match_score == 0.58
+    assert decision.instructions == ["Lower the roofline", "Lengthen the hood"]

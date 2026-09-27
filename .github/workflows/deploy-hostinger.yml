@@ -186,9 +186,10 @@ jobs:
             -H "Authorization: Bearer $THREED_API_TOKEN" \
             "$BASE_URL/v1/capabilities")
           echo "$CAPABILITIES" | jq .
-          echo "$CAPABILITIES" | jq -e '.vision_model == "qwen3-vl:235b-cloud"' >/dev/null
+          echo "$CAPABILITIES" | jq -e '.vision_model == "kimi-k3:cloud"' >/dev/null
+          echo "$CAPABILITIES" | jq -e '.vision_models | index("mistral-large-3:675b-cloud") != null' >/dev/null
           echo "$CAPABILITIES" | jq -e '.vision_models | index("gemma4:31b-cloud") != null' >/dev/null
-          echo "Verified Qwen 235B primary + multimodal fallback configuration."
+          echo "Verified Kimi K3 primary + Mistral Large 3 + Gemma multimodal fallback configuration."
 
           curl --fail --silent --show-error \
             -H "Authorization: Bearer $THREED_API_TOKEN" \

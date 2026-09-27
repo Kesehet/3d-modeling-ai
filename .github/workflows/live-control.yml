@@ -1,6 +1,8 @@
 name: Live Server Control
 
 on:
+  issues:
+    types: [opened]
   issue_comment:
     types: [created]
 
@@ -16,14 +18,17 @@ jobs:
   control:
     if: >-
       github.actor == github.repository_owner &&
-      startsWith(github.event.comment.body, '/live-control')
+      (
+        (github.event_name == 'issue_comment' && startsWith(github.event.comment.body, '/live-control')) ||
+        (github.event_name == 'issues' && startsWith(github.event.issue.body, '/live-control'))
+      )
     runs-on: ubuntu-latest
     environment: production
     timeout-minutes: 55
     env:
       THREED_API_TOKEN: ${{ secrets.THREED_API_TOKEN }}
       THREED_HOSTNAME: ${{ vars.THREED_HOSTNAME || '3d-modeling-ai.srv1058562.hstgr.cloud' }}
-      COMMENT_BODY: ${{ github.event.comment.body }}
+      COMMENT_BODY: ${{ github.event.comment.body || github.event.issue.body }}
       ISSUE_NUMBER: ${{ github.event.issue.number }}
     steps:
       - name: Check production credentials

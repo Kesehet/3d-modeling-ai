@@ -119,8 +119,20 @@ def _normalize_benchmark_visual_payload(
     raw_features = normalized.get("required_features_visible")
     feature_map: dict[str, bool] = {}
     if isinstance(raw_features, dict):
+        canonical = {
+            " ".join(
+                "".join(character if character.isalnum() else " " for character in str(key).lower()).split()
+            ): value
+            for key, value in raw_features.items()
+        }
         for feature in required_features:
-            feature_map[feature] = as_bool(raw_features.get(feature, False))
+            normalized_feature = " ".join(
+                "".join(
+                    character if character.isalnum() else " "
+                    for character in feature.lower()
+                ).split()
+            )
+            feature_map[feature] = as_bool(canonical.get(normalized_feature, False))
     else:
         for feature in required_features:
             feature_map[feature] = False

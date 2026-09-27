@@ -6068,14 +6068,18 @@ async def _refine_hard_surface_cage_incrementally(
             "cage_edit_escalation",
             working_version=baseline_version,
             stall_count=stall_count,
-            reason="Four bounded visual edits failed to improve the working cage.",
+            reason=(
+                "Four bounded visual edits failed to improve the working cage; "
+                "switching to a different editable mesh representation."
+            ),
         )
-        return await _generate_hard_surface_cage(
+        return await _generate_adaptive_mesh_fallback(
             job_id,
             reason=(
-                "Bounded visual editing stalled for four consecutive candidates. "
-                "Re-plan the hard-surface representation from the references, preserving "
-                "the best active model and addressing the accumulated visual critiques."
+                "The current hard-surface cage stalled for four consecutive candidates. "
+                "Do not regenerate another cage with the same representation. Build a different "
+                "reference-driven adaptive loft candidate, compare it against the preserved "
+                "best cage, and keep it only if the pixels clearly improve."
             ),
             feature_task=feature_task,
         )
@@ -6093,11 +6097,15 @@ async def _refine_hard_surface_cage_incrementally(
             working_version=baseline_version,
             stall_count=stall_count,
             reason=action.reason,
+            next_strategy="adaptive_loft",
         )
-        return await _generate_hard_surface_cage(
+        return await _generate_adaptive_mesh_fallback(
             job_id,
             reason=(
-                "The visual edit director determined that bounded edits are not sufficient. "
+                "The visual edit director determined that the current cage representation "
+                "cannot plausibly converge with bounded edits. Do not generate another cage. "
+                "Try the different adaptive-loft representation while preserving the current "
+                "best model until the candidate wins visual comparison. "
                 + action.reason
             ),
             feature_task=feature_task,
@@ -7342,24 +7350,25 @@ async def _generate_adaptive_mesh_fallback(
     reason: str,
     feature_task: FeatureTask | None = None,
 ) -> dict:
-    root = _require_job(job_id)
-    status_path = root / "status.json"
-    previous_status: dict = {}
-    if status_path.exists():
-        try:
-            previous_status = json.loads(status_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            previous_status = {}
+    """Try a different adaptive representation without discarding the best-so-far model."""
 
+    root = _require_job(job_id)
+    previous_status = _read_status(root)
     previous_model = (
         dict(previous_status.get("generic_model"))
         if isinstance(previous_status.get("generic_model"), dict)
         else None
     )
+    previous_strategy = str(previous_status.get("modeling_strategy") or "procedural")
+    previous_working_cage_version = (
+        previous_status.get("working_cage_version")
+        if isinstance(previous_status.get("working_cage_version"), int)
+        else None
+    )
     baseline_version = (
         previous_model.get("version")
         if isinstance(previous_model, dict) and isinstance(previous_model.get("version"), int)
-        else None
+        else previous_working_cage_version
     )
 
     feature_task = feature_task or begin_feature(root)
@@ -7388,19 +7397,25 @@ async def _generate_adaptive_mesh_fallback(
     )
     version = reserve_model_version(root)
     build = await _execute_adaptive_loft(job_id, spec, version=version)
+    candidate_model = (
+        build.get("status", {}).get("generic_model")
+        if isinstance(build.get("status"), dict)
+        else None
+    )
 
     comparison: dict | None = None
+    if baseline_version is not None and baseline_version != version:
+        comparison = await _compare_generic_versions(
+            root,
+            baseline_version=baseline_version,
+            candidate_version=version,
+        )
+
     feature_evaluation: dict | None = None
     if feature_task is not None:
         feature_evaluation = await _evaluate_feature_candidate(
             job_id,
             feature_task,
-            baseline_version=baseline_version,
-            candidate_version=version,
-        )
-    elif baseline_version is not None and baseline_version != version:
-        comparison = await _compare_generic_versions(
-            root,
             baseline_version=baseline_version,
             candidate_version=version,
         )
@@ -7416,21 +7431,44 @@ async def _generate_adaptive_mesh_fallback(
             feature_evaluation
             and _feature_evaluation_accepts(feature_task, feature_evaluation)
         )
-        quality["summary"] = (
-            (feature_evaluation or {}).get("summary")
-            or quality.get("summary")
-            or f"Worked feature {feature_task.name}."
+        better = bool(
+            baseline_version is None
+            or (comparison and comparison.get("candidate_is_better") is True)
         )
-        quality["active_feature_id"] = feature_task.id
-        quality["active_feature_passed"] = feature_passed
-        recognizable = quality.get("recognizable")
-        better = feature_passed
-        accept_candidate = baseline_version is None or feature_passed
+        accept_candidate = better
+        recognizable = (
+            (feature_evaluation or {}).get("subject_recognizable")
+            if (feature_evaluation or {}).get("subject_recognizable") is not None
+            else quality.get("recognizable")
+        )
+        quality.update(
+            {
+                "summary": (
+                    (feature_evaluation or {}).get("summary")
+                    or (comparison or {}).get("summary")
+                    or quality.get("summary")
+                    or f"Worked feature {feature_task.name}."
+                ),
+                "active_feature_id": feature_task.id,
+                "active_feature_passed": feature_passed,
+                "recognizable": recognizable,
+                "subject_match_score": (
+                    (feature_evaluation or {}).get("reference_match_score")
+                    if (feature_evaluation or {}).get("reference_match_score") is not None
+                    else quality.get("subject_match_score")
+                ),
+                "representation": "adaptive_loft",
+                "baseline_version": baseline_version,
+                "candidate_version": version,
+                "candidate_improved": better,
+            }
+        )
     else:
         try:
             quality = await _generic_recognizability_check(
                 job_id,
                 stage="generic_mesh_fallback_quality",
+                render_version=version,
             )
         except HTTPException as exc:
             append_history(root, "adaptive_mesh_quality_unavailable", error=str(exc.detail))
@@ -7442,63 +7480,85 @@ async def _generate_adaptive_mesh_fallback(
             }
 
         recognizable = quality.get("recognizable")
-        better = bool(comparison and comparison.get("candidate_is_better"))
         feature_passed = False
-        accept_candidate = recognizable is True or baseline_version is None or better
+        better = bool(
+            baseline_version is None
+            or (comparison and comparison.get("candidate_is_better") is True)
+        )
+        accept_candidate = bool(
+            baseline_version is None
+            or better
+            or (baseline_version is None and recognizable is True)
+        )
 
-    if not accept_candidate and previous_model is not None:
-        active_renders = previous_model.get("renders")
-        if not isinstance(active_renders, list):
-            active_renders = [
-                f"model-v{baseline_version}-{view}.png"
-                for view in (
-                    "front", "front-left", "left", "back-left", "back",
-                    "back-right", "right", "front-right", "top",
-                )
-            ]
+    if not accept_candidate:
+        restored_quality = dict(
+            previous_status.get("quality_gate")
+            if isinstance(previous_status.get("quality_gate"), dict)
+            else {}
+        )
+        restored_quality.update(
+            {
+                "candidate_rejected": True,
+                "last_rejected_candidate_version": version,
+                "last_candidate_evaluation": quality,
+                "summary": (
+                    (comparison or {}).get("summary")
+                    or quality.get("summary")
+                    or restored_quality.get("summary")
+                ),
+            }
+        )
         status = _write_status(
             root,
             state="ready",
-            stage=(
-                "adaptive_mesh_needs_refinement"
-                if previous_status.get("modeling_strategy") == "adaptive_loft"
-                else "generic_needs_strategy_switch"
-            ),
-            modeling_strategy=previous_status.get("modeling_strategy") or "procedural",
+            stage=previous_status.get("stage") or "generic_needs_strategy_switch",
+            modeling_strategy=previous_strategy,
             generic_model=previous_model,
-            quality_gate={
-                "recognizable": False,
-                "subject_match_score": quality.get("subject_match_score"),
-                "recommended_strategy": quality.get("recommended_strategy"),
-                "summary": quality.get("summary"),
-                "adaptive_mesh_attempted": True,
-                "adaptive_mesh_candidate_version": version,
-            },
+            working_cage_version=previous_working_cage_version,
+            cage_edit_stall_count=int(previous_status.get("cage_edit_stall_count") or 0) + 1,
+            quality_gate=restored_quality,
         )
         append_history(
             root,
             "adaptive_mesh_rejected",
             baseline_version=baseline_version,
             candidate_version=version,
-            comparison_summary=comparison.get("summary") if comparison else None,
+            comparison_summary=(comparison or {}).get("summary"),
+            preserved_strategy=previous_strategy,
         )
+        if feature_task is not None:
+            record_feature_progress(
+                root,
+                feature_task.id,
+                version=baseline_version or version,
+                summary=(
+                    "Alternative representation candidate reverted; feature remains active. "
+                    + str(
+                        (comparison or {}).get("summary")
+                        or (feature_evaluation or {}).get("summary")
+                        or ""
+                    )
+                ),
+            )
     else:
-        if recognizable is True:
+        if feature_task is not None and feature_passed:
+            stage = "adaptive_mesh_feature_complete"
+        elif recognizable is True:
             stage = "adaptive_mesh_recognizable"
-        elif recognizable is None:
-            stage = "generic_quality_unverified"
         else:
             stage = "adaptive_mesh_needs_refinement"
+
         status = _write_status(
             root,
             state="ready",
             stage=stage,
             modeling_strategy="adaptive_loft",
+            generic_model=candidate_model if isinstance(candidate_model, dict) else build["status"].get("generic_model"),
+            working_cage_version=None,
+            cage_edit_stall_count=0,
             quality_gate={
-                "recognizable": recognizable,
-                "subject_match_score": quality.get("subject_match_score"),
-                "recommended_strategy": quality.get("recommended_strategy"),
-                "summary": quality.get("summary"),
+                **quality,
                 "adaptive_mesh_attempted": True,
                 "adaptive_mesh_candidate_version": version,
                 "better_than_previous": better if comparison is not None else None,
@@ -7511,40 +7571,76 @@ async def _generate_adaptive_mesh_fallback(
             recognizable=recognizable,
             better_than_previous=better if comparison is not None else None,
         )
+        if previous_strategy != "adaptive_loft":
+            append_history(
+                root,
+                "representation_strategy_switched",
+                from_strategy=previous_strategy,
+                to_strategy="adaptive_loft",
+                baseline_version=baseline_version,
+                candidate_version=version,
+                feature_id=feature_task.id if feature_task is not None else None,
+                reason=reason,
+            )
 
-    if feature_task is not None:
-        accepted_feature = bool(feature_passed and accept_candidate)
-        finish_feature(
-            root,
-            feature_task.id,
-            accepted=accepted_feature,
-            version=version if accepted_feature else None,
-            summary=str((feature_evaluation or {}).get("summary") or quality.get("summary") or ""),
-            error="" if accepted_feature else "Strict focused feature QA did not pass.",
-            verified=accepted_feature,
-            acceptance_score=float(
-                (feature_evaluation or {}).get("reference_match_score") or 0.0
-            ),
-            acceptance_model=(
-                str((feature_evaluation or {}).get("model"))
-                if (feature_evaluation or {}).get("model")
-                else None
-            ),
-        )
-        append_history(
-            root,
-            "feature_subjob_accepted" if accepted_feature else "feature_subjob_retry",
-            feature_id=feature_task.id,
-            feature_name=feature_task.name,
-            version=version if accepted_feature else None,
-            via="adaptive_mesh_fallback",
-        )
+        if feature_task is not None:
+            if feature_passed:
+                finish_feature(
+                    root,
+                    feature_task.id,
+                    accepted=True,
+                    version=version,
+                    summary=str(
+                        (feature_evaluation or {}).get("summary")
+                        or quality.get("summary")
+                        or ""
+                    ),
+                    error="",
+                    verified=True,
+                    acceptance_score=float(
+                        (feature_evaluation or {}).get("reference_match_score") or 0.0
+                    ),
+                    acceptance_model=(
+                        str((feature_evaluation or {}).get("model"))
+                        if (feature_evaluation or {}).get("model")
+                        else None
+                    ),
+                )
+                append_history(
+                    root,
+                    "feature_subjob_accepted",
+                    feature_id=feature_task.id,
+                    feature_name=feature_task.name,
+                    version=version,
+                    via="adaptive_mesh_fallback",
+                )
+            else:
+                record_feature_progress(
+                    root,
+                    feature_task.id,
+                    version=version,
+                    summary=str(
+                        (feature_evaluation or {}).get("summary")
+                        or (comparison or {}).get("summary")
+                        or "Alternative representation improved the working model but the feature is not complete."
+                    ),
+                )
+                append_history(
+                    root,
+                    "feature_subjob_progress",
+                    feature_id=feature_task.id,
+                    feature_name=feature_task.name,
+                    version=version,
+                    via="adaptive_mesh_fallback",
+                )
+
         feature_summary = feature_plan_summary(root) or {}
-        if accepted_feature and feature_summary.get("required_complete"):
+        if feature_task is not None and feature_passed and feature_summary.get("required_complete"):
             try:
                 final_quality = await _generic_recognizability_check(
                     job_id,
                     stage="feature_backlog_complete_quality",
+                    render_version=version,
                 )
                 quality = final_quality
                 recognizable = final_quality.get("recognizable")
@@ -7557,7 +7653,7 @@ async def _generate_adaptive_mesh_fallback(
                         else "adaptive_mesh_needs_refinement"
                     ),
                     modeling_strategy="adaptive_loft",
-                    generic_model=build["status"].get("generic_model"),
+                    generic_model=candidate_model if isinstance(candidate_model, dict) else build["status"].get("generic_model"),
                     quality_gate=final_quality,
                 )
             except HTTPException as exc:
@@ -7572,7 +7668,6 @@ async def _generate_adaptive_mesh_fallback(
     build["quality_gate"] = quality
     build["status"] = status
     return build
-
 
 async def _ask_modeling_director(
     job_id: str,

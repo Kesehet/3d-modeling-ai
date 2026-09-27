@@ -5674,6 +5674,7 @@ async def _execute_hard_surface_cage(
     spec: HardSurfaceCageSpec,
     *,
     version: int,
+    activate_status: bool = True,
 ) -> dict:
     root = _require_job(job_id)
     prefix = f"model-v{version}"
@@ -5755,23 +5756,26 @@ async def _execute_hard_surface_cage(
         blend=blend_path.name,
         qa=qa_path.name,
     )
-    status = _write_status(
-        root,
-        state="ready",
-        stage=f"hard_surface_cage_rendered_v{version}",
-        modeling_strategy="hard_surface_cage",
-        generic_model={
-            "version": version,
-            "title": spec.title,
-            "blend": blend_path.name,
-            "renders": expected,
-            "qa": qa_path.name,
-            "strategy": "hard_surface_cage",
-        },
-    )
+    candidate_model = {
+        "version": version,
+        "title": spec.title,
+        "blend": blend_path.name,
+        "renders": expected,
+        "qa": qa_path.name,
+        "strategy": "hard_surface_cage",
+    }
+    status_values: dict[str, object] = {
+        "state": "ready",
+        "stage": f"hard_surface_cage_rendered_v{version}",
+        "modeling_strategy": "hard_surface_cage",
+    }
+    if activate_status:
+        status_values["generic_model"] = candidate_model
+    status = _write_status(root, **status_values)
     return {
         "job_id": job_id,
         "status": status,
+        "candidate_model": candidate_model,
         "strategy": "hard_surface_cage",
         "spec": spec.model_dump(),
         "renders": expected,
@@ -6089,6 +6093,7 @@ async def _refine_hard_surface_cage_incrementally(
         job_id,
         candidate_spec,
         version=version,
+        activate_status=False,
     )
     comparison = await _compare_generic_versions(
         root,
@@ -6146,7 +6151,7 @@ async def _refine_hard_surface_cage_incrementally(
             better_than_active = active_comparison.get("candidate_is_better") is True
 
     if improved:
-        candidate_model = build["status"].get("generic_model")
+        candidate_model = build.get("candidate_model")
         if recognizability and recognizability.get("recognizable") is True:
             better_than_active = True
         next_active_model = candidate_model if better_than_active else active_model

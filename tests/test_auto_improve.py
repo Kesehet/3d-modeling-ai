@@ -1,7 +1,12 @@
 import json
 
 from app.feature_tasks import FeaturePlan, save_feature_plan
-from app.main import _auto_improve_goal_reached, _auto_improve_progress_signature
+from app.main import (
+    _auto_improve_goal_reached,
+    _auto_improve_progress_signature,
+    _feature_queue_is_blocked,
+    _remaining_feature_attempt_budget,
+)
 
 
 def test_auto_improve_requires_quality_and_feature_completion(tmp_path):
@@ -145,3 +150,74 @@ def test_auto_improve_does_not_call_blocked_required_features_complete(tmp_path)
     save_feature_plan(tmp_path, plan)
 
     assert _auto_improve_goal_reached(tmp_path, status) is False
+
+
+
+def test_remaining_feature_budget_counts_only_runnable_unfinished_attempts(tmp_path):
+    plan = FeaturePlan.model_validate(
+        {
+            "plan_version": 2,
+            "subject": "car",
+            "features": [
+                {
+                    "id": "body",
+                    "name": "Body",
+                    "required": True,
+                    "status": "accepted",
+                    "accepted_version": 2,
+                    "acceptance_verified": True,
+                    "acceptance_score": 0.9,
+                },
+                {
+                    "id": "wheels",
+                    "name": "Wheels",
+                    "required": True,
+                    "status": "retry",
+                    "attempts": 1,
+                    "depends_on": ["body"],
+                },
+                {
+                    "id": "badge",
+                    "name": "Badge",
+                    "required": False,
+                    "status": "failed",
+                    "attempts": 3,
+                },
+            ],
+        }
+    )
+    save_feature_plan(tmp_path, plan)
+
+    assert _remaining_feature_attempt_budget(tmp_path) == 2
+
+
+def test_feature_queue_reports_failed_required_dependency(tmp_path):
+    plan = FeaturePlan.model_validate(
+        {
+            "plan_version": 2,
+            "subject": "car",
+            "features": [
+                {
+                    "id": "body",
+                    "name": "Body",
+                    "required": True,
+                    "status": "failed",
+                    "attempts": 3,
+                },
+                {
+                    "id": "wheels",
+                    "name": "Wheels",
+                    "required": True,
+                    "status": "pending",
+                    "depends_on": ["body"],
+                },
+            ],
+        }
+    )
+    save_feature_plan(tmp_path, plan)
+
+    blocked, unresolved = _feature_queue_is_blocked(tmp_path)
+
+    assert blocked is True
+    assert "body" in unresolved
+    assert "wheels" in unresolved

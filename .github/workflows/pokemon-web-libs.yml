@@ -1,0 +1,23 @@
+name: Bundle Pokemon Web Libraries
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  web-libs:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download Three.js runtime
+        run: |
+          mkdir -p web-libs
+          curl -L --fail https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js -o web-libs/three.min.js
+          curl -L --fail https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js -o web-libs/GLTFLoader.js
+          test -s web-libs/three.min.js
+          test -s web-libs/GLTFLoader.js
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pokemon-web-libs
+          path: web-libs/*.js
+          if-no-files-found: error

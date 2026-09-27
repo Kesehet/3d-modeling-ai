@@ -28,6 +28,7 @@ from .config import (
 from .dashboard import dashboard_page, jobs_snapshot, public_artifact, public_render
 from .generic_builder import generic_scene_script
 from .history import append_history, load_history
+from .layout import enforce_subject_layout
 from .ollama import OllamaProxyClient, OllamaProxyError
 from .quality import evaluate_scene_spec_structural, get_benchmark
 from .repair import print_repair_script
@@ -1834,6 +1835,10 @@ async def _build_generic_scene_spec(job_id: str, auto_research: bool) -> Generic
             normalized,
             str(job_request.get("prompt") or ""),
         )
+        normalized = enforce_subject_layout(
+            normalized,
+            str(job_request.get("prompt") or ""),
+        )
         spec = GenericSceneSpec.model_validate(normalized)
     except (OllamaProxyError, httpx.HTTPError, ValidationError, ValueError, TypeError) as exc:
         raise HTTPException(status_code=502, detail=f"Generic scene planning failed: {exc}") from exc
@@ -2047,6 +2052,10 @@ async def refine_generic_scene(job_id: str, request: GenericRefineRequest) -> di
             )
             normalized = _normalize_scene_spec_payload(result.data, current_spec.title)
             normalized = _enforce_character_visibility(
+                normalized,
+                str(job_request.get("prompt") or ""),
+            )
+            normalized = enforce_subject_layout(
                 normalized,
                 str(job_request.get("prompt") or ""),
             )

@@ -33,6 +33,17 @@ from .dashboard import (
     public_render,
     reconcile_all_running_jobs,
 )
+from .feature_tasks import (
+    FeaturePlan,
+    FeatureTask,
+    active_or_next_feature,
+    begin_feature,
+    feature_plan_summary,
+    finish_feature,
+    load_feature_plan,
+    normalize_feature_plan_payload,
+    save_feature_plan,
+)
 from .generic_builder import generic_scene_script
 from .history import append_history, load_history
 from .mesh_builder import adaptive_loft_script
@@ -822,6 +833,110 @@ async def _build_subject_inventory(
     return inventory
 
 
+async def _build_feature_plan(
+    job_id: str,
+    inventory: SubjectInventory | None,
+) -> FeaturePlan | None:
+    root = _require_job(job_id)
+    job_request = json.loads((root / "request.json").read_text(encoding="utf-8"))
+    reference_images, reference_labels = _collect_images(
+        root,
+        VisionAnalyzeRequest(
+            stage="feature_inventory",
+            include_references=True,
+            include_renders=True,
+            max_images=10,
+        ),
+    )
+    system = (
+        "You are the feature coordinator for an autonomous 3D modeling system. Build an exhaustive but useful "
+        "inventory of ALL externally visible features that should be modeled for the requested object. Return JSON "
+        "matching the FeaturePlan schema. Include the primary body/silhouette plus visible secondary features such "
+        "as wheels, windows, lights, handles, mirrors, openings, trim, screens, feet, buttons, appendages, seams or "
+        "other identity-bearing geometry when they are actually visible/relevant. Do not include hidden internals. "
+        "Each feature is a separate sub-job. Give every sub-job a stable lowercase id, priority, modeling strategy, "
+        "target regions, ownership scope, acceptance criteria and dependency ids. Dependencies must form a DAG. "
+        "The primary silhouette/body should normally be first; dependent details should wait for the supporting "
+        "surface. Workers share one best-so-far model, so ownership scopes must be narrow enough to prevent one "
+        "feature worker from unnecessarily rewriting unrelated geometry."
+    )
+    prompt = (
+        f"Exact user request: {job_request.get('prompt', '')}\n"
+        f"Intended use: {job_request.get('intended_use', '')}\n"
+        f"Subject inventory: {json.dumps(inventory.model_dump() if inventory else {}, ensure_ascii=False)}\n"
+        f"Reference images in order: {reference_labels}\n"
+        "List everything visibly important to the requested object's identity, not just a minimal recognition "
+        "checklist. Group only truly inseparable micro-details. Keep left/right or repeated instances in one feature "
+        "task when a single coordinated worker should create them together."
+    )
+    candidate_models = VISION_MODELS if reference_images else (REASONING_MODEL, *VISION_MODELS)
+    client = OllamaProxyClient()
+    errors: list[str] = []
+    for candidate_model in candidate_models:
+        try:
+            result = await client.chat_json(
+                model=candidate_model,
+                system=system,
+                prompt=prompt,
+                images=reference_images or None,
+                schema=FeaturePlan.model_json_schema(),
+                temperature=0.0,
+                num_predict=8192,
+            )
+            normalized = normalize_feature_plan_payload(
+                result.data,
+                subject=str(job_request.get("prompt") or ""),
+            )
+            plan = FeaturePlan.model_validate(normalized)
+        except (OllamaProxyError, httpx.HTTPError, ValidationError, ValueError, TypeError) as exc:
+            errors.append(f"{candidate_model}: {exc}")
+            continue
+
+        save_feature_plan(root, plan)
+        _write_llm_log(
+            root,
+            "feature-plan",
+            {
+                "job_id": job_id,
+                "model": candidate_model,
+                "endpoint": result.endpoint,
+                "usage": result.usage,
+                "images": reference_labels,
+                "plan": plan.model_dump(),
+                "created_at": datetime.now(UTC).isoformat(),
+            },
+        )
+        append_history(
+            root,
+            "feature_plan_created",
+            model=candidate_model,
+            feature_count=len(plan.features),
+            required_count=sum(1 for feature in plan.features if feature.required),
+        )
+        return plan
+
+    append_history(root, "feature_plan_failed", error=" | ".join(errors[-4:]))
+    return None
+
+
+async def _ensure_feature_plan(
+    job_id: str,
+    inventory: SubjectInventory | None = None,
+) -> FeaturePlan | None:
+    root = _require_job(job_id)
+    existing = load_feature_plan(root)
+    if existing is not None:
+        return existing
+    return await _build_feature_plan(job_id, inventory)
+
+
+def _feature_task_context(root: Path) -> tuple[FeaturePlan | None, FeatureTask | None]:
+    plan = load_feature_plan(root)
+    if plan is None:
+        return None, None
+    return plan, active_or_next_feature(plan)
+
+
 def _normalize_scene_spec_payload(data: object, fallback_title: str) -> dict:
     if not isinstance(data, dict):
         raise TypeError("SceneSpec response is not a JSON object.")
@@ -1505,6 +1620,15 @@ async def job_history(job_id: str) -> dict:
     return {"job_id": job_id, "history": load_history(root)}
 
 
+@app.get("/v1/jobs/{job_id}/features", dependencies=[Depends(require_api_token)])
+async def job_features(job_id: str) -> dict:
+    root = _require_job(job_id)
+    return {
+        "job_id": job_id,
+        "feature_plan": feature_plan_summary(root),
+    }
+
+
 @app.post("/v1/jobs/{job_id}/vision/analyze", dependencies=[Depends(require_api_token)])
 async def analyze_vision(job_id: str, request: VisionAnalyzeRequest) -> dict:
     root = _require_job(job_id)
@@ -1944,6 +2068,8 @@ async def _build_generic_scene_spec(job_id: str, auto_research: bool) -> Generic
         research_context,
     )
     inventory_context = inventory.model_dump() if inventory is not None else {}
+    feature_plan = await _ensure_feature_plan(job_id, inventory)
+    feature_plan_context = feature_plan.model_dump() if feature_plan is not None else {}
 
     system = (
         "You are the modeling agent for Blender. Inspect the user request and supplied reference images, then "
@@ -1962,6 +2088,7 @@ async def _build_generic_scene_spec(job_id: str, auto_research: bool) -> Generic
         f"Visual reference analysis: {json.dumps(visual_context, ensure_ascii=False)}\n"
         f"Web research context: {json.dumps(research_context, ensure_ascii=False)}\n"
         f"Required subject inventory: {json.dumps(inventory_context, ensure_ascii=False)}\n"
+        f"Coordinated visible-feature plan: {json.dumps(feature_plan_context, ensure_ascii=False)}\n"
         f"Spatial/modeling guidance:\n{_generic_spatial_guidance(str(job_request.get('prompt') or ''))}\n"
         "Create the complete SceneSpec. Favor visual recognizability and the reference evidence over a "
         "small object count. You may use as much of the available object budget as the subject genuinely needs."
@@ -2307,6 +2434,8 @@ async def _build_adaptive_loft_spec(job_id: str, *, reason: str) -> AdaptiveLoft
     root = _require_job(job_id)
     job_request = json.loads((root / "request.json").read_text(encoding="utf-8"))
     inventory = _load_subject_inventory(root)
+    feature_plan = await _ensure_feature_plan(job_id, inventory)
+    feature_plan_context = feature_plan.model_dump() if feature_plan is not None else {}
 
     latest_vision: dict = {}
     vision_path = root / "vision-latest.json"
@@ -2347,7 +2476,7 @@ async def _build_adaptive_loft_spec(job_id: str, *, reason: str) -> AdaptiveLoft
         f"Target width mm: {job_request.get('target_width_mm')}\n"
         f"Reason for strategy switch: {reason}\n"
         f"Subject inventory: {json.dumps(inventory.model_dump() if inventory else {}, ensure_ascii=False)}\n"
-        f"Latest visual critique: {json.dumps(latest_vision, ensure_ascii=False)}\n"
+        f"Visible-feature sub-job plan: {json.dumps(feature_plan_context, ensure_ascii=False)}\n"        f"Latest visual critique: {json.dumps(latest_vision, ensure_ascii=False)}\n"
         f"Images in order: {labels}\n"
         "Create a substantially more recognizable continuous base mesh. For an 8-point cross section, a useful "
         "order is around the perimeter from lower-left -> mid-left -> upper-left/shoulder -> top-left -> "
@@ -2537,10 +2666,15 @@ async def _revise_adaptive_loft_spec(
     job_id: str,
     current_spec: AdaptiveLoftSpec,
     decision: dict,
+    feature_task: FeatureTask | None = None,
 ) -> AdaptiveLoftSpec:
     root = _require_job(job_id)
     job_request = json.loads((root / "request.json").read_text(encoding="utf-8"))
     inventory = _load_subject_inventory(root)
+    feature_plan, planned_task = _feature_task_context(root)
+    feature_task = feature_task or planned_task
+    feature_context = feature_task.model_dump() if feature_task is not None else {}
+    plan_context = feature_plan.model_dump() if feature_plan is not None else {}
     images, labels = _collect_images(
         root,
         VisionAnalyzeRequest(
@@ -2558,16 +2692,21 @@ async def _revise_adaptive_loft_spec(
         "starting from an unrelated shape. Preserve good geometry. You may add/remove/reposition cross-sections and "
         "attachments when the director critique requires it, but keep exactly 8 consistently ordered contour points "
         "per section. The loft must remain the main continuous body. Use attachments for visually separate parts. "
-        "Front is negative Y and Z is up. Return JSON only matching the schema."
+        "Front is negative Y and Z is up. A feature sub-job may be supplied. When present, treat it as the primary "
+        "owner for this pass: make the requested feature visibly better while preserving unrelated accepted geometry. "
+        "Respect its target_regions, owner_scope, dependencies and acceptance_criteria. Return JSON only matching the schema."
     )
     prompt = (
         f"Exact user request: {job_request.get('prompt', '')}\n"
         f"Current AdaptiveLoftSpec: {json.dumps(current_spec.model_dump(), ensure_ascii=False)}\n"
         f"Modeling director critique/instructions: {json.dumps(decision, ensure_ascii=False)}\n"
         f"Subject inventory: {json.dumps(inventory.model_dump() if inventory else {}, ensure_ascii=False)}\n"
+        f"Full coordinated feature plan: {json.dumps(plan_context, ensure_ascii=False)}\n"
+        f"ACTIVE FEATURE SUB-JOB: {json.dumps(feature_context, ensure_ascii=False)}\n"
         f"Images in order: {labels}\n"
-        "Make the smallest set of meaningful geometric changes that clearly improves resemblance. Do not discard "
-        "a recognizable body just because it is imperfect."
+        "Make the smallest set of meaningful geometric changes that clearly improves the active feature and overall "
+        "resemblance. Do not discard a recognizable body just because it is imperfect. Do not rewrite geometry outside "
+        "the active feature's owner scope unless a dependency relationship makes that adjustment necessary."
     )
 
     client = OllamaProxyClient()
@@ -2891,6 +3030,9 @@ async def _ask_modeling_director(
     root = _require_job(job_id)
     job_request = json.loads((root / "request.json").read_text(encoding="utf-8"))
     inventory = _load_subject_inventory(root)
+    feature_plan, feature_task = _feature_task_context(root)
+    feature_plan_context = feature_plan.model_dump() if feature_plan is not None else {}
+    feature_task_context = feature_task.model_dump() if feature_task is not None else {}
     images, labels = _collect_images(
         root,
         VisionAnalyzeRequest(
@@ -2939,10 +3081,13 @@ async def _ask_modeling_director(
         f"Recent director decisions: {json.dumps(recent_director_history, ensure_ascii=False)}\n"
         f"AI-generated subject inventory: "
         f"{json.dumps(inventory.model_dump() if inventory else {}, ensure_ascii=False)}\n"
+        f"Coordinated visible-feature plan: {json.dumps(feature_plan_context, ensure_ascii=False)}\n"
+        f"Next/active feature sub-job: {json.dumps(feature_task_context, ensure_ascii=False)}\n"
         f"Images in order: {labels}\n"
-        "Give concrete instructions for the next modeling pass. Preserve geometry that is already moving toward "
-        "the reference instead of repeatedly restarting. Spend the available reasoning budget on visual comparison "
-        "and specific geometry decisions rather than generic commentary."
+        "Give concrete instructions for the next modeling pass. When a feature sub-job is supplied, prioritize its "
+        "acceptance criteria while protecting already-accepted features and the best-so-far silhouette. Preserve geometry "
+        "that is already moving toward the reference instead of repeatedly restarting. Spend the available reasoning "
+        "budget on visual comparison and specific geometry decisions rather than generic commentary."
     )
 
     client = OllamaProxyClient()

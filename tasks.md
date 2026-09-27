@@ -22,27 +22,29 @@ This file is the working definition of "done" for the project. A level is only c
 - The recent recovery work has become **benchmark-overfit**: generic generation now contains subject-specific geometry assemblies for the fixed benchmark families (characters, lamps, sneakers, chairs and quadruped robots). Passing those five prompts is therefore not sufficient evidence that the autonomous pipeline generalizes.
 - Current live regression mainly proves that known benchmark prompts can be patched; it does not prove that unseen subjects remain recognizable.
 
-### Generalization recovery — do before more roadmap work
-- [ ] Add a structured subject-part inventory from prompt + reference images before SceneSpec planning, and require the generated SceneSpec to cover the major inventory instead of trusting free-form planner prose.
-- [ ] Add an **initial recognizability gate** immediately after `v1`; an unrecognizable blockout must not be reported as complete or treated as a good baseline.
-- [ ] Require the generic refinement stop rule to confirm subject recognizability; "few parsed issues" alone is not success.
-- [ ] Add a strategy-switch state for subjects that primitive SceneSpec cannot represent adequately; stop endlessly rearranging primitives when a mesh/hybrid workflow is required.
-- [ ] Quarantine benchmark-specific geometry helpers from being the proof of generic quality. Keep them as deterministic benchmark fixtures, not as the main route to "generalization."
-- [ ] Add **unseen holdout prompts** that are not allowed to gain subject-specific fixers: Toyota Prius / compact car, teapot, desk fan, bicycle, and one household appliance.
-- [ ] A holdout failure must fail the quality gate or end as `needs_strategy_switch`; it must never end as `generic_refinement_complete`.
+### Generalization recovery — AI-directed architecture
+- [x] Make a multimodal **modeling director** choose the initial strategy instead of Python object-family rules.
+- [x] After each render, let the modeling director choose: **accept / revise procedural / rebuild mesh**.
+- [x] Feed the exact prompt, reference images, current renders and AI-generated subject inventory directly to the director.
+- [x] Allow the AI to rewrite the full SceneSpec when the current approach is bad; do not force surgical edits or semantic object-count preservation.
+- [x] Remove generic-path geometry recipes for characters/Pikachu, lamps, sneakers, chairs and quadruped robots.
+- [x] Remove prompt-specific spatial guidance from the generic path; retain only universal coordinate/execution constraints.
+- [x] Keep Python responsible for orchestration and safety only: schemas, request-size control, retries, Blender execution, files and job state.
+- [x] Compress **vision-request copies** of images while preserving the original saved reference files.
+- [x] Replace the retired Qwen vision route with current frontier multimodal routing: Kimi K3 -> Mistral Large 3 -> Gemma 4 31B -> reasoning fallback.
+- [x] Normalize common model JSON wrapper variations for the adaptive mesh schema instead of requiring one model-specific response shape.
+- [ ] Pass the real deployed Toyota Prius holdout with the AI director making all geometry/strategy decisions.
+- [ ] Add additional unseen holdouts: teapot, desk fan, bicycle and one household appliance.
+- [ ] Do not add subject-specific geometry code to make any holdout pass.
 
 ### P0 recovery tasks
-- [x] Freeze new roadmap feature work until the quality regression gate passes.
-- [x] Preserve the last known-good SceneSpec/version as the active model; a structurally destructive refinement candidate is rejected before render/promotion.
-- [x] Add a structural regression guard that rejects destructive SceneSpec rewrites (major object-count collapse / loss of semantic parts / connector collapse).
-- [x] Strengthen generic planning so every requested major part is explicitly represented instead of optimizing for the fewest primitives.
-- [x] Require connected/contact-aware blockouts in planner/refinement instructions: necks, limbs, handles, stems, antennas and similar parts must touch/overlap their parent geometry instead of floating.
-- [x] Make refinement surgical: fix the 1–3 highest-priority defects while preserving unaffected geometry instead of rewriting the whole model.
-- [x] Ensure generic visual QA evaluates only the newest `model-vN` render set with references instead of mixing stale iterations into the current model.
-- [x] Compare candidate `vN` against the previous accepted version with a dedicated multimodal regression gate; reject it and restore the previous accepted version when quality regresses.
-- [x] Add semantic geometry assemblies and richer safe primitives (beam/frustum/wedge) for recognizable tails, lamps, shoes, chairs, and articulated robots.
-- [x] Add quality regression subjects: stylized Pikachu, articulated retro desk lamp, sneaker, office chair, and a complex creature/robot.
-- [x] Make deploy quality regression fail on structural/visual degradation, not merely successful HTTP responses and generated files.
+- [x] Freeze unrelated roadmap feature work until the generic path generalizes.
+- [x] Keep references visible per job so failures can be audited against what the model actually saw.
+- [x] Keep multi-angle renders for every iteration.
+- [x] Add adaptive continuous-mesh reconstruction as a strategy available to the AI director.
+- [x] Preserve previous artifacts/versions for inspection; do not silently overwrite evidence from earlier passes.
+- [x] Make malformed model responses retry through the configured model chain rather than killing the job on the first model.
+- [ ] Make the deployed live-quality suite pass with the AI-directed architecture.
 
 ### P0 acceptance
 A refinement may only become the accepted/latest model when it preserves required parts and does not regress visibly or structurally from the previous accepted version. The Pikachu and articulated desk-lamp benchmarks must remain recognizable from front, side, rear and isometric views.

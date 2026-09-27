@@ -13,15 +13,18 @@ class OllamaProxyError(RuntimeError):
     pass
 
 
+JSONValue = dict[str, Any] | list[Any]
+
+
 @dataclass(frozen=True)
 class OllamaJSONResult:
-    data: dict[str, Any]
+    data: JSONValue
     endpoint: str
     usage: dict[str, Any]
 
 
-def decode_structured_json(content: str | dict[str, Any]) -> dict[str, Any]:
-    if isinstance(content, dict):
+def decode_structured_json(content: str | JSONValue) -> JSONValue:
+    if isinstance(content, (dict, list)):
         return content
 
     text = content.strip()
@@ -32,7 +35,7 @@ def decode_structured_json(content: str | dict[str, Any]) -> dict[str, Any]:
         parsed = json.loads(text)
     except json.JSONDecodeError:
         parsed = None
-    if isinstance(parsed, dict):
+    if isinstance(parsed, (dict, list)):
         return parsed
 
     if text.startswith("```"):
@@ -46,20 +49,37 @@ def decode_structured_json(content: str | dict[str, Any]) -> dict[str, Any]:
             parsed = json.loads(candidate)
         except json.JSONDecodeError:
             parsed = None
-        if isinstance(parsed, dict):
+        if isinstance(parsed, (dict, list)):
             return parsed
 
-    first = text.find("{")
-    last = text.rfind("}")
-    if first >= 0 and last > first:
+    candidates: list[str] = []
+    first_object = text.find("{")
+    last_object = text.rfind("}")
+    if first_object >= 0 and last_object > first_object:
+        candidates.append(text[first_object : last_object + 1])
+    first_array = text.find("[")
+    last_array = text.rfind("]")
+    if first_array >= 0 and last_array > first_array:
+        candidates.append(text[first_array : last_array + 1])
+
+    last_error: json.JSONDecodeError | None = None
+    for candidate in candidates:
         try:
-            parsed = json.loads(text[first : last + 1])
+            parsed = json.loads(candidate)
         except json.JSONDecodeError as exc:
-            raise OllamaProxyError("Ollama returned text, but not valid structured JSON.") from exc
-        if isinstance(parsed, dict):
+            last_error = exc
+            continue
+        if isinstance(parsed, (dict, list)):
             return parsed
 
-    raise OllamaProxyError("Ollama returned text, but not a JSON object.")
+    preview = " ".join(text.split())[:240]
+    if last_error is not None:
+        raise OllamaProxyError(
+            f"Ollama returned text, but not valid structured JSON. Preview: {preview!r}"
+        ) from last_error
+    raise OllamaProxyError(
+        f"Ollama returned text, but not a JSON object or array. Preview: {preview!r}"
+    )
 
 
 class OllamaProxyClient:

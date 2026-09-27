@@ -1,16 +1,132 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from fastapi import HTTPException
 from fastapi.responses import HTMLResponse
 
 from .config import JOBS_ROOT
+from .history import append_history
 
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
 PUBLIC_ARTIFACT_CATEGORIES = {"references", "renders", "scene", "exports"}
+
+# A single AI/Blender stage should never sit untouched this long. Long-running
+# requests refresh status as they move between stages; anything older is an
+# abandoned persisted state rather than a trustworthy indication of live work.
+RUNNING_JOB_STALE_AFTER = timedelta(hours=2)
+
+
+def _status_timestamp(value: object) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = value.strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+def _persist_status(root: Path, status: dict) -> None:
+    tmp = root / "status.json.tmp"
+    tmp.write_text(json.dumps(status, indent=2, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(root / "status.json")
+
+
+def reconcile_running_status(
+    root: Path,
+    status: dict,
+    *,
+    now: datetime | None = None,
+    force: bool = False,
+) -> dict:
+    """Convert an abandoned persisted running state into a terminal failure."""
+    if status.get("state") != "running":
+        return status
+
+    current_time = (now or datetime.now(UTC)).astimezone(UTC)
+    updated_at = _status_timestamp(status.get("updated_at"))
+    age_seconds = (
+        max(0.0, (current_time - updated_at).total_seconds())
+        if updated_at is not None
+        else None
+    )
+
+    if not force:
+        if age_seconds is not None and age_seconds <= RUNNING_JOB_STALE_AFTER.total_seconds():
+            return status
+
+    previous_stage = str(status.get("stage") or "unknown")
+    if force:
+        reason = (
+            "The API process restarted while this job was marked running, so the old "
+            "operation is no longer active."
+        )
+    elif updated_at is None:
+        reason = "The job was marked running without a valid activity timestamp."
+    else:
+        reason = (
+            f"No job status update was recorded for {int(age_seconds or 0)} seconds; "
+            "the operation is considered abandoned."
+        )
+
+    recovered = dict(status)
+    recovered.update(
+        {
+            "state": "failed",
+            # Keep the stage that was actually interrupted. Improve/retry logic can
+            # still see where the previous attempt stopped.
+            "stage": previous_stage,
+            "error": reason,
+            "interrupted": True,
+            "interrupted_at": current_time.isoformat(),
+            "interrupted_stage": previous_stage,
+            "updated_at": current_time.isoformat(),
+        }
+    )
+    _persist_status(root, recovered)
+    append_history(
+        root,
+        "stale_running_recovered",
+        stage=previous_stage,
+        reason=reason,
+        age_seconds=age_seconds,
+        forced=force,
+    )
+    return recovered
+
+
+def reconcile_all_running_jobs(*, force: bool = False) -> int:
+    """Reconcile persisted running states, returning how many were repaired."""
+    if not JOBS_ROOT.exists():
+        return 0
+
+    repaired = 0
+    now = datetime.now(UTC)
+    for root in JOBS_ROOT.iterdir():
+        if not root.is_dir():
+            continue
+        status_path = root / "status.json"
+        if not status_path.exists():
+            continue
+        try:
+            status = json.loads(status_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(status, dict) or status.get("state") != "running":
+            continue
+        reconciled = reconcile_running_status(root, status, now=now, force=force)
+        if reconciled.get("state") != "running":
+            repaired += 1
+    return repaired
+
 
 
 def _safe_job_root(job_id: str) -> Path:
@@ -98,6 +214,8 @@ def jobs_snapshot() -> dict:
                 request_path = root / "request.json"
                 status = json.loads(status_path.read_text()) if status_path.exists() else {}
                 request = json.loads(request_path.read_text()) if request_path.exists() else {}
+                if isinstance(status, dict):
+                    status = reconcile_running_status(root, status)
             except (OSError, json.JSONDecodeError):
                 continue
 

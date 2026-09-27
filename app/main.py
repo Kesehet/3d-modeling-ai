@@ -109,6 +109,87 @@ class ModelingDirectorDecision(BaseModel):
     major_problems: list[str] = Field(default_factory=list, max_length=20)
 
 
+def _normalize_modeling_director_payload(data: object) -> dict:
+    """Tolerate common structured-output variations from multimodal models."""
+    if not isinstance(data, dict):
+        raise TypeError("Modeling director response is not a JSON object.")
+
+    normalized = dict(data)
+
+    action_aliases = {
+        "accept_model": "accept",
+        "approve": "accept",
+        "approved": "accept",
+        "build": "build_procedural",
+        "procedural": "build_procedural",
+        "revise": "revise_procedural",
+        "improve": "revise_procedural",
+        "mesh": "build_mesh",
+        "base_mesh": "build_mesh",
+        "rebuild": "rebuild_mesh",
+    }
+    raw_action = str(
+        normalized.get("action")
+        or normalized.get("next_action")
+        or normalized.get("decision")
+        or ""
+    ).strip().lower().replace("-", "_").replace(" ", "_")
+    normalized["action"] = action_aliases.get(raw_action, raw_action)
+
+    raw_score = normalized.get("subject_match_score", normalized.get("match_score", 0.0))
+    try:
+        score = float(raw_score)
+        if 1.0 < score <= 100.0:
+            score /= 100.0
+    except (TypeError, ValueError):
+        score = 0.0
+    normalized["subject_match_score"] = max(0.0, min(1.0, score))
+
+    normalized["summary"] = str(
+        normalized.get("summary")
+        or normalized.get("reasoning")
+        or normalized.get("assessment")
+        or ""
+    ).strip()[:2400]
+
+    for key, aliases, limit in (
+        ("instructions", ("instructions", "instruction", "actions", "next_steps", "recommendations"), 16),
+        ("major_problems", ("major_problems", "problems", "issues", "missing_parts", "major_issues"), 20),
+    ):
+        value = None
+        for alias in aliases:
+            if alias in normalized:
+                value = normalized.get(alias)
+                break
+
+        items: list[str] = []
+        if isinstance(value, list):
+            for item in value:
+                if isinstance(item, dict):
+                    text = (
+                        item.get("instruction")
+                        or item.get("action")
+                        or item.get("issue")
+                        or item.get("problem")
+                        or item.get("description")
+                        or item.get("text")
+                    )
+                    if text:
+                        items.append(str(text).strip())
+                elif item is not None and str(item).strip():
+                    items.append(str(item).strip())
+        elif isinstance(value, str):
+            text = value.strip()
+            if text:
+                items = [text]
+        elif value is not None and str(value).strip():
+            items = [str(value).strip()]
+
+        normalized[key] = items[:limit]
+
+    return normalized
+
+
 class RefinementComparison(BaseModel):
     candidate_is_better: bool
     summary: str = ""
@@ -667,7 +748,7 @@ async def _build_subject_inventory(
         ),
     )
     prompt += f"\nReference images in order: {reference_labels}\n"
-    candidate_models = (*VISION_MODELS, REASONING_MODEL)
+    candidate_models = VISION_MODELS if reference_images else (REASONING_MODEL, *VISION_MODELS)
     result = None
     inventory = None
     selected_model = None
@@ -1837,7 +1918,7 @@ async def _build_generic_scene_spec(job_id: str, auto_research: bool) -> Generic
         ),
     )
     prompt += f"\nReference images supplied directly to the planner in this order: {reference_labels}\n"
-    planner_models = (*VISION_MODELS, REASONING_MODEL)
+    planner_models = VISION_MODELS if reference_images else (REASONING_MODEL, *VISION_MODELS)
     result = None
     spec = None
     selected_planner_model = None
@@ -2538,7 +2619,8 @@ async def _ask_modeling_director(
 
     client = OllamaProxyClient()
     errors: list[str] = []
-    for candidate_model in (*VISION_MODELS, REASONING_MODEL):
+    candidate_models = VISION_MODELS if images else (REASONING_MODEL, *VISION_MODELS)
+    for candidate_model in candidate_models:
         try:
             result = await client.chat_json(
                 model=candidate_model,
@@ -2549,7 +2631,9 @@ async def _ask_modeling_director(
                 temperature=0.0,
                 num_predict=4096,
             )
-            decision = ModelingDirectorDecision.model_validate(result.data)
+            decision = ModelingDirectorDecision.model_validate(
+                _normalize_modeling_director_payload(result.data)
+            )
         except (OllamaProxyError, httpx.HTTPError, ValidationError, ValueError, TypeError) as exc:
             errors.append(f"{candidate_model}: {exc}")
             continue
@@ -2836,7 +2920,8 @@ async def refine_generic_scene(job_id: str, request: GenericRefineRequest) -> di
         selected_model = None
         errors: list[str] = []
         client = OllamaProxyClient()
-        for candidate_model in (*VISION_MODELS, REASONING_MODEL):
+        candidate_models = VISION_MODELS if images else (REASONING_MODEL, *VISION_MODELS)
+        for candidate_model in candidate_models:
             try:
                 result = await client.chat_json(
                     model=candidate_model,

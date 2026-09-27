@@ -306,13 +306,13 @@ function renderDetail(job){
   els.title.textContent=job.prompt;
   els.meta.textContent=(job.state||"")+" · "+(job.stage||"")+" · "+job.job_id;
   const quality=job.quality_gate||null;
-  const blocksRefinement=job.stage==="generic_needs_strategy_switch"||job.stage==="generic_quality_unverified";
+  const needsRebuild=job.stage==="generic_needs_strategy_switch"||job.stage==="generic_quality_unverified"||job.stage==="generic_needs_refinement";
   if(quality?.recognizable===false){
     const strategy=quality.recommended_strategy?(" Recommended next strategy: "+quality.recommended_strategy+"."):"";
     els.quality.innerHTML='<strong>Quality gate: current model is not recognizable enough.</strong>'+esc(quality.summary||"The generated geometry does not sufficiently match the requested subject.")+esc(strategy);
     els.quality.classList.add("show");
   }else if(job.stage==="generic_quality_unverified"){
-    els.quality.innerHTML='<strong>Quality gate could not verify this model.</strong>Further automatic refinement is paused instead of making blind changes.';
+    els.quality.innerHTML='<strong>Quality gate could not verify this model.</strong>The next Improve pass will retry visual QA with the stronger ensemble and rebuild from references if needed.';
     els.quality.classList.add("show");
   }else{
     els.quality.classList.remove("show");
@@ -337,8 +337,9 @@ function renderDetail(job){
     ? files.map(([category,file])=>'<a class="file" download href="'+fileUrl(job.job_id,category,file.name)+'"><b>↓</b>'+esc(file.name)+'</a>').join("")
     : '<span style="color:var(--muted)">No downloadable model files yet.</span>';
   els.json.textContent=JSON.stringify({status:{state:job.state,stage:job.stage,quality_gate:job.quality_gate},references:job.references,latest_vision_images:job.latest_vision_images,qa:job.qa,history:job.history},null,2);
-  els.improve.disabled=busy||!scene.length||blocksRefinement;
-  els.improve.title=blocksRefinement?"Primitive refinement is paused because this model needs a different modeling strategy.":"";
+  els.improve.disabled=busy||!scene.length;
+  els.improve.textContent=needsRebuild?"Rebuild from references":"Improve model";
+  els.improve.title=needsRebuild?"Re-run visual QA and allow a full SceneSpec reconstruction from the saved references.":"";
   els.deleteBtn.disabled=busy||job.state==="running";
 }
 async function refresh(){

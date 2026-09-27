@@ -1290,7 +1290,7 @@ async def _run_auto_improve(job_id: str, max_rounds: int) -> None:
 
         try:
             await refine_generic_scene(job_id, GenericRefineRequest(iterations=1))
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - background loop must persist/report arbitrary worker failures
             consecutive_errors += 1
             detail = str(exc.detail) if isinstance(exc, HTTPException) else str(exc)
             fallback_state = "ready" if isinstance(before.get("generic_model"), dict) else "failed"

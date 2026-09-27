@@ -99,6 +99,22 @@ def test_auto_improve_progress_signature_tracks_model_and_feature_progress(tmp_p
     assert before != after
 
 
+
+
+def test_auto_improve_progress_signature_tracks_working_cage_hill_climb(tmp_path):
+    status = {
+        "stage": "hard_surface_cage_needs_refinement",
+        "quality_gate": {"recognizable": False, "subject_match_score": 0.18},
+        "generic_model": {"version": 2},
+        "working_cage_version": 5,
+    }
+
+    before = _auto_improve_progress_signature(tmp_path, status)
+    status["working_cage_version"] = 6
+    after = _auto_improve_progress_signature(tmp_path, status)
+
+    assert before != after
+
 def test_auto_improve_without_feature_plan_stops_when_recognizable(tmp_path):
     status_path = tmp_path / "status.json"
     status_path.write_text(

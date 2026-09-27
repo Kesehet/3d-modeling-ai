@@ -326,6 +326,7 @@ def jobs_snapshot() -> dict:
     active = next((row for row in rows if row["state"] == "running"), rows[0] if rows else None)
     return {
         "generated_at": datetime.now(UTC).isoformat(),
+        "ui_version": DASHBOARD_UI_VERSION,
         "active": active,
         "jobs": rows[:20],
         "counts": {
@@ -393,7 +394,7 @@ header{display:flex;align-items:center;justify-content:space-between;gap:16px;ma
     <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn" id="improveBtn">Improve model</button><button class="btn danger" id="deleteBtn">Delete job</button></div>
   </div>
   <div class="quality-banner" id="qualityBanner"></div>
-  <section class="feature-panel" id="featurePanel"><div class="feature-head"><div><h3>AI feature sub-jobs</h3><div class="feature-progress" id="featureProgress"></div></div></div><div class="feature-grid" id="featureGrid"></div></section>
+  <section class="feature-panel show" id="featurePanel"><div class="feature-head"><div><h3>AI feature sub-jobs</h3><div class="feature-progress" id="featureProgress"></div></div></div><div class="feature-grid" id="featureGrid"></div></section>
   <div class="render-grid" id="renderGrid"></div>
   <section class="reference-panel"><h3>Reference images used</h3><p class="reference-help">These are the saved reference images attached to this job. Images included in the latest vision pass are marked below.</p><div class="reference-grid" id="referenceGrid"></div></section>
   <div class="downloads"><h3>Downloads</h3><div class="file-list" id="fileList"></div></div>
@@ -413,6 +414,7 @@ header{display:flex;align-items:center;justify-content:space-between;gap:16px;ma
 </div>
 
 <script>
+const CLIENT_UI_VERSION="feature-workers-v3";
 const byId=id=>document.getElementById(id);
 const esc=value=>String(value??"").replace(/[&<>"']/g,ch=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[ch]));
 const els={
@@ -480,17 +482,21 @@ function renderDetail(job){
     const counts=plan.counts||{};
     const accepted=counts.accepted||0;
     const terminal=accepted+(counts.blocked||0)+(counts.failed||0);
-    els.featureProgress.textContent=accepted+" accepted · "+terminal+"/"+plan.features.length+" resolved"+(plan.next_feature_id?" · next: "+plan.next_feature_id:"");
+    const activeFeature=(plan.features||[]).find(feature=>feature.id===plan.active_feature_id)||null;
+    const nextFeature=(plan.features||[]).find(feature=>feature.id===plan.next_feature_id)||null;
+    const focus=activeFeature||nextFeature;
+    const autoProgress=auto?.enabled?(" · auto "+(auto.current_round||0)+"/"+(auto.max_rounds||30)):"";
+    els.featureProgress.textContent=accepted+" accepted · "+terminal+"/"+plan.features.length+" resolved"+(focus?" · working: "+focus.name:"")+autoProgress;
     els.featureGrid.innerHTML=plan.features.map(feature=>{
       const deps=(feature.depends_on||[]).length?" · after "+feature.depends_on.join(", "):"";
       const criteria=(feature.acceptance_criteria||[]).slice(0,2).join(" · ");
-      return '<div class="feature-card '+esc(feature.status)+'"><div style="display:flex;justify-content:space-between;gap:8px"><div class="feature-name">'+esc(feature.name)+'</div><div class="feature-state">'+esc(feature.status)+'</div></div><div class="feature-meta">P'+esc(feature.priority)+' · '+esc(feature.strategy)+deps+' · attempts '+esc(feature.attempts||0)+'</div>'+(criteria?'<div class="feature-criteria">'+esc(criteria)+'</div>':'')+'</div>';
+      const scope=(feature.owner_scope||[]).slice(0,2).join(", ");
+      const ownership=scope?'<div class="feature-criteria"><b>Owns:</b> '+esc(scope)+'</div>':'';
+      return '<div class="feature-card '+esc(feature.status)+'"><div style="display:flex;justify-content:space-between;gap:8px"><div class="feature-name">'+esc(feature.name)+'</div><div class="feature-state">'+esc(feature.status)+'</div></div><div class="feature-meta">P'+esc(feature.priority)+' · '+esc(feature.strategy)+deps+' · attempts '+esc(feature.attempts||0)+'</div>'+ownership+(criteria?'<div class="feature-criteria"><b>Pass when:</b> '+esc(criteria)+'</div>':'')+'</div>';
     }).join("");
-    els.featurePanel.classList.add("show");
   }else{
-    els.featurePanel.classList.remove("show");
-    els.featureGrid.innerHTML="";
-    els.featureProgress.textContent="";
+    els.featureProgress.textContent="Feature plan not created yet";
+    els.featureGrid.innerHTML='<div class="feature-card running" style="grid-column:1/-1"><div class="feature-name">Feature coordinator</div><div class="feature-meta">Planning pending</div><div class="feature-criteria">This job predates the feature-worker plan, or planning has not run yet. Starting Auto improve ×30 will first create the visible-feature backlog (body, wheels, windows, lights, handles, etc.) and then work through it against the shared best-so-far mesh.</div></div>';
   }
   els.renders.innerHTML=(job.renders||[]).length
     ? job.renders.map(image=>'<div class="render"><a target="_blank" href="'+renderUrl(job.job_id,image.name,image.mtime)+'"><img loading="lazy" src="'+renderUrl(job.job_id,image.name,image.mtime)+'"></a><div class="render-name">'+esc(image.name)+'</div></div>').join("")
@@ -524,6 +530,10 @@ async function refresh(){
     const response=await fetch("/dashboard/api",{cache:"no-store"});
     if(!response.ok)throw new Error("Dashboard API "+response.status);
     data=await response.json();
+    if(data.ui_version&&data.ui_version!==CLIENT_UI_VERSION){
+      window.location.reload();
+      return;
+    }
     if(currentJob)currentJob=data.jobs.find(job=>job.job_id===currentJob.job_id)||currentJob;
     route();
   }catch(error){console.error(error)}
@@ -582,5 +592,9 @@ window.addEventListener("hashchange",route);
 refresh();
 setInterval(refresh,3000);
 </script>
-</body></html>"""
+</body></html>""",
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate",
+            "Pragma": "no-cache",
+        },
     )

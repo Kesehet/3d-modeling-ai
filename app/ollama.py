@@ -52,15 +52,23 @@ def decode_structured_json(content: str | JSONValue) -> JSONValue:
         if isinstance(parsed, (dict, list)):
             return parsed
 
-    candidates: list[str] = []
+    candidates_with_offsets: list[tuple[int, str]] = []
     first_object = text.find("{")
     last_object = text.rfind("}")
     if first_object >= 0 and last_object > first_object:
-        candidates.append(text[first_object : last_object + 1])
+        candidates_with_offsets.append(
+            (first_object, text[first_object : last_object + 1])
+        )
     first_array = text.find("[")
     last_array = text.rfind("]")
     if first_array >= 0 and last_array > first_array:
-        candidates.append(text[first_array : last_array + 1])
+        candidates_with_offsets.append(
+            (first_array, text[first_array : last_array + 1])
+        )
+    candidates = [
+        candidate
+        for _, candidate in sorted(candidates_with_offsets, key=lambda item: item[0])
+    ]
 
     last_error: json.JSONDecodeError | None = None
     for candidate in candidates:

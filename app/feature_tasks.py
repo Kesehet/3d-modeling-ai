@@ -2,15 +2,15 @@ from __future__ import annotations
 
 import json
 import re
+import typing
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Literal
 
 from pydantic import BaseModel, Field, ValidationError
 
 
-FeatureState = Literal["pending", "ready", "running", "accepted", "retry", "blocked", "failed"]
-FeatureStrategy = Literal[
+FeatureState = typing.Literal["pending", "ready", "running", "accepted", "retry", "blocked", "failed"]
+FeatureStrategy = typing.Literal[
     "base_mesh_region",
     "attachment",
     "surface_cutout",
@@ -27,7 +27,7 @@ class FeatureTask(BaseModel):
     priority: int = Field(default=5, ge=1, le=10)
     count: int = Field(default=1, ge=1, le=32)
     strategy: FeatureStrategy = "mixed"
-    symmetry: Literal["none", "bilateral", "paired", "radial"] = "none"
+    symmetry: typing.Literal["none", "bilateral", "paired", "radial"] = "none"
     parent: str | None = Field(default=None, max_length=80)
     depends_on: list[str] = Field(default_factory=list, max_length=16)
     target_regions: list[str] = Field(default_factory=list, max_length=16)
@@ -63,6 +63,23 @@ class FeaturePlan(BaseModel):
 def _slug(value: str, fallback: str) -> str:
     text = re.sub(r"[^a-z0-9]+", "-", value.strip().lower()).strip("-")
     return (text or fallback)[:72]
+
+
+def _string_list(
+    source: dict,
+    *keys: str,
+    limit: int = 16,
+) -> list[str]:
+    value = None
+    for key in keys:
+        if key in source:
+            value = source.get(key)
+            break
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, list):
+        return []
+    return [str(item).strip()[:240] for item in value if str(item).strip()][:limit]
 
 
 def normalize_feature_plan_payload(data: object, *, subject: str) -> dict:
@@ -126,18 +143,6 @@ def normalize_feature_plan_payload(data: object, *, subject: str) -> dict:
         if symmetry not in {"none", "bilateral", "paired", "radial"}:
             symmetry = "none"
 
-        def string_list(*keys: str, limit: int = 16) -> list[str]:
-            value = None
-            for key in keys:
-                if key in raw:
-                    value = raw.get(key)
-                    break
-            if isinstance(value, str):
-                value = [value]
-            if not isinstance(value, list):
-                return []
-            return [str(item).strip()[:240] for item in value if str(item).strip()][:limit]
-
         try:
             priority = int(raw.get("priority", 5))
         except (TypeError, ValueError):
@@ -158,15 +163,16 @@ def normalize_feature_plan_payload(data: object, *, subject: str) -> dict:
                 "strategy": strategy,
                 "symmetry": symmetry,
                 "parent": str(raw.get("parent") or "").strip()[:80] or None,
-                "depends_on": string_list("depends_on", "dependencies", "requires"),
-                "target_regions": string_list("target_regions", "regions", "target_region"),
-                "acceptance_criteria": string_list(
+                "depends_on": _string_list(raw, "depends_on", "dependencies", "requires"),
+                "target_regions": _string_list(raw, "target_regions", "regions", "target_region"),
+                "acceptance_criteria": _string_list(
+                    raw,
                     "acceptance_criteria",
                     "criteria",
                     "success_criteria",
                     limit=12,
                 ),
-                "owner_scope": string_list("owner_scope", "ownership", "editable_regions"),
+                "owner_scope": _string_list(raw, "owner_scope", "ownership", "editable_regions"),
                 "status": "pending",
                 "attempts": 0,
                 "accepted_version": None,

@@ -112,3 +112,58 @@ def test_visual_normalizer_accepts_complete_visible_feature_set():
         requirements,
     )
     assert normalized["pass_benchmark"] is True
+
+
+
+def test_visual_normalizer_accepts_nested_analysis_feature_list():
+    requirements = ("pointed ears", "black eyes", "lightning tail")
+    normalized = _normalize_benchmark_visual_payload(
+        {
+            "analysis": {
+                "benchmark_pass": True,
+                "recognisable": True,
+                "overall_assessment": "Clearly recognizable with all required features.",
+                "feature_checks": [
+                    {"feature": "pointed ears", "visible": True},
+                    {"feature": "black eyes", "present": True},
+                    {"feature": "lightning tail", "met": True},
+                ],
+            }
+        },
+        requirements,
+    )
+    assert normalized["pass_benchmark"] is True
+    assert normalized["recognizable"] is True
+    assert all(normalized["required_features_visible"].values())
+
+
+def test_visual_normalizer_accepts_explicit_pass_without_duplicate_feature_map():
+    requirements = ("seat", "backrest", "five-spoke base")
+    normalized = _normalize_benchmark_visual_payload(
+        {
+            "evaluation": {
+                "quality_gate_pass": True,
+                "subject_recognizable": True,
+                "summary": "The chair is recognizable and all required components are visible.",
+            }
+        },
+        requirements,
+    )
+    assert normalized["pass_benchmark"] is True
+    assert all(normalized["required_features_visible"].values())
+
+
+def test_visual_normalizer_rejects_reported_blocking_failures():
+    requirements = ("round base", "angled neck", "dome shade")
+    normalized = _normalize_benchmark_visual_payload(
+        {
+            "assessment": {
+                "passed": True,
+                "recognizable": True,
+                "missing_features": ["angled neck"],
+            }
+        },
+        requirements,
+    )
+    assert normalized["pass_benchmark"] is False
+    assert normalized["major_failures"] == ["angled neck"]

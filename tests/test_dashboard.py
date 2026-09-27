@@ -107,3 +107,15 @@ def test_restart_force_reconciles_even_recent_running_job(tmp_path):
 
     assert reconciled["state"] == "failed"
     assert "restarted" in reconciled["error"].lower()
+
+
+
+def test_dashboard_exposes_feature_worker_state_and_disables_cache():
+    response = dashboard_page()
+    html = response.body.decode("utf-8")
+
+    assert 'AI feature sub-jobs' in html
+    assert 'Feature coordinator' in html
+    assert 'CLIENT_UI_VERSION="feature-workers-v3"' in html
+    assert 'data.ui_version' in html
+    assert response.headers["cache-control"] == "no-store, no-cache, must-revalidate"

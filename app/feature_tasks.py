@@ -188,6 +188,15 @@ def normalize_feature_plan_payload(data: object, *, subject: str) -> dict:
         ).strip()
         proposed = str(raw.get("id") or raw.get("feature_id") or name)
         feature_id = _slug(proposed, f"feature-{index + 1}")
+        # Models sometimes emit a useful semantic id but a placeholder display
+        # label ("Feature 1"). Preserve the semantic identity for downstream
+        # focused workers and visual QA instead of feeding them meaningless text.
+        if re.fullmatch(r"feature[\s_-]*\d+", name, flags=re.IGNORECASE):
+            semantic_name = re.sub(r"[-_]+", " ", proposed).strip()
+            if semantic_name and not re.fullmatch(
+                r"feature[\s_-]*\d+", semantic_name, flags=re.IGNORECASE
+            ):
+                name = semantic_name
         base = feature_id
         suffix = 2
         while feature_id in used_ids:
@@ -249,10 +258,31 @@ def normalize_feature_plan_payload(data: object, *, subject: str) -> dict:
             priority = int(raw.get("priority", 5))
         except (TypeError, ValueError):
             priority = 5
+        count_value = (
+            raw.get("count")
+            if raw.get("count") is not None
+            else raw.get("quantity")
+            if raw.get("quantity") is not None
+            else raw.get("instances")
+            if raw.get("instances") is not None
+            else raw.get("instance_count", 1)
+        )
         try:
-            count = int(raw.get("count", 1))
+            count = int(count_value)
         except (TypeError, ValueError):
             count = 1
+
+        # Recover obvious repeated-instance intent when a model encoded it in
+        # target/symmetry text instead of the numeric field.
+        repetition_text = " ".join(
+            str(raw.get(key) or "")
+            for key in ("target_region", "target_regions", "notes", "description")
+        ).lower()
+        if count <= 1:
+            if re.search(r"all[ _-]*four|four wheels|4 wheels", repetition_text):
+                count = 4
+            elif symmetry in {"bilateral", "paired"}:
+                count = 2
 
         normalized.append(
             {

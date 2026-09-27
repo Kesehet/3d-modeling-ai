@@ -33,12 +33,12 @@ def test_dashboard_surfaces_quality_gate_and_allows_vision_retry():
     assert 'generic_needs_strategy_switch' in html
     assert 'generic_quality_unverified' in html
     assert 'Quality gate: current model is not recognizable enough.' in html
-    assert 'Retry vision + improve' in html
+    assert 'Ask AI director again' in html
     assert 'Visual QA needs another pass.' in html
 
 
 def test_dashboard_offers_mesh_fallback_instead_of_dead_end():
     html = dashboard_page().body.decode("utf-8")
-    assert 'Build mesh fallback' in html
+    assert 'AI rebuild as mesh' in html
     assert 'adaptive_mesh_needs_refinement' in html
-    assert 'Improve mesh' in html
+    assert 'AI improve mesh' in html

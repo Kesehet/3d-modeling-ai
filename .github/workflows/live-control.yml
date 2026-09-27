@@ -41,6 +41,7 @@ jobs:
         id: live
         continue-on-error: true
         run: |
+          set +e
           set -uo pipefail
           BASE_URL="https://$THREED_HOSTNAME"
           mkdir -p diagnostics/references diagnostics/reference-candidates diagnostics/renders diagnostics/json
@@ -64,14 +65,14 @@ jobs:
             body="${3:-}"
             output="$4"
             if [ -n "$body" ]; then
-              curl --silent --show-error --max-time 2400                 -H "Authorization: Bearer $THREED_API_TOKEN"                 -H "Content-Type: application/json"                 -X "$method" -d "$body"                 -w '%{http_code}'                 -o "$output"                 "$BASE_URL$path"
+              curl --silent --show-error --retry 4 --retry-all-errors --retry-delay 3 --connect-timeout 20 --max-time 2400                 -H "Authorization: Bearer $THREED_API_TOKEN"                 -H "Content-Type: application/json"                 -X "$method" -d "$body"                 -w '%{http_code}'                 -o "$output"                 "$BASE_URL$path"
             else
-              curl --silent --show-error --max-time 2400                 -H "Authorization: Bearer $THREED_API_TOKEN"                 -X "$method"                 -w '%{http_code}'                 -o "$output"                 "$BASE_URL$path"
+              curl --silent --show-error --retry 4 --retry-all-errors --retry-delay 3 --connect-timeout 20 --max-time 2400                 -H "Authorization: Bearer $THREED_API_TOKEN"                 -X "$method"                 -w '%{http_code}'                 -o "$output"                 "$BASE_URL$path"
             fi
           }
 
           refresh_dashboard() {
-            curl --fail --silent --show-error --max-time 30               "$BASE_URL/dashboard/api"               -o diagnostics/json/dashboard.json
+            curl --fail --silent --show-error --retry 4 --retry-all-errors --retry-delay 3 --connect-timeout 15 --max-time 30               "$BASE_URL/dashboard/api"               -o diagnostics/json/dashboard.json
           }
 
           resolve_latest_job() {
@@ -107,7 +108,7 @@ jobs:
                   while IFS= read -r name; do
                     [ -n "$name" ] || continue
                     encoded=$(python -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$name")
-                    curl --fail --silent --show-error --max-time 60                       -H "Authorization: Bearer $THREED_API_TOKEN"                       "$BASE_URL/v1/jobs/$job_id/artifacts/$category/$encoded"                       -o "diagnostics/$category/$name" || true
+                    curl --fail --silent --show-error --retry 4 --retry-all-errors --retry-delay 3 --connect-timeout 15 --max-time 60                       -H "Authorization: Bearer $THREED_API_TOKEN"                       "$BASE_URL/v1/jobs/$job_id/artifacts/$category/$encoded"                       -o "diagnostics/$category/$name" || true
                   done < <(jq -r --arg category "$category" '.artifacts[$category][]?.name // empty' diagnostics/json/artifacts.json)
                 done
               fi

@@ -2534,7 +2534,7 @@ async def _verify_reference_batch(
                 system=system,
                 prompt=prompt,
                 images=images,
-                schema=ReferencePackDecision.model_json_schema(),
+                schema=None,
                 temperature=0.0,
                 num_predict=4096,
             )

@@ -321,7 +321,7 @@ function renderDetail(job){
     }
     els.quality.classList.add("show");
   }else if(job.stage==="generic_quality_unverified"){
-    els.quality.innerHTML='<strong>Visual QA needs another pass.</strong>Improve will retry the Qwen/Gemma vision ensemble. If the model is rejected, the job will continue through adaptive mesh reconstruction instead of stopping.';
+    els.quality.innerHTML='<strong>Visual QA needs another pass.</strong>Improve will ask the AI modeling director to judge the current renders again and choose whether to revise the procedural model or rebuild it as a mesh.';
     els.quality.classList.add("show");
   }
   els.renders.innerHTML=(job.renders||[]).length
@@ -345,9 +345,9 @@ function renderDetail(job){
   els.json.textContent=JSON.stringify({status:{state:job.state,stage:job.stage,modeling_strategy:job.modeling_strategy,quality_gate:job.quality_gate},references:job.references,latest_vision_images:job.latest_vision_images,qa:job.qa,history:job.history},null,2);
   els.improve.disabled=busy||!scene.length;
   if(!busy){
-    els.improve.textContent=retryingQuality?"Retry vision + improve":(needsMesh?"Build mesh fallback":(improvingMesh?"Improve mesh":"Improve model"));
+    els.improve.textContent=retryingQuality?"Ask AI director again":(needsMesh?"AI rebuild as mesh":(improvingMesh?"AI improve mesh":"AI improve model"));
   }
-  els.improve.title=retryingQuality?"Retry strict visual QA; if rejected, switch automatically to reference-driven adaptive mesh reconstruction.":(needsMesh?"Switch from primitive blockout to a reference-driven continuous mesh.":"");
+  els.improve.title=retryingQuality?"Let the multimodal modeling director inspect the references and current renders and choose the next action.":(needsMesh?"Let the AI rebuild the current result using the mesh strategy.":"");
   els.deleteBtn.disabled=busy||job.state==="running";
 }
 async function refresh(){

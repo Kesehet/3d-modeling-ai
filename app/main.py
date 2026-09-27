@@ -6381,6 +6381,8 @@ async def _generate_hard_surface_cage(
             ),
             modeling_strategy="hard_surface_cage",
             generic_model=active_model,
+            working_cage_version=version,
+            cage_edit_stall_count=0,
             quality_gate={
                 **quality,
                 "representation": "hard_surface_cage",
@@ -6405,6 +6407,8 @@ async def _generate_hard_surface_cage(
             stage="hard_surface_cage_needs_replan",
             modeling_strategy="hard_surface_cage",
             generic_model=previous_model,
+            working_cage_version=version,
+            cage_edit_stall_count=0,
             quality_gate={
                 **quality,
                 "recognizable": False,
@@ -7675,59 +7679,14 @@ async def refine_generic_scene(job_id: str, request: GenericRefineRequest) -> di
     if current_strategy == "hard_surface_cage" or status_payload.get("stage") in {
         "hard_surface_cage_needs_refinement",
         "hard_surface_cage_needs_replan",
+        "hard_surface_cage_feature_complete",
     }:
         feature_task = begin_feature(root)
         if feature_task is not None and feature_task.build_mode == "component_job":
             return await _build_and_install_component_feature(job_id, feature_task)
 
-        if feature_task is not None:
-            reason = (
-                f"Work the queued feature sub-job with human-style Blender cage editing: {feature_task.name}.\n"
-                + "\n".join(
-                    [
-                        *feature_task.acceptance_criteria,
-                        *[f"Target region: {region}" for region in feature_task.target_regions],
-                        *[f"Protect/own scope: {scope}" for scope in feature_task.owner_scope],
-                    ]
-                )
-            )
-        else:
-            decision = await _ask_modeling_director(
-                job_id,
-                stage="hard_surface_cage_continuation",
-                current_strategy="hard_surface_cage",
-                include_renders=True,
-            )
-            if decision["action"] == "accept":
-                quality_gate = {
-                    "recognizable": True,
-                    "subject_match_score": decision.get("subject_match_score"),
-                    "recommended_strategy": "base_mesh",
-                    "summary": decision.get("summary"),
-                    "director_action": "accept",
-                    "instructions": decision.get("instructions") or [],
-                }
-                status = _write_status(
-                    root,
-                    state="ready",
-                    stage="hard_surface_cage_recognizable",
-                    modeling_strategy="hard_surface_cage",
-                    quality_gate=quality_gate,
-                )
-                return {
-                    "job_id": job_id,
-                    "iterations": [],
-                    "rejected": None,
-                    "quality_gate": quality_gate,
-                    "status": status,
-                }
-            reason = (decision.get("summary") or "") + "\n" + "\n".join(
-                decision.get("instructions") or []
-            )
-
-        return await _generate_hard_surface_cage(
+        return await _refine_hard_surface_cage_incrementally(
             job_id,
-            reason=reason,
             feature_task=feature_task,
         )
 

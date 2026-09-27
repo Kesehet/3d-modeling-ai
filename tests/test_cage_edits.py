@@ -1,6 +1,7 @@
 import pytest
 
 from app.cage_edits import CageEditAction, apply_cage_edit_action
+from app.main import _normalize_cage_edit_action_payload
 
 
 def _spec():
@@ -102,3 +103,20 @@ def test_position_edit_rejects_collapsed_sections():
 
     with pytest.raises(ValueError, match="collapsed adjacent"):
         apply_cage_edit_action(spec, action)
+
+
+
+def test_visual_edit_payload_accepts_action_alias_from_vision_model():
+    payload = _normalize_cage_edit_action_payload(
+        {
+            "action": "replan_representation",
+            "summary": "The current representation is too coarse to refine locally.",
+            "expected_improvement": "Rebuild a more editable baseline before local corrections.",
+        }
+    )
+
+    action = CageEditAction.model_validate(payload)
+
+    assert action.operation == "replan_representation"
+    assert "too coarse" in action.reason
+    assert "editable baseline" in action.expected_visual_effect

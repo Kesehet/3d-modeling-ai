@@ -2141,6 +2141,7 @@ def _auto_improve_progress_signature(root: Path, status: dict) -> tuple[object, 
     counts = plan.get("counts") or {}
     return (
         version,
+        status.get("working_cage_version"),
         status.get("stage"),
         score,
         counts.get("accepted", 0),
@@ -5535,7 +5536,7 @@ async def _build_hard_surface_cage_spec(
         min_cage_stations, min_profile_points = 4, 4
 
     status_payload = _read_status(root)
-    active = _active_hard_surface_cage_spec(root, status_payload)
+    active = _working_hard_surface_cage_spec(root, status_payload)
     current_cage = active[1].model_dump() if active is not None else {}
 
     latest_vision: dict = {}
@@ -5835,6 +5836,42 @@ def _recent_cage_edit_events(root: Path, limit: int = 6) -> list[dict]:
     return events[-limit:]
 
 
+def _normalize_cage_edit_action_payload(data: object) -> dict:
+    """Normalize harmless LLM field-name drift without inventing edit semantics."""
+
+    if not isinstance(data, dict):
+        raise TypeError("Visual cage edit decision is not a JSON object.")
+
+    normalized = dict(data)
+    if normalized.get("operation") is None and normalized.get("action") is not None:
+        normalized["operation"] = normalized.get("action")
+    if normalized.get("target_index") is None:
+        for key in ("station_index", "cutter_index", "target_station", "target_cutter"):
+            if normalized.get(key) is not None:
+                normalized["target_index"] = normalized.get(key)
+                break
+    if normalized.get("point_index") is None:
+        for key in ("profile_point_index", "target_point", "profile_index"):
+            if normalized.get(key) is not None:
+                normalized["point_index"] = normalized.get(key)
+                break
+    if not normalized.get("reason"):
+        normalized["reason"] = str(
+            normalized.get("summary")
+            or normalized.get("diagnosis")
+            or normalized.get("rationale")
+            or "Visual edit director selected this bounded action."
+        )
+    if not normalized.get("expected_visual_effect"):
+        normalized["expected_visual_effect"] = str(
+            normalized.get("expected_effect")
+            or normalized.get("expected_improvement")
+            or normalized.get("goal")
+            or ""
+        )
+    return normalized
+
+
 async def _decide_hard_surface_cage_edit(
     job_id: str,
     *,
@@ -5948,7 +5985,9 @@ async def _decide_hard_surface_cage_edit(
                 temperature=0.0,
                 num_predict=2048,
             )
-            action = CageEditAction.model_validate(result.data)
+            action = CageEditAction.model_validate(
+                _normalize_cage_edit_action_payload(result.data)
+            )
         except (OllamaProxyError, httpx.HTTPError, ValidationError, ValueError, TypeError) as exc:
             errors.append(f"{candidate_model}: {exc}")
             continue
@@ -6301,6 +6340,8 @@ async def _generate_hard_surface_cage(
     reason: str,
     feature_task: FeatureTask | None = None,
 ) -> dict:
+    """Create/re-plan a cage while preserving the same visual keep/revert contract."""
+
     root = _require_job(job_id)
     previous_status = _read_status(root)
     previous_model = (
@@ -6308,13 +6349,16 @@ async def _generate_hard_surface_cage(
         if isinstance(previous_status.get("generic_model"), dict)
         else None
     )
-    baseline_version = (
+    active_version = (
         previous_model.get("version")
         if isinstance(previous_model, dict) and isinstance(previous_model.get("version"), int)
         else None
     )
 
     feature_task = feature_task or begin_feature(root)
+    working_before = _working_hard_surface_cage_spec(root, previous_status)
+    baseline_version = working_before[0] if working_before is not None else active_version
+
     if feature_task is not None:
         append_history(
             root,
@@ -6333,8 +6377,18 @@ async def _generate_hard_surface_cage(
             reason=reason,
             feature_task=feature_task,
         )
-        version = 1 + len(list((root / "scene").glob("model-v*.blend")))
-        build = await _execute_hard_surface_cage(job_id, spec, version=version)
+        existing_versions = [
+            int(match.group(1))
+            for path in (root / "scene").glob("model-v*.blend")
+            if (match := re.search(r"model-v(\\d+)\\.blend$", path.name))
+        ]
+        version = max(existing_versions or [0]) + 1
+        build = await _execute_hard_surface_cage(
+            job_id,
+            spec,
+            version=version,
+            activate_status=feature_task is None,
+        )
     except Exception as exc:
         if feature_task is not None:
             detail = str(exc.detail) if isinstance(exc, HTTPException) else str(exc)
@@ -6357,23 +6411,176 @@ async def _generate_hard_surface_cage(
 
     feature_evaluation: dict | None = None
     comparison: dict | None = None
+
     if feature_task is not None:
+        if baseline_version is not None and baseline_version != version:
+            comparison = await _compare_generic_versions(
+                root,
+                baseline_version=baseline_version,
+                candidate_version=version,
+            )
+
         feature_evaluation = await _evaluate_feature_candidate(
             job_id,
             feature_task,
             baseline_version=baseline_version,
             candidate_version=version,
         )
-        accepted = _feature_evaluation_accepts(feature_task, feature_evaluation)
+        feature_complete = _feature_evaluation_accepts(feature_task, feature_evaluation)
+        candidate_improved = bool(
+            feature_complete
+            or baseline_version is None
+            or (comparison and comparison.get("candidate_is_better") is True)
+        )
+
         quality = dict(
             previous_status.get("quality_gate")
             if isinstance(previous_status.get("quality_gate"), dict)
             else {}
         )
-        quality["summary"] = feature_evaluation.get("summary") or quality.get("summary")
+        quality["summary"] = (
+            feature_evaluation.get("summary")
+            or (comparison or {}).get("summary")
+            or quality.get("summary")
+        )
         quality["active_feature_id"] = feature_task.id
-        quality["active_feature_passed"] = accepted
+        quality["active_feature_passed"] = feature_complete
         quality["representation"] = "hard_surface_cage"
+        quality["baseline_version"] = baseline_version
+        quality["candidate_version"] = version
+        quality["candidate_improved"] = candidate_improved
+        if feature_evaluation.get("subject_recognizable") is not None:
+            quality["recognizable"] = bool(feature_evaluation.get("subject_recognizable"))
+        if feature_evaluation.get("reference_match_score") is not None:
+            quality["subject_match_score"] = feature_evaluation.get("reference_match_score")
+
+        candidate_model = build.get("candidate_model")
+        previous_stall_count = int(previous_status.get("cage_edit_stall_count") or 0)
+
+        if feature_complete:
+            status = _write_status(
+                root,
+                state="ready",
+                stage="hard_surface_cage_feature_complete",
+                modeling_strategy="hard_surface_cage",
+                generic_model=candidate_model,
+                working_cage_version=version,
+                cage_edit_stall_count=0,
+                quality_gate=quality,
+            )
+            append_history(
+                root,
+                "hard_surface_cage_accepted",
+                version=version,
+                recognizable=feature_evaluation.get("subject_recognizable"),
+                baseline_version=baseline_version,
+                reason="strict feature acceptance passed",
+            )
+            finish_feature(
+                root,
+                feature_task.id,
+                accepted=True,
+                version=version,
+                summary=str(feature_evaluation.get("summary") or ""),
+                verified=True,
+                acceptance_score=float(
+                    feature_evaluation.get("reference_match_score") or 0.0
+                ),
+                acceptance_model=(
+                    str(feature_evaluation.get("model"))
+                    if feature_evaluation.get("model")
+                    else None
+                ),
+            )
+            append_history(
+                root,
+                "feature_subjob_accepted",
+                feature_id=feature_task.id,
+                feature_name=feature_task.name,
+                version=version,
+                via="hard_surface_cage",
+            )
+
+        elif candidate_improved:
+            status = _write_status(
+                root,
+                state="ready",
+                stage="hard_surface_cage_needs_refinement",
+                modeling_strategy="hard_surface_cage",
+                generic_model=previous_model,
+                working_cage_version=version,
+                cage_edit_stall_count=0,
+                quality_gate=quality,
+            )
+            append_history(
+                root,
+                "hard_surface_cage_progress",
+                baseline_version=baseline_version,
+                candidate_version=version,
+                feature_id=feature_task.id,
+                summary=quality.get("summary"),
+            )
+            record_feature_progress(
+                root,
+                feature_task.id,
+                version=version,
+                summary=str(
+                    feature_evaluation.get("summary")
+                    or (comparison or {}).get("summary")
+                    or "Candidate improved the working representation but is not complete."
+                ),
+            )
+            append_history(
+                root,
+                "feature_subjob_progress",
+                feature_id=feature_task.id,
+                feature_name=feature_task.name,
+                version=version,
+                via="hard_surface_cage",
+            )
+
+        else:
+            kept_working_version = baseline_version
+            status = _write_status(
+                root,
+                state="ready",
+                stage="hard_surface_cage_needs_refinement",
+                modeling_strategy="hard_surface_cage",
+                generic_model=previous_model,
+                working_cage_version=kept_working_version,
+                cage_edit_stall_count=previous_stall_count + 1,
+                quality_gate={
+                    **quality,
+                    "candidate_rejected": True,
+                },
+            )
+            append_history(
+                root,
+                "hard_surface_cage_rejected",
+                baseline_version=baseline_version,
+                candidate_version=version,
+                feature_id=feature_task.id,
+                summary=(
+                    (comparison or {}).get("summary")
+                    or feature_evaluation.get("summary")
+                ),
+            )
+            record_feature_progress(
+                root,
+                feature_task.id,
+                version=kept_working_version or version,
+                summary=(
+                    "Replanned candidate reverted; feature remains active. "
+                    + str(
+                        (comparison or {}).get("summary")
+                        or feature_evaluation.get("summary")
+                        or ""
+                    )
+                ),
+            )
+
+        accepted = feature_complete
+
     else:
         if baseline_version is not None and baseline_version != version:
             comparison = await _compare_generic_versions(
@@ -6398,97 +6605,71 @@ async def _generate_hard_surface_cage(
             or baseline_version is None
             or (comparison and comparison.get("candidate_is_better"))
         )
-
-    if accepted:
-        active_model = build["status"].get("generic_model")
-        recognizable = quality.get("recognizable")
-        status = _write_status(
-            root,
-            state="ready",
-            stage=(
-                "hard_surface_cage_recognizable"
-                if recognizable is True
-                else "hard_surface_cage_needs_refinement"
-            ),
-            modeling_strategy="hard_surface_cage",
-            generic_model=active_model,
-            working_cage_version=version,
-            cage_edit_stall_count=0,
-            quality_gate={
-                **quality,
-                "representation": "hard_surface_cage",
-                "baseline_version": baseline_version,
-                "candidate_version": version,
-                "better_than_previous": (
-                    comparison.get("candidate_is_better") if comparison else None
+        candidate_model = (
+            build["status"].get("generic_model")
+            if isinstance(build.get("status"), dict)
+            else build.get("candidate_model")
+        )
+        if accepted:
+            status = _write_status(
+                root,
+                state="ready",
+                stage=(
+                    "hard_surface_cage_recognizable"
+                    if quality.get("recognizable") is True
+                    else "hard_surface_cage_needs_refinement"
                 ),
-            },
-        )
-        append_history(
-            root,
-            "hard_surface_cage_accepted",
-            version=version,
-            recognizable=recognizable,
-            baseline_version=baseline_version,
-        )
-    else:
-        status = _write_status(
-            root,
-            state="ready",
-            stage="hard_surface_cage_needs_replan",
-            modeling_strategy="hard_surface_cage",
-            generic_model=previous_model,
-            working_cage_version=version,
-            cage_edit_stall_count=0,
-            quality_gate={
-                **quality,
-                "recognizable": False,
-                "representation": "hard_surface_cage",
-                "candidate_rejected": True,
-                "baseline_version": baseline_version,
-                "candidate_version": version,
-            },
-        )
-        append_history(
-            root,
-            "hard_surface_cage_rejected",
-            baseline_version=baseline_version,
-            candidate_version=version,
-            summary=(
-                feature_evaluation.get("summary")
-                if feature_evaluation
-                else (comparison or {}).get("summary")
-            ),
-        )
-
-    if feature_task is not None:
-        finish_feature(
-            root,
-            feature_task.id,
-            accepted=accepted,
-            version=version if accepted else None,
-            summary=str((feature_evaluation or {}).get("summary") or quality.get("summary") or ""),
-            error="" if accepted else "Hard-surface cage candidate failed strict focused QA.",
-            verified=accepted,
-            acceptance_score=float((feature_evaluation or {}).get("reference_match_score") or 0.0),
-            acceptance_model=(
-                str((feature_evaluation or {}).get("model"))
-                if (feature_evaluation or {}).get("model")
-                else None
-            ),
-        )
-        append_history(
-            root,
-            "feature_subjob_accepted" if accepted else "feature_subjob_retry",
-            feature_id=feature_task.id,
-            feature_name=feature_task.name,
-            version=version if accepted else None,
-            via="hard_surface_cage",
-        )
+                modeling_strategy="hard_surface_cage",
+                generic_model=candidate_model,
+                working_cage_version=version,
+                cage_edit_stall_count=0,
+                quality_gate={
+                    **quality,
+                    "representation": "hard_surface_cage",
+                    "baseline_version": baseline_version,
+                    "candidate_version": version,
+                    "better_than_previous": (
+                        comparison.get("candidate_is_better") if comparison else None
+                    ),
+                },
+            )
+            append_history(
+                root,
+                "hard_surface_cage_accepted",
+                version=version,
+                recognizable=quality.get("recognizable"),
+                baseline_version=baseline_version,
+            )
+        else:
+            status = _write_status(
+                root,
+                state="ready",
+                stage="hard_surface_cage_needs_refinement",
+                modeling_strategy="hard_surface_cage",
+                generic_model=previous_model,
+                working_cage_version=baseline_version,
+                cage_edit_stall_count=int(previous_status.get("cage_edit_stall_count") or 0) + 1,
+                quality_gate={
+                    **quality,
+                    "recognizable": False,
+                    "representation": "hard_surface_cage",
+                    "candidate_rejected": True,
+                    "baseline_version": baseline_version,
+                    "candidate_version": version,
+                },
+            )
+            append_history(
+                root,
+                "hard_surface_cage_rejected",
+                baseline_version=baseline_version,
+                candidate_version=version,
+                summary=(comparison or {}).get("summary"),
+            )
 
     build["comparison"] = comparison
     build["feature_evaluation"] = feature_evaluation
     build["quality_gate"] = quality
+    build["accepted"] = accepted
     build["status"] = status
     return build
 

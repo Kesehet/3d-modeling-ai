@@ -340,6 +340,8 @@ def jobs_snapshot() -> dict:
                     "state": status.get("state", "unknown"),
                     "stage": status.get("stage", "unknown"),
                     "modeling_strategy": status.get("modeling_strategy"),
+                    "working_cage_version": status.get("working_cage_version"),
+                    "cage_edit_stall_count": status.get("cage_edit_stall_count"),
                     "quality_gate": status.get("quality_gate") if isinstance(status.get("quality_gate"), dict) else None,
                     "feature_plan": feature_plan_summary(root),
                     "auto_improve": status.get("auto_improve") if isinstance(status.get("auto_improve"), dict) else None,

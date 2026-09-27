@@ -3318,13 +3318,46 @@ async def refine_generic_scene(job_id: str, request: GenericRefineRequest) -> di
                 ),
             )
         if existing_status.get("stage") == "generic_quality_unverified":
-            raise HTTPException(
-                status_code=409,
-                detail=(
-                    "The active model could not be quality-verified. "
-                    "Refinement is disabled until visual QA is available again."
+            try:
+                retry_quality = await _generic_recognizability_check(
+                    job_id,
+                    stage="generic_quality_retry",
+                )
+            except HTTPException as exc:
+                append_history(
+                    root,
+                    "generic_quality_retry_failed",
+                    error=str(exc.detail),
+                )
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"Visual QA retry failed across the vision ensemble: {exc.detail}",
+                ) from exc
+
+            retry_gate = {
+                "recognizable": retry_quality.get("recognizable"),
+                "subject_match_score": retry_quality.get("subject_match_score"),
+                "recommended_strategy": retry_quality.get("recommended_strategy"),
+                "summary": retry_quality.get("summary"),
+            }
+            _write_status(
+                root,
+                state="ready",
+                stage=(
+                    "generic_quality_verified_retry"
+                    if retry_quality.get("recognizable") is True
+                    else "generic_needs_strategy_switch"
                 ),
+                quality_gate=retry_gate,
             )
+            if retry_quality.get("recognizable") is not True:
+                return await _generate_adaptive_mesh_fallback(
+                    job_id,
+                    reason=(
+                        retry_quality.get("summary")
+                        or "The visual QA retry rejected the active model; switch to adaptive mesh reconstruction."
+                    ),
+                )
 
     spec_files = sorted(
         root.glob("scene-spec-v*.json"),

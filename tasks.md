@@ -66,18 +66,18 @@ For complex subjects, stop treating every feature as an in-place edit to one gia
 
 Example: `Toyota Prius -> wheel assembly -> tire + rim + visible fasteners`. The wheel is not eligible for installation on the Prius until its required child components and component-level multi-angle QA pass.
 
-- [ ] Add component-job workspace/manifest linked to parent job + parent feature.
-- [ ] Let the feature planner mark major features as `component_job` versus `in_place`.
-- [ ] Allow component jobs to create their own feature plans recursively.
-- [ ] Enforce recursion depth, child-count and model/render budgets.
+- [x] Add component-job workspace/manifest linked to parent job + parent feature.
+- [x] Let the feature planner mark major features as `component_job` versus `in_place`.
+- [x] Allow component jobs to create their own feature plans recursively.
+- [x] Enforce recursion depth and repeated-instance caps; broader per-tree token/render accounting remains pending.
 - [ ] Inherit/crop/select parent references for the component instead of blindly researching from scratch.
-- [ ] Give every component its own accepted-best checkpoint, renders, QA and failure history.
-- [ ] Block parent feature acceptance until all required child components are accepted.
-- [ ] Freeze an accepted component artifact before parent assembly.
-- [ ] Add deterministic assembly metadata: anchor, orientation, scale, symmetry/count and parent target region.
-- [ ] Install the frozen component into the parent scene without allowing the child worker to rewrite unrelated parent geometry.
-- [ ] Re-run parent-level QA after assembly; rollback the installation if whole-object recognizability regresses.
-- [ ] Reuse one accepted component for repeated instances where appropriate (e.g. four wheels) rather than rebuilding it four times.
+- [x] Give every component its own accepted-best checkpoint, renders, QA and failure history.
+- [x] Block parent feature acceptance until all required child components are accepted.
+- [x] Freeze an accepted component artifact before parent assembly.
+- [x] Add assembly metadata plus AI-planned bounded transforms: anchor, orientation, scale, count and parent target region.
+- [x] Install the frozen component into the parent `.blend` without asking the parent worker to redraw it.
+- [x] Re-run feature + parent-vs-previous QA after assembly; reject the installation and preserve the prior parent when it regresses.
+- [x] Reuse one accepted component for repeated instances where appropriate (e.g. four wheels) rather than rebuilding it four times.
 - [ ] Show the component tree in the dashboard: parent -> children -> acceptance state -> installed version.
 - [ ] Add a recursive production benchmark: Prius body + independently accepted wheel assembly, with wheel decomposed into tire/rim/fasteners.
 

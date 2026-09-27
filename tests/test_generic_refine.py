@@ -1,3 +1,5 @@
+from PIL import Image
+
 from app.main import (
     GenericRefineRequest,
     ModelingDirectorDecision,
@@ -33,7 +35,7 @@ def test_generic_visual_refinement_collects_only_latest_model_version(tmp_path):
         "model-v2-back.png",
         "pikachu-front.png",
     ):
-        (tmp_path / "renders" / name).write_bytes(name.encode("utf-8"))
+        Image.new("RGB", (32, 32), (120, 130, 140)).save(tmp_path / "renders" / name)
 
     _, labels = _collect_images(
         tmp_path,
@@ -65,7 +67,7 @@ def test_generic_visual_refinement_prefers_accepted_status_version(tmp_path):
         "model-v2-front.png",
         "model-v2-back.png",
     ):
-        (tmp_path / "renders" / name).write_bytes(name.encode("utf-8"))
+        Image.new("RGB", (32, 32), (120, 130, 140)).save(tmp_path / "renders" / name)
     (tmp_path / "status.json").write_text(
         '{"generic_model":{"version":1}}',
         encoding="utf-8",

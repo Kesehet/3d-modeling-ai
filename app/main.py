@@ -842,6 +842,838 @@ def _normalize_scene_spec_payload(data: object, fallback_title: str) -> dict:
     return normalized
 
 
+def _require_job(job_id: str) -> Path:
+    root = _job_dir(job_id)
+    if not root.exists():
+        raise HTTPException(status_code=404, detail="Job not found")
+    return root
+
+
+def _write_status(path: Path, **values: object) -> dict:
+    status_file = path / "status.json"
+    current: dict = {}
+    if status_file.exists():
+        current = json.loads(status_file.read_text(encoding="utf-8"))
+    previous_state = current.get("state")
+    previous_stage = current.get("stage")
+    current.update(values)
+    current["updated_at"] = datetime.now(UTC).isoformat()
+    status_file.write_text(json.dumps(current, indent=2), encoding="utf-8")
+    if current.get("state") != previous_state or current.get("stage") != previous_stage:
+        append_history(
+            path,
+            "status",
+            state=current.get("state"),
+            stage=current.get("stage"),
+            previous_state=previous_state,
+            previous_stage=previous_stage,
+        )
+    return current
+
+
+def _write_llm_log(root: Path, prefix: str, payload: dict) -> str:
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
+    filename = f"{prefix}-{stamp}.json"
+    (root / "logs" / filename).write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    return filename
+
+
+def _worker_blender_error(result: dict) -> str | None:
+    if result.get("is_error"):
+        return "Blender MCP reported a tool error."
+    for item in result.get("content", []):
+        if not isinstance(item, str):
+            continue
+        try:
+            payload = json.loads(item)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict) and payload.get("error"):
+            return str(payload["error"])
+    return None
+
+
+def _image_info(data: bytes) -> tuple[str, str, int, int]:
+    try:
+        with Image.open(BytesIO(data)) as image:
+            image.verify()
+        with Image.open(BytesIO(data)) as image:
+            fmt = (image.format or "").upper()
+            width, height = image.size
+    except (UnidentifiedImageError, OSError, Image.DecompressionBombError) as exc:
+        raise HTTPException(status_code=400, detail="One uploaded file is not a supported image.") from exc
+
+    if fmt not in IMAGE_FORMATS:
+        raise HTTPException(status_code=400, detail=f"Unsupported image format: {fmt or 'unknown'}")
+    mime, extension = IMAGE_FORMATS[fmt]
+    return mime, extension, width, height
+
+
+def _load_reference_index(root: Path) -> list[dict]:
+    path = root / "references.json"
+    if not path.exists():
+        return []
+    data = json.loads(path.read_text(encoding="utf-8"))
+    return data if isinstance(data, list) else []
+
+
+def _encode_vision_image(path: Path, *, max_side: int = 640, quality: int = 70) -> str:
+    """Encode a compact vision-only copy without modifying the persisted artifact."""
+    try:
+        with Image.open(path) as source:
+            image = source.convert("RGB")
+            image.thumbnail((max_side, max_side), Image.Resampling.LANCZOS)
+            buffer = BytesIO()
+            image.save(
+                buffer,
+                format="JPEG",
+                quality=max(45, min(85, quality)),
+                optimize=True,
+                progressive=True,
+            )
+            payload = buffer.getvalue()
+    except (UnidentifiedImageError, OSError, Image.DecompressionBombError) as exc:
+        raise ValueError(f"Could not prepare vision image {path.name}: {exc}") from exc
+    return base64.b64encode(payload).decode("ascii")
+
+
+def _collect_images(root: Path, request: VisionAnalyzeRequest) -> tuple[list[str], list[str]]:
+    def images_in(folder: str) -> list[Path]:
+        paths = []
+        for path in (root / folder).glob("*"):
+            if path.is_file() and path.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp"}:
+                paths.append(path)
+        return sorted(paths, key=lambda item: item.stat().st_mtime)
+
+    references = images_in("references") if request.include_references else []
+    renders = images_in("renders") if request.include_renders else []
+
+    # Generic refinement must critique one coherent model version. Mixing older model-vN
+    # renders into the current set can make the vision model "fix" geometry that no longer exists.
+    if request.stage.startswith("generic_") and renders:
+        versioned: list[tuple[int, Path]] = []
+        for path in renders:
+            stem = path.stem
+            if not stem.startswith("model-v"):
+                continue
+            remainder = stem[len("model-v"):]
+            number_text = remainder.split("-", 1)[0]
+            if number_text.isdigit():
+                versioned.append((int(number_text), path))
+        if versioned:
+            accepted_version: int | None = None
+            status_path = root / "status.json"
+            if status_path.exists():
+                try:
+                    status_payload = json.loads(status_path.read_text(encoding="utf-8"))
+                    generic_model = status_payload.get("generic_model")
+                    if isinstance(generic_model, dict) and isinstance(generic_model.get("version"), int):
+                        accepted_version = generic_model["version"]
+                except (OSError, json.JSONDecodeError):
+                    accepted_version = None
+            target_version = accepted_version
+            if target_version is None or not any(version == target_version for version, _ in versioned):
+                target_version = max(version for version, _ in versioned)
+            renders = [path for version, path in versioned if version == target_version]
+
+    if references and renders:
+        reference_budget = min(len(references), max(2, request.max_images // 3))
+        render_budget = max(1, request.max_images - reference_budget)
+        image_paths = references[-reference_budget:] + renders[-render_budget:]
+    else:
+        image_paths = (references or renders)[-request.max_images :]
+
+    encoded = [_encode_vision_image(path) for path in image_paths]
+    labels = [f"{path.parent.name}/{path.name}" for path in image_paths]
+    return encoded, labels
+
+
+@app.get("/", response_class=HTMLResponse, include_in_schema=False)
+async def dashboard() -> HTMLResponse:
+    return dashboard_page()
+
+
+@app.get("/dashboard/api", include_in_schema=False)
+async def dashboard_api() -> dict:
+    return jobs_snapshot()
+
+
+@app.get("/dashboard/renders/{job_id}/{filename}", include_in_schema=False)
+async def dashboard_render(job_id: str, filename: str) -> FileResponse:
+    return FileResponse(public_render(job_id, filename))
+
+
+@app.get("/dashboard/artifacts/{job_id}/{category}/{filename}", include_in_schema=False)
+async def dashboard_artifact(job_id: str, category: str, filename: str) -> FileResponse:
+    path = public_artifact(job_id, category, filename)
+    return FileResponse(path, filename=path.name)
+
+
+@app.post("/dashboard/jobs", include_in_schema=False)
+async def dashboard_create_job(payload: JobCreate) -> dict:
+    return await create_job(payload)
+
+
+@app.post("/dashboard/jobs/{job_id}/pikachu", include_in_schema=False)
+async def dashboard_run_pikachu(job_id: str) -> dict:
+    return await generate_pikachu_test(job_id)
+
+
+@app.post("/dashboard/jobs/{job_id}/research", include_in_schema=False)
+async def dashboard_research(job_id: str, request: ResearchRequest) -> dict:
+    return await research_job(job_id, request)
+
+
+@app.post("/dashboard/jobs/{job_id}/generate", include_in_schema=False)
+async def dashboard_generate_generic(job_id: str, request: GenericGenerateRequest) -> dict:
+    return await generate_generic_scene(job_id, request)
+
+
+@app.post("/dashboard/jobs/{job_id}/improve", include_in_schema=False)
+async def dashboard_improve_generic(job_id: str, request: GenericRefineRequest) -> dict:
+    return await refine_generic_scene(job_id, request)
+
+
+@app.post("/dashboard/jobs/{job_id}/quality-benchmark", include_in_schema=False)
+async def dashboard_quality_benchmark(job_id: str, request: QualityBenchmarkRequest) -> dict:
+    return await evaluate_quality_benchmark(job_id, request)
+
+
+@app.delete("/dashboard/jobs/{job_id}", include_in_schema=False)
+async def dashboard_delete_job(job_id: str) -> dict:
+    return await delete_job(job_id)
+
+
+@app.post("/dashboard/jobs/{job_id}/refine-pikachu", include_in_schema=False)
+async def dashboard_refine_pikachu(job_id: str, request: PikachuRefineRequest) -> dict:
+    return await refine_pikachu(job_id, request)
+
+
+@app.get("/dashboard/jobs/{job_id}/history", include_in_schema=False)
+async def dashboard_history(job_id: str) -> dict:
+    root = _require_job(job_id)
+    return {"job_id": job_id, "history": load_history(root)}
+
+
+@app.post("/dashboard/jobs/{job_id}/repair-print", include_in_schema=False)
+async def dashboard_repair_print(job_id: str, request: PrintRepairRequest) -> dict:
+    return await repair_print_model(job_id, request)
+
+
+@app.get("/health")
+async def health() -> dict:
+    worker = {"ok": False}
+    try:
+        async with httpx.AsyncClient(timeout=5) as client:
+            response = await client.get(f"{WORKER_URL}/health")
+            response.raise_for_status()
+            worker = response.json()
+    except (httpx.HTTPError, ValueError) as exc:
+        worker = {"ok": False, "error": str(exc)}
+    return {
+        "ok": bool(worker.get("ok")),
+        "service": "3d-modeling-ai",
+        "worker": worker,
+        "ollama_proxy": OLLAMA_PROXY_BASE_URL,
+    }
+
+
+@app.get("/v1/capabilities", dependencies=[Depends(require_api_token)])
+async def capabilities() -> dict:
+    return {
+        "reasoning_model": REASONING_MODEL,
+        "vision_model": VISION_MODEL,
+        "vision_models": list(VISION_MODELS),
+        "ollama_proxy": OLLAMA_PROXY_BASE_URL,
+        "blender_mcp": "djeada/blender-mcp-server@428f60cdb819c55c69d67eef681f0318e464e0e9",
+        "stage": "vision-and-planning",
+        "features": [
+            "job-workspaces",
+            "reference-image-upload",
+            "multi-image-vision",
+            "modeling-plan",
+            "headless-blender",
+            "mcp-smoke-test",
+            "artifact-download",
+            "web-reference-research",
+            "iteration-history",
+            "parametric-pikachu-refinement",
+            "glb-obj-stl-export-attempts",
+            "mesh-qa-report",
+            "experimental-voxel-print-repair",
+            "safe-declarative-generic-scene-builder",
+            "generic-prompt-to-primitive-blockout",
+            "generic-visual-refinement",
+            "quality-regression-benchmark-suite",
+            "permanent-job-delete",
+        ],
+    }
+
+
+async def delete_job(job_id: str) -> dict:
+    root = _require_job(job_id)
+    status_path = root / "status.json"
+    status: dict = {}
+    if status_path.exists():
+        try:
+            status = json.loads(status_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            status = {}
+    if status.get("state") == "running":
+        raise HTTPException(
+            status_code=409,
+            detail="This job is still running. Wait for it to finish before deleting it.",
+        )
+
+    file_count = sum(1 for path in root.rglob("*") if path.is_file())
+    byte_count = sum(path.stat().st_size for path in root.rglob("*") if path.is_file())
+    shutil.rmtree(root)
+    return {
+        "job_id": job_id,
+        "deleted": True,
+        "files_deleted": file_count,
+        "bytes_deleted": byte_count,
+    }
+
+
+@app.delete("/v1/jobs/{job_id}", dependencies=[Depends(require_api_token)])
+async def delete_job_api(job_id: str) -> dict:
+    return await delete_job(job_id)
+
+
+@app.post("/v1/jobs", dependencies=[Depends(require_api_token)])
+async def create_job(payload: JobCreate) -> dict:
+    JOBS_ROOT.mkdir(parents=True, exist_ok=True)
+    job_id = str(uuid.uuid4())
+    root = _job_dir(job_id)
+    for child in ARTIFACT_CATEGORIES:
+        (root / child).mkdir(parents=True, exist_ok=True)
+
+    request = payload.model_dump()
+    request["job_id"] = job_id
+    request["created_at"] = datetime.now(UTC).isoformat()
+    (root / "request.json").write_text(json.dumps(request, indent=2), encoding="utf-8")
+    status = _write_status(root, job_id=job_id, state="created", stage="waiting_for_input")
+    return {"job_id": job_id, "status": status}
+
+
+@app.get("/v1/jobs/{job_id}", dependencies=[Depends(require_api_token)])
+async def get_job(job_id: str) -> dict:
+    root = _require_job(job_id)
+    return json.loads((root / "status.json").read_text(encoding="utf-8"))
+
+
+@app.post("/v1/jobs/{job_id}/references", dependencies=[Depends(require_api_token)])
+async def upload_references(
+    job_id: str,
+    files: Annotated[list[UploadFile], File()],
+) -> dict:
+    root = _require_job(job_id)
+    if not files or len(files) > MAX_REFERENCE_FILES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Upload between 1 and {MAX_REFERENCE_FILES} reference images at once.",
+        )
+
+    index = _load_reference_index(root)
+    known_hashes = {str(item.get("sha256")) for item in index}
+    added: list[dict] = []
+    total = 0
+
+    for upload in files:
+        data = await upload.read(MAX_REFERENCE_BYTES + 1)
+        await upload.close()
+        if len(data) > MAX_REFERENCE_BYTES:
+            raise HTTPException(status_code=413, detail="A reference image exceeds the 12 MB limit.")
+        total += len(data)
+        if total > MAX_REFERENCE_TOTAL_BYTES:
+            raise HTTPException(status_code=413, detail="Reference upload exceeds the 48 MB batch limit.")
+
+        mime, extension, width, height = _image_info(data)
+        digest = hashlib.sha256(data).hexdigest()
+        if digest in known_hashes:
+            continue
+
+        stored_name = f"ref-{digest[:16]}{extension}"
+        destination = root / "references" / stored_name
+        destination.write_bytes(data)
+
+        record = {
+            "stored_name": stored_name,
+            "original_name": Path(upload.filename or "reference").name[:200],
+            "sha256": digest,
+            "mime": mime,
+            "bytes": len(data),
+            "width": width,
+            "height": height,
+            "uploaded_at": datetime.now(UTC).isoformat(),
+        }
+        index.append(record)
+        added.append(record)
+        known_hashes.add(digest)
+
+    (root / "references.json").write_text(json.dumps(index, indent=2), encoding="utf-8")
+    status = _write_status(
+        root,
+        state="ready",
+        stage="references_uploaded",
+        reference_count=len(index),
+    )
+    return {"job_id": job_id, "added": added, "references": index, "status": status}
+
+
+@app.get("/v1/jobs/{job_id}/artifacts", dependencies=[Depends(require_api_token)])
+async def list_artifacts(job_id: str) -> dict:
+    root = _require_job(job_id)
+    result: dict[str, list[dict]] = {}
+    for category in sorted(ARTIFACT_CATEGORIES):
+        entries = []
+        for path in sorted((root / category).glob("*")):
+            if path.is_file():
+                entries.append({"name": path.name, "bytes": path.stat().st_size})
+        result[category] = entries
+    return {"job_id": job_id, "artifacts": result}
+
+
+@app.get(
+    "/v1/jobs/{job_id}/artifacts/{category}/{filename}",
+    dependencies=[Depends(require_api_token)],
+)
+async def download_artifact(job_id: str, category: str, filename: str) -> FileResponse:
+    root = _require_job(job_id)
+    if category not in ARTIFACT_CATEGORIES or Path(filename).name != filename:
+        raise HTTPException(status_code=400, detail="Invalid artifact path")
+    path = (root / category / filename).resolve()
+    if root not in path.parents or not path.is_file():
+        raise HTTPException(status_code=404, detail="Artifact not found")
+    return FileResponse(path)
+
+
+async def research_job(job_id: str, request: ResearchRequest) -> dict:
+    root = _require_job(job_id)
+    job_request = json.loads((root / "request.json").read_text(encoding="utf-8"))
+    query = (request.query or job_request.get("prompt") or "").strip()
+    _write_status(root, state="running", stage="researching_references")
+    try:
+        payload = await research_web_references(
+            query,
+            root / "references",
+            max_images=request.max_images,
+        )
+    except (httpx.HTTPError, ValueError) as exc:
+        _write_status(root, state="failed", stage="researching_references", error=str(exc))
+        raise HTTPException(status_code=502, detail=f"Reference research failed: {exc}") from exc
+
+    index = _load_reference_index(root)
+    known_hashes = {str(item.get("sha256")) for item in index}
+    added = []
+    for record in payload.get("references", []):
+        if record.get("sha256") in known_hashes:
+            continue
+        index.append(record)
+        added.append(record)
+        known_hashes.add(str(record.get("sha256")))
+
+    (root / "references.json").write_text(json.dumps(index, indent=2, ensure_ascii=False), encoding="utf-8")
+    write_research_manifest(root / "research.json", payload)
+    append_history(root, "research", query=query, added=len(added), provider=payload.get("provider"))
+    status = _write_status(
+        root,
+        state="ready",
+        stage="references_researched",
+        reference_count=len(index),
+    )
+    return {
+        "job_id": job_id,
+        "query": query,
+        "added": added,
+        "pages": payload.get("pages", []),
+        "status": status,
+    }
+
+
+@app.post("/v1/jobs/{job_id}/research", dependencies=[Depends(require_api_token)])
+async def research_job_api(job_id: str, request: ResearchRequest) -> dict:
+    return await research_job(job_id, request)
+
+
+@app.get("/v1/jobs/{job_id}/history", dependencies=[Depends(require_api_token)])
+async def job_history(job_id: str) -> dict:
+    root = _require_job(job_id)
+    return {"job_id": job_id, "history": load_history(root)}
+
+
+@app.post("/v1/jobs/{job_id}/vision/analyze", dependencies=[Depends(require_api_token)])
+async def analyze_vision(job_id: str, request: VisionAnalyzeRequest) -> dict:
+    root = _require_job(job_id)
+    images, labels = _collect_images(root, request)
+    if not images:
+        raise HTTPException(status_code=400, detail="No reference or render images are available.")
+
+    job_request = json.loads((root / "request.json").read_text(encoding="utf-8"))
+    system = (
+        "You are the visual QA component of an autonomous Blender 3D modeling system. "
+        "Compare all supplied reference/current-render images together. Focus on geometry, silhouette, "
+        "proportions, spatial relationships, missing features, and whether procedural modeling, a generated "
+        "base mesh, or a hybrid workflow is appropriate. When current renders are supplied, explicitly set "
+        "recognizable=true only if the rendered model clearly reads as the user's requested subject without "
+        "needing the filename or prompt to explain what it is; otherwise set recognizable=false. Set "
+        "subject_match_score from 0.0 to 1.0 when possible. Return only JSON matching the supplied schema. "
+        "Do not claim details that cannot be seen."
+    )
+    prompt = (
+        f"Job: {job_request.get('prompt', '')}\n"
+        f"Intended use: {job_request.get('intended_use', '')}\n"
+        f"Target width mm: {job_request.get('target_width_mm')}\n"
+        f"Current stage: {request.stage}\n"
+        f"Images in order: {labels}\n"
+        f"Extra instruction: {request.instruction or 'None'}\n"
+        "Give concrete changes that the Blender planner can act on."
+    )
+
+    ollama_result = None
+    report = None
+    selected_model = None
+    errors: list[str] = []
+    client = OllamaProxyClient()
+    for candidate_model in VISION_MODELS:
+        try:
+            candidate_result = await client.chat_json(
+                model=candidate_model,
+                system=system,
+                prompt=prompt,
+                images=images,
+                schema=VisionReport.model_json_schema(),
+                temperature=0.0,
+                num_predict=4096,
+            )
+            normalized_report = _normalize_vision_report_payload(candidate_result.data)
+            candidate_report = VisionReport.model_validate(normalized_report)
+        except (OllamaProxyError, httpx.HTTPError, ValidationError, ValueError, TypeError) as exc:
+            errors.append(f"{candidate_model}: {exc}")
+            continue
+        ollama_result = candidate_result
+        report = candidate_report
+        selected_model = candidate_model
+        break
+
+    if ollama_result is None or report is None or selected_model is None:
+        detail = " | ".join(errors[-4:])
+        raise HTTPException(
+            status_code=502,
+            detail=f"Vision analysis failed across configured models: {detail}",
+        )
+
+    if selected_model != VISION_MODEL:
+        append_history(
+            root,
+            "vision_model_fallback",
+            requested=VISION_MODEL,
+            selected=selected_model,
+            errors=errors,
+        )
+
+    payload = {
+        "job_id": job_id,
+        "model": selected_model,
+        "endpoint": ollama_result.endpoint,
+        "stage": request.stage,
+        "images": labels,
+        "usage": ollama_result.usage,
+        "report": report.model_dump(),
+        "created_at": datetime.now(UTC).isoformat(),
+    }
+    log_name = _write_llm_log(root, "vision", payload)
+    (root / "vision-latest.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    _write_status(root, state="ready", stage="vision_analyzed", latest_vision_log=log_name)
+    return payload
+
+
+async def _evaluate_benchmark_visual(
+    root: Path,
+    *,
+    version: int,
+    key: str,
+) -> dict:
+    profile = get_benchmark(key)
+    views = ("front", "front-left", "left", "back", "right", "front-right")
+    render_paths = [root / "renders" / f"model-v{version}-{view}.png" for view in views]
+    if not all(path.is_file() for path in render_paths):
+        return {
+            "pass_benchmark": False,
+            "recognizable": False,
+            "summary": "Required benchmark renders are missing.",
+            "required_features_visible": {
+                feature: False for feature in profile.visual_requirements
+            },
+            "major_failures": ["missing benchmark renders"],
+            "model": None,
+        }
+
+    reference_paths = sorted(
+        [
+            path
+            for path in (root / "references").glob("*")
+            if path.is_file() and path.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp"}
+        ],
+        key=lambda path: path.stat().st_mtime,
+    )[-2:]
+    image_paths = reference_paths + render_paths
+    images = [base64.b64encode(path.read_bytes()).decode("ascii") for path in image_paths]
+    labels = [f"{path.parent.name}/{path.name}" for path in image_paths]
+
+    feature_keys = list(profile.visual_requirements)
+    system = (
+        "You are a strict visual quality gate for a 3D-model regression suite. "
+        "Judge the rendered model against the exact benchmark prompt and required features. "
+        "A model passes only if it is immediately recognizable as the requested subject and every "
+        "required feature is visibly represented across the supplied views. Floating major parts, missing "
+        "appendages, generic stacked blobs, or incorrect object structure are failures. Return JSON only "
+        "matching the supplied schema. In required_features_visible, use the exact required-feature strings "
+        "provided by the user as keys."
+    )
+    prompt = (
+        f"Benchmark: {profile.title}\n"
+        f"Exact prompt: {profile.prompt}\n"
+        f"Required feature keys: {json.dumps(feature_keys, ensure_ascii=False)}\n"
+        f"Images in order: {labels}\n"
+        "Set pass_benchmark=true only if the subject is recognizable and all required features are visible. "
+        "Do not give credit merely because the colors or rough category are correct."
+    )
+
+    client = OllamaProxyClient()
+    errors: list[str] = []
+    for candidate_model in VISION_MODELS:
+        try:
+            result = await client.chat_json(
+                model=candidate_model,
+                system=system,
+                prompt=prompt,
+                images=images,
+                schema=BenchmarkVisualReport.model_json_schema(),
+                temperature=0.0,
+            )
+            normalized = _normalize_benchmark_visual_payload(
+                result.data,
+                profile.visual_requirements,
+            )
+            report = BenchmarkVisualReport.model_validate(normalized)
+        except (OllamaProxyError, httpx.HTTPError, ValidationError, ValueError, TypeError) as exc:
+            errors.append(f"{candidate_model}: {exc}")
+            continue
+
+        return {
+            **report.model_dump(),
+            "model": candidate_model,
+            "version": version,
+            "images": labels,
+            "raw_response": result.data,
+        }
+
+    return {
+        "pass_benchmark": False,
+        "recognizable": False,
+        "summary": "Visual benchmark evaluation failed across configured vision models.",
+        "required_features_visible": {
+            feature: False for feature in profile.visual_requirements
+        },
+        "major_failures": errors[-4:] or ["visual benchmark unavailable"],
+        "model": None,
+        "version": version,
+        "images": labels,
+    }
+
+
+async def evaluate_quality_benchmark(job_id: str, request: QualityBenchmarkRequest) -> dict:
+    root = _require_job(job_id)
+    profile = get_benchmark(request.key)
+    status_path = root / "status.json"
+    if not status_path.exists():
+        raise HTTPException(status_code=409, detail="Job has no generated model yet.")
+    status = json.loads(status_path.read_text(encoding="utf-8"))
+    generic_model = status.get("generic_model")
+    if not isinstance(generic_model, dict) or not isinstance(generic_model.get("version"), int):
+        raise HTTPException(status_code=409, detail="Job has no accepted generic model yet.")
+
+    version = int(generic_model["version"])
+    spec_path = root / f"scene-spec-v{version}.json"
+    if not spec_path.is_file():
+        raise HTTPException(status_code=409, detail="Accepted SceneSpec is missing.")
+    spec_payload = json.loads(spec_path.read_text(encoding="utf-8"))
+    spec = spec_payload.get("spec") or {}
+
+    structural = evaluate_scene_spec_structural(spec, profile)
+    visual = await _evaluate_benchmark_visual(root, version=version, key=request.key)
+    passed = bool(structural.get("passed")) and bool(visual.get("pass_benchmark"))
+    payload = {
+        "job_id": job_id,
+        "benchmark": request.key,
+        "title": profile.title,
+        "version": version,
+        "passed": passed,
+        "structural": structural,
+        "visual": visual,
+        "created_at": datetime.now(UTC).isoformat(),
+    }
+    report_path = root / "exports" / f"benchmark-{request.key}-quality.json"
+    report_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    append_history(
+        root,
+        "quality_benchmark",
+        benchmark=request.key,
+        version=version,
+        passed=passed,
+        structural_passed=structural.get("passed"),
+        visual_passed=visual.get("pass_benchmark"),
+    )
+    return payload
+
+
+async def _compare_generic_versions(
+    root: Path,
+    *,
+    baseline_version: int,
+    candidate_version: int,
+) -> dict:
+    job_request = json.loads((root / "request.json").read_text(encoding="utf-8"))
+    views = ("front", "front-left", "left", "back", "right", "front-right")
+    reference_paths = sorted(
+        [
+            path
+            for path in (root / "references").glob("*")
+            if path.is_file() and path.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp"}
+        ],
+        key=lambda path: path.stat().st_mtime,
+    )[-4:]
+    baseline_paths = [
+        root / "renders" / f"model-v{baseline_version}-{view}.png"
+        for view in views
+    ]
+    candidate_paths = [
+        root / "renders" / f"model-v{candidate_version}-{view}.png"
+        for view in views
+    ]
+    if not all(path.is_file() for path in baseline_paths + candidate_paths):
+        return {
+            "candidate_is_better": False,
+            "summary": "Visual regression comparison could not run because one or more comparison renders are missing.",
+            "improvements": [],
+            "regressions": ["missing comparison renders"],
+            "model": None,
+        }
+
+    image_paths = reference_paths + baseline_paths + candidate_paths
+    images = [base64.b64encode(path.read_bytes()).decode("ascii") for path in image_paths]
+    labels = [f"{path.parent.name}/{path.name}" for path in image_paths]
+    system = (
+        "You are a strict visual regression gate for an autonomous 3D modeling system. "
+        "Compare the BASELINE model against the CANDIDATE model for the user's exact request. "
+        "Set candidate_is_better=true only when the candidate preserves all important recognizable parts "
+        "and makes a clear net improvement in silhouette, proportions, connectivity or requested features. "
+        "Reject the candidate if it loses a major part, turns detailed geometry into generic blobs, creates "
+        "floating/disconnected parts, or is merely different without being clearly better. If uncertain, "
+        "set candidate_is_better=false. Return only JSON matching the schema."
+    )
+    prompt = (
+        f"User request: {job_request.get('prompt', '')}\n"
+        f"Intended use: {job_request.get('intended_use', '')}\n"
+        f"Image order/labels: {labels}\n"
+        f"Reference images (if any) come first. Next are BASELINE v{baseline_version} views in this order: "
+        f"{list(views)}. Last are CANDIDATE v{candidate_version} views in the same order.\n"
+        "Judge recognizability and requested-part preservation before cosmetic changes."
+    )
+
+    client = OllamaProxyClient()
+    errors: list[str] = []
+    for candidate_model in VISION_MODELS:
+        try:
+            result = await client.chat_json(
+                model=candidate_model,
+                system=system,
+                prompt=prompt,
+                images=images,
+                schema=RefinementComparison.model_json_schema(),
+                temperature=0.0,
+            )
+            normalized = _normalize_refinement_comparison_payload(result.data)
+            comparison = RefinementComparison.model_validate(normalized)
+        except (OllamaProxyError, httpx.HTTPError, ValidationError, ValueError, TypeError) as exc:
+            errors.append(f"{candidate_model}: {exc}")
+            continue
+
+        payload = {
+            **comparison.model_dump(),
+            "model": candidate_model,
+            "baseline_version": baseline_version,
+            "candidate_version": candidate_version,
+            "images": labels,
+            "created_at": datetime.now(UTC).isoformat(),
+        }
+        _write_llm_log(root, "generic-version-compare", payload)
+        return payload
+
+    return {
+        "candidate_is_better": False,
+        "summary": "Visual regression comparison failed across configured vision models; preserving the previous version.",
+        "improvements": [],
+        "regressions": errors[-4:] or ["visual comparison unavailable"],
+        "model": None,
+        "baseline_version": baseline_version,
+        "candidate_version": candidate_version,
+    }
+
+
+@app.post("/v1/jobs/{job_id}/plan", dependencies=[Depends(require_api_token)])
+async def build_plan(job_id: str, request: PlanRequest) -> dict:
+    root = _require_job(job_id)
+    job_request = json.loads((root / "request.json").read_text(encoding="utf-8"))
+    latest_vision: dict = {}
+    vision_path = root / "vision-latest.json"
+    if vision_path.exists():
+        latest_vision = json.loads(vision_path.read_text(encoding="utf-8")).get("report") or {}
+
+    system = (
+        "You are the planning component of an autonomous Blender modeling system. "
+        "Create an executable modeling plan that can be implemented with Blender/Python/MCP. "
+        "Prefer deterministic procedural operations for functional/geometric objects and use base-mesh or "
+        "hybrid approaches only when organic geometry justifies it. Return only JSON matching the schema."
+    )
+    prompt = (
+        f"User request: {job_request.get('prompt', '')}\n"
+        f"Intended use: {job_request.get('intended_use', '')}\n"
+        f"Target width mm: {job_request.get('target_width_mm')}\n"
+        f"Latest vision analysis: {json.dumps(latest_vision, ensure_ascii=False)}\n"
+        f"Additional instruction: {request.instruction or 'None'}\n"
+        "Break the work into checkpoint-sized stages. Each stage needs objective success criteria that can "
+        "be checked from Blender scene data and/or rendered images."
+    )
+
+    try:
+        ollama_result = await OllamaProxyClient().chat_json(
+            model=REASONING_MODEL,
+            system=system,
+            prompt=prompt,
+            schema=ModelingPlan.model_json_schema(),
+            temperature=0.1,
+        )
+        plan = ModelingPlan.model_validate(ollama_result.data)
+    except (OllamaProxyError, httpx.HTTPError, ValidationError, ValueError) as exc:
+        raise HTTPException(status_code=502, detail=f"Modeling plan failed: {exc}") from exc
+
+    payload = {
+        "job_id": job_id,
+        "model": REASONING_MODEL,
+        "endpoint": ollama_result.endpoint,
+        "usage": ollama_result.usage,
+        "plan": plan.model_dump(),
+        "created_at": datetime.now(UTC).isoformat(),
+    }
+    log_name = _write_llm_log(root, "plan", payload)
+    (root / "plan.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    _write_status(root, state="ready", stage="planned", latest_plan_log=log_name)
+    return payload
+
+
 def _generic_spatial_guidance(_: str) -> str:
     return "\n".join(
         (

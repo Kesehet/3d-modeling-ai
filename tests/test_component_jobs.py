@@ -1,0 +1,97 @@
+import json
+
+import pytest
+from fastapi import HTTPException
+
+from app import main
+from app.component_assembly import component_assembly_script
+from app.feature_tasks import FeaturePlan, load_feature_plan, normalize_feature_plan_payload, save_feature_plan
+
+
+def _parent_job(tmp_path, monkeypatch, *, depth=0):
+    jobs_root = tmp_path / "jobs"
+    parent_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+    root = jobs_root / parent_id
+    root.mkdir(parents=True)
+    for category in main.ARTIFACT_CATEGORIES:
+        (root / category).mkdir(exist_ok=True)
+    (root / "request.json").write_text(
+        json.dumps(
+            {
+                "job_id": parent_id,
+                "prompt": "Toyota Prius",
+                "intended_use": "rendering",
+                "component_depth": depth,
+            }
+        ),
+        encoding="utf-8",
+    )
+    plan = FeaturePlan.model_validate(
+        normalize_feature_plan_payload(
+            {
+                "subject": "Toyota Prius",
+                "features": [
+                    {
+                        "id": "wheel",
+                        "name": "Wheel assembly",
+                        "build_mode": "component_job",
+                        "count": 4,
+                        "acceptance_criteria": [
+                            "tire, rim and visible fasteners read as one finished wheel"
+                        ],
+                        "assembly_anchor": "front/rear axle wheel centers",
+                    }
+                ],
+            },
+            subject="Toyota Prius",
+        )
+    )
+    save_feature_plan(root, plan)
+    monkeypatch.setattr(main, "JOBS_ROOT", jobs_root)
+    return parent_id, root, plan.features[0]
+
+
+def test_component_child_job_is_linked_to_parent_feature(tmp_path, monkeypatch):
+    parent_id, root, feature = _parent_job(tmp_path, monkeypatch)
+
+    child_id = main._create_component_child_job(parent_id, feature)
+
+    child_root = main.JOBS_ROOT / child_id
+    child_request = json.loads((child_root / "request.json").read_text(encoding="utf-8"))
+    assert child_request["component_job"] is True
+    assert child_request["component_depth"] == 1
+    assert child_request["parent_job_id"] == parent_id
+    assert child_request["parent_feature_id"] == "wheel"
+    assert "Model ONLY the isolated component 'Wheel assembly'" in child_request["prompt"]
+    assert "Do NOT model the complete parent object" in child_request["prompt"]
+
+    persisted = load_feature_plan(root)
+    assert persisted is not None
+    wheel = persisted.features[0]
+    assert wheel.component_job_id == child_id
+    assert wheel.component_depth == 1
+
+
+def test_component_child_creation_respects_recursion_depth(tmp_path, monkeypatch):
+    parent_id, _, feature = _parent_job(
+        tmp_path,
+        monkeypatch,
+        depth=main.COMPONENT_MAX_DEPTH,
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        main._create_component_child_job(parent_id, feature)
+
+    assert exc.value.status_code == 409
+    assert "maximum" in str(exc.value.detail).lower()
+
+
+def test_component_assembly_executor_imports_frozen_child_and_renders_parent():
+    script = component_assembly_script()
+
+    assert 'bpy.ops.wm.open_mainfile(filepath=PARENT_BLEND)' in script
+    assert 'bpy.data.libraries.load(COMPONENT_BLEND, link=False)' in script
+    assert 'clone.matrix_world = instance_matrix @ normalize @ source.matrix_world' in script
+    assert '"front-right"' in script
+    assert 'bpy.ops.wm.save_as_mainfile(filepath=BLEND)' in script
+    assert '"installed_component": COMPONENT_NAME' in script

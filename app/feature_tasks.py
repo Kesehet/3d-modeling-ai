@@ -10,7 +10,8 @@ from pathlib import Path
 from pydantic import BaseModel, Field, ValidationError
 
 
-FeatureState = typing.Literal["pending", "ready", "running", "accepted", "retry", "blocked", "failed"]
+FeatureState = typing.Literal["pending", "ready", "running", "component_ready", "accepted", "retry", "blocked", "failed"]
+FeatureBuildMode = typing.Literal["in_place", "component_job"]
 FeatureStrategy = typing.Literal[
     "base_mesh_region",
     "attachment",
@@ -28,8 +29,15 @@ class FeatureTask(BaseModel):
     priority: int = Field(default=5, ge=1, le=10)
     count: int = Field(default=1, ge=1, le=32)
     strategy: FeatureStrategy = "mixed"
+    build_mode: FeatureBuildMode = "in_place"
     symmetry: typing.Literal["none", "bilateral", "paired", "radial"] = "none"
     parent: str | None = Field(default=None, max_length=80)
+    component_job_id: str | None = Field(default=None, max_length=80)
+    component_depth: int = Field(default=0, ge=0, le=8)
+    component_version: int | None = Field(default=None, ge=1)
+    component_artifact: str | None = Field(default=None, max_length=240)
+    assembly_anchor: str = Field(default="", max_length=240)
+    assembly_notes: list[str] = Field(default_factory=list, max_length=12)
     depends_on: list[str] = Field(default_factory=list, max_length=16)
     target_regions: list[str] = Field(default_factory=list, max_length=16)
     acceptance_criteria: list[str] = Field(default_factory=list, max_length=12)
@@ -158,6 +166,27 @@ def normalize_feature_plan_payload(data: object, *, subject: str) -> dict:
         if symmetry not in {"none", "bilateral", "paired", "radial"}:
             symmetry = "none"
 
+        build_mode = str(
+            raw.get("build_mode")
+            or raw.get("execution_mode")
+            or raw.get("worker_mode")
+            or "in_place"
+        ).strip().lower()
+        build_mode_aliases = {
+            "component": "component_job",
+            "component-job": "component_job",
+            "separate": "component_job",
+            "isolated": "component_job",
+            "recursive": "component_job",
+            "subjob": "component_job",
+            "sub-job": "component_job",
+            "shared_scene": "in_place",
+            "inline": "in_place",
+        }
+        build_mode = build_mode_aliases.get(build_mode, build_mode)
+        if build_mode not in {"in_place", "component_job"}:
+            build_mode = "in_place"
+
         try:
             priority = int(raw.get("priority", 5))
         except (TypeError, ValueError):
@@ -176,8 +205,26 @@ def normalize_feature_plan_payload(data: object, *, subject: str) -> dict:
                 "priority": max(1, min(10, priority)),
                 "count": max(1, min(32, count)),
                 "strategy": strategy,
+                "build_mode": build_mode,
                 "symmetry": symmetry,
                 "parent": str(raw.get("parent") or "").strip()[:80] or None,
+                "component_job_id": None,
+                "component_depth": 0,
+                "component_version": None,
+                "component_artifact": None,
+                "assembly_anchor": str(
+                    raw.get("assembly_anchor")
+                    or raw.get("anchor")
+                    or raw.get("mount_point")
+                    or ""
+                ).strip()[:240],
+                "assembly_notes": _string_list(
+                    raw,
+                    "assembly_notes",
+                    "installation_notes",
+                    "assembly",
+                    limit=12,
+                ),
                 "depends_on": _string_list(raw, "depends_on", "dependencies", "requires"),
                 "target_regions": _string_list(raw, "target_regions", "regions", "target_region"),
                 "acceptance_criteria": _string_list(
@@ -282,7 +329,7 @@ def refresh_feature_states(plan: FeaturePlan) -> FeaturePlan:
     }
 
     for feature in plan.features:
-        if feature.status in {"accepted", "running", "failed"}:
+        if feature.status in {"accepted", "running", "component_ready", "failed"}:
             continue
 
         missing = [dep for dep in feature.depends_on if dep not in feature_by_id]
@@ -441,6 +488,55 @@ def finish_feature(
     if plan.active_feature_id == feature_id:
         plan.active_feature_id = None
     refresh_feature_states(plan)
+    save_feature_plan(root, plan)
+    return plan
+
+
+def link_component_job(
+    root: Path,
+    feature_id: str,
+    *,
+    component_job_id: str,
+    component_depth: int,
+) -> FeaturePlan | None:
+    plan = load_feature_plan(root)
+    if plan is None:
+        return None
+    task = next((feature for feature in plan.features if feature.id == feature_id), None)
+    if task is None:
+        return plan
+    task.build_mode = "component_job"
+    task.component_job_id = component_job_id[:80]
+    task.component_depth = max(0, min(8, int(component_depth)))
+    task.status = "running"
+    task.last_error = ""
+    plan.active_feature_id = task.id
+    save_feature_plan(root, plan)
+    return plan
+
+
+def mark_component_ready(
+    root: Path,
+    feature_id: str,
+    *,
+    component_version: int,
+    component_artifact: str,
+    summary: str = "",
+) -> FeaturePlan | None:
+    plan = load_feature_plan(root)
+    if plan is None:
+        return None
+    task = next((feature for feature in plan.features if feature.id == feature_id), None)
+    if task is None:
+        return plan
+    task.build_mode = "component_job"
+    task.component_version = max(1, int(component_version))
+    task.component_artifact = component_artifact[:240]
+    task.status = "component_ready"
+    task.last_summary = summary[:1000]
+    task.last_error = ""
+    if plan.active_feature_id == feature_id:
+        plan.active_feature_id = None
     save_feature_plan(root, plan)
     return plan
 

@@ -1677,13 +1677,50 @@ async def _build_and_install_component_feature(
                 else str(comparison.get("model") or "") or None
             ),
         )
+        candidate_model = {
+            "version": candidate_version,
+            "title": (previous_status.get("generic_model") or {}).get("title") or refreshed_task.name,
+            "blend": str(candidate["blend"]),
+            "renders": list(candidate["renders"]),
+            "qa": str(candidate["qa"]),
+            "assembled_component": refreshed_task.name,
+            "component_child_job_id": child_job_id,
+        }
         previous_quality = (
             previous_status.get("quality_gate")
             if isinstance(previous_status.get("quality_gate"), dict)
             else {}
         )
+        # Promote only after feature + regression QA have both passed, then immediately
+        # re-score the assembled whole object so the autonomous stop condition reflects
+        # the actual parent with the frozen component installed.
+        _write_status(
+            parent_root,
+            state="ready",
+            stage="component_assembly_validating",
+            modeling_strategy=previous_status.get("modeling_strategy") or "procedural",
+            generic_model=candidate_model,
+            quality_gate=previous_quality,
+        )
+        try:
+            assembled_quality = await _generic_recognizability_check(
+                parent_job_id,
+                stage="component_assembly_quality",
+            )
+        except HTTPException as exc:
+            assembled_quality = {
+                **previous_quality,
+                "recognizable": previous_quality.get("recognizable"),
+                "summary": str(exc.detail),
+            }
+            append_history(
+                parent_root,
+                "component_assembly_quality_unavailable",
+                feature_id=refreshed_task.id,
+                error=str(exc.detail),
+            )
         quality = {
-            **previous_quality,
+            **assembled_quality,
             "better_than_previous": True,
             "baseline_version": baseline_version,
             "candidate_version": candidate_version,
@@ -1695,17 +1732,13 @@ async def _build_and_install_component_feature(
         status = _write_status(
             parent_root,
             state="ready",
-            stage="component_assembly_accepted",
+            stage=(
+                "component_assembly_recognizable"
+                if quality.get("recognizable") is True
+                else "component_assembly_accepted"
+            ),
             modeling_strategy=previous_status.get("modeling_strategy") or "procedural",
-            generic_model={
-                "version": candidate_version,
-                "title": (previous_status.get("generic_model") or {}).get("title") or refreshed_task.name,
-                "blend": str(candidate["blend"]),
-                "renders": list(candidate["renders"]),
-                "qa": str(candidate["qa"]),
-                "assembled_component": refreshed_task.name,
-                "component_child_job_id": child_job_id,
-            },
+            generic_model=candidate_model,
             quality_gate=quality,
         )
         append_history(

@@ -5,10 +5,10 @@ from app.main import (
     _assembled_parent_requires_safe_stop,
     _auto_improve_goal_reached,
     _auto_improve_progress_signature,
+    _compact_quality_gate,
     _feature_queue_is_blocked,
     _persisted_auto_improve_no_progress_rounds,
     _quality_snapshot,
-    _compact_quality_gate,
     _remaining_feature_attempt_budget,
 )
 

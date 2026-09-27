@@ -2310,24 +2310,25 @@ def _normalize_reference_pack_payload(
             score = 0.0
         score = max(0.0, min(1.0, score))
 
+        exact_raw = raw.get(
+            "exact_identity_match",
+            raw.get("identity_match", raw.get("exact_match")),
+        )
+        useful_raw = raw.get(
+            "useful_for_geometry",
+            raw.get("geometry_useful", raw.get("useful")),
+        )
+        exact = _reference_bool(exact_raw, default=False)
+        useful = _reference_bool(useful_raw, default=False)
+        accept_raw = raw.get("accept", raw.get("accepted", raw.get("relevant")))
         accepted = _reference_bool(
-            raw.get("accept", raw.get("accepted", raw.get("relevant"))),
-            default=False,
+            accept_raw,
+            default=bool(score >= 0.70 and exact and useful),
         )
-        exact = _reference_bool(
-            raw.get(
-                "exact_identity_match",
-                raw.get("identity_match", raw.get("exact_match")),
-            ),
-            default=accepted and score >= 0.85,
-        )
-        useful = _reference_bool(
-            raw.get(
-                "useful_for_geometry",
-                raw.get("geometry_useful", raw.get("useful")),
-            ),
-            default=accepted,
-        )
+        if exact_raw is None and accepted and score >= 0.85:
+            exact = True
+        if useful_raw is None and accepted:
+            useful = True
         reason = str(
             raw.get("reason")
             or raw.get("explanation")

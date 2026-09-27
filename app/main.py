@@ -42,6 +42,7 @@ from .feature_tasks import (
     begin_feature,
     feature_plan_summary,
     finish_feature,
+    invalidate_unverified_acceptances,
     load_feature_plan,
     normalize_feature_plan_payload,
     save_feature_plan,
@@ -64,6 +65,18 @@ async def reconcile_interrupted_jobs_after_restart() -> None:
     # Any persisted running state predates this process and therefore cannot
     # represent an operation still executing in this API process.
     reconcile_all_running_jobs(force=True)
+    if JOBS_ROOT.exists():
+        for root in JOBS_ROOT.iterdir():
+            if not root.is_dir():
+                continue
+            reset = invalidate_unverified_acceptances(root)
+            if reset:
+                append_history(
+                    root,
+                    "legacy_feature_acceptances_invalidated",
+                    count=reset,
+                    reason="strict reference-based acceptance enabled",
+                )
     _resume_auto_improve_jobs()
 
 
@@ -887,7 +900,10 @@ async def _build_feature_plan(
         "ids. Priority uses 10=highest/most important and 1=lowest. Dependencies must form a DAG. "
         "The primary silhouette/body should normally be first; dependent details should wait for the supporting "
         "surface. Workers share one best-so-far model, so ownership scopes must be narrow enough to prevent one "
-        "feature worker from unnecessarily rewriting unrelated geometry."
+        "feature worker from unnecessarily rewriting unrelated geometry. Acceptance criteria MUST be visually "
+        "verifiable from the supplied references/renders. Do not invent exact millimetres, percentages, tolerances, "
+        "materials, badge dimensions, or other measurements unless the user/reference evidence explicitly provides "
+        "them. Phrase criteria as visible shape, proportion, count, placement, continuity, and identity checks."
     )
     prompt = (
         f"Exact user request: {job_request.get('prompt', '')}\n"
@@ -954,8 +970,15 @@ async def _ensure_feature_plan(
 ) -> FeaturePlan | None:
     root = _require_job(job_id)
     existing = load_feature_plan(root)
-    if existing is not None:
+    if existing is not None and existing.plan_version >= 2:
         return existing
+    if existing is not None:
+        append_history(
+            root,
+            "feature_plan_replanned",
+            previous_version=existing.plan_version,
+            reason="strict visual acceptance criteria upgrade",
+        )
     return await _build_feature_plan(job_id, inventory)
 
 
@@ -4463,8 +4486,7 @@ async def auto_improve_job_api(job_id: str, request: AutoImproveRequest) -> dict
 
 async def refine_generic_scene(job_id: str, request: GenericRefineRequest) -> dict:
     root = _require_job(job_id)
-    if load_feature_plan(root) is None:
-        await _ensure_feature_plan(job_id, _load_subject_inventory(root))
+    await _ensure_feature_plan(job_id, _load_subject_inventory(root))
     status_path = root / "status.json"
     status_payload: dict = {}
     if status_path.exists():

@@ -112,7 +112,14 @@ def normalize_feature_plan_payload(data: object, *, subject: str) -> dict:
     for index, raw in enumerate(raw_features[:48]):
         if not isinstance(raw, dict):
             continue
-        name = str(raw.get("name") or raw.get("feature") or raw.get("title") or f"Feature {index + 1}").strip()
+        name = str(
+            raw.get("name")
+            or raw.get("feature_name")
+            or raw.get("part_name")
+            or raw.get("feature")
+            or raw.get("title")
+            or f"Feature {index + 1}"
+        ).strip()
         proposed = str(raw.get("id") or raw.get("feature_id") or name)
         feature_id = _slug(proposed, f"feature-{index + 1}")
         base = feature_id
@@ -262,32 +269,49 @@ def refresh_feature_states(plan: FeaturePlan) -> FeaturePlan:
                 "Accepted state lacked strict reference verification and was requeued."
             )
 
-    # A dependency that exhausted its own attempts should not freeze every
-    # downstream visible feature forever. "Resolved" means either strictly
-    # accepted or terminally exhausted.
-    resolved = {
+    feature_by_id = {feature.id: feature for feature in plan.features}
+    accepted = {
         feature.id
         for feature in plan.features
-        if (
-            feature.status == "accepted"
-            and feature.acceptance_verified
-        )
-        or feature.status in {"blocked", "failed"}
+        if feature.status == "accepted" and feature.acceptance_verified
     }
-    feature_ids = {feature.id for feature in plan.features}
+    failed = {
+        feature.id
+        for feature in plan.features
+        if feature.status in {"blocked", "failed"}
+    }
 
     for feature in plan.features:
-        if feature.status in {"accepted", "running", "blocked", "failed"}:
+        if feature.status in {"accepted", "running", "failed"}:
             continue
-        if any(dep not in feature_ids for dep in feature.depends_on):
+
+        missing = [dep for dep in feature.depends_on if dep not in feature_by_id]
+        if missing:
             feature.status = "blocked"
-            feature.last_error = "One or more dependencies are missing from the feature plan."
+            feature.last_error = (
+                "Blocked because dependencies are missing from the plan: "
+                + ", ".join(missing)
+            )
             continue
-        if all(dep in resolved for dep in feature.depends_on):
+
+        failed_dependencies = [dep for dep in feature.depends_on if dep in failed]
+        if failed_dependencies:
+            feature.status = "blocked"
+            feature.last_error = (
+                "Blocked because required dependency failed: "
+                + ", ".join(failed_dependencies)
+            )
+            failed.add(feature.id)
+            continue
+
+        if all(dep in accepted for dep in feature.depends_on):
             if feature.status in {"pending", "blocked"}:
                 feature.status = "ready"
-        elif feature.status == "ready":
+                if feature.last_error.startswith("Blocked because"):
+                    feature.last_error = ""
+        elif feature.status in {"ready", "blocked"}:
             feature.status = "pending"
+
     return plan
 
 
@@ -314,10 +338,17 @@ def active_or_next_feature(plan: FeaturePlan) -> FeatureTask | None:
         # Defensive deadlock recovery for an imperfect AI-authored dependency
         # graph. Break a cycle by releasing the highest-value unresolved task
         # rather than leaving the whole job permanently blocked.
+        feature_by_id = {feature.id: feature for feature in plan.features}
         unresolved = [
             feature
             for feature in plan.features
             if feature.status == "pending"
+            and feature.depends_on
+            and all(
+                dep in feature_by_id
+                and feature_by_id[dep].status not in {"blocked", "failed"}
+                for dep in feature.depends_on
+            )
         ]
         if unresolved:
             order = {feature.id: index for index, feature in enumerate(plan.features)}
@@ -397,7 +428,7 @@ def finish_feature(
         task.acceptance_score = max(0.0, min(1.0, float(acceptance_score)))
         task.acceptance_model = acceptance_model
     elif task.attempts >= max_attempts:
-        task.status = "blocked"
+        task.status = "failed"
     else:
         task.status = "retry"
 

@@ -515,6 +515,169 @@ def _normalize_scene_spec_payload(data: object, fallback_title: str) -> dict:
     return normalized
 
 
+def _enforce_character_visibility(data: dict, prompt: str) -> dict:
+    """Apply conservative character-layout rules after LLM normalization.
+
+    The generic renderer has a fixed front camera on negative Y. LLMs frequently place
+    face details on +Y or inside the head, which creates a semantically complete but
+    visually blank/blob-like character. This pass only activates for character-like
+    prompts and only adjusts strongly semantic parts.
+    """
+    text = prompt.lower()
+    if not any(term in text for term in ("pikachu", "character", "creature", "animal", "figurine")):
+        return data
+
+    objects = data.get("objects")
+    if not isinstance(objects, list):
+        return data
+
+    def clean_name(item: dict) -> str:
+        return str(item.get("name") or "").lower().replace("_", " ")
+
+    def find_part(words: tuple[str, ...]) -> dict | None:
+        for item in objects:
+            if not isinstance(item, dict):
+                continue
+            name = clean_name(item)
+            if any(word in name for word in words):
+                return item
+        return None
+
+    def vec(item: dict, key: str, default: list[float]) -> list[float]:
+        value = item.get(key)
+        if isinstance(value, list) and len(value) >= 3:
+            return [float(value[0]), float(value[1]), float(value[2])]
+        return list(default)
+
+    head = find_part(("head", "face"))
+    body = find_part(("body", "torso"))
+    if head is None or body is None:
+        return data
+
+    head_loc = vec(head, "location", [0.0, 0.0, 2.5])
+    head_scale = [max(0.15, abs(v)) for v in vec(head, "scale", [1.2, 1.0, 1.1])]
+    body_loc = vec(body, "location", [0.0, 0.0, 1.0])
+    body_scale = [max(0.15, abs(v)) for v in vec(body, "scale", [1.0, 0.8, 1.2])]
+    front_face_y = head_loc[1] - head_scale[1] * 0.94
+
+    for item in objects:
+        if not isinstance(item, dict):
+            continue
+        name = clean_name(item)
+
+        if "eye" in name or "cheek" in name:
+            item["shape"] = "sphere"
+            scale = vec(item, "scale", [0.16, 0.10, 0.18])
+            scale[0] = min(max(scale[0], head_scale[0] * 0.10), head_scale[0] * 0.24)
+            scale[1] = min(max(scale[1], 0.04), head_scale[1] * 0.12)
+            scale[2] = min(max(scale[2], head_scale[2] * 0.10), head_scale[2] * 0.24)
+            item["scale"] = scale
+            location = vec(item, "location", head_loc)
+            location[1] = min(location[1], front_face_y - scale[1] * 0.15)
+            item["location"] = location
+            item["start"] = None
+            item["end"] = None
+            item["radius"] = None
+
+        is_main_ear = "ear" in name and "tip" not in name
+        if is_main_ear:
+            item["shape"] = "cone"
+            scale = vec(item, "scale", [head_scale[0] * 0.24, head_scale[1] * 0.22, head_scale[2] * 0.8])
+            scale[0] = min(max(scale[0], head_scale[0] * 0.18), head_scale[0] * 0.34)
+            scale[1] = min(max(scale[1], head_scale[1] * 0.16), head_scale[1] * 0.30)
+            scale[2] = max(scale[2], head_scale[2] * 0.72)
+            item["scale"] = scale
+            location = vec(item, "location", head_loc)
+            if "left" in name:
+                location[0] = min(location[0], head_loc[0] - head_scale[0] * 0.48)
+            elif "right" in name:
+                location[0] = max(location[0], head_loc[0] + head_scale[0] * 0.48)
+            location[1] = head_loc[1]
+            location[2] = max(location[2], head_loc[2] + head_scale[2] * 1.12)
+            item["location"] = location
+            item["start"] = None
+            item["end"] = None
+            item["radius"] = None
+
+        if "ear" in name and "tip" in name:
+            item["shape"] = "cone"
+            item["color"] = "#111111"
+            location = vec(item, "location", head_loc)
+            side = -1.0 if "left" in name else 1.0
+            location[0] = head_loc[0] + side * head_scale[0] * 0.55
+            location[1] = head_loc[1]
+            location[2] = max(location[2], head_loc[2] + head_scale[2] * 1.70)
+            item["location"] = location
+            item["scale"] = [
+                head_scale[0] * 0.16,
+                head_scale[1] * 0.14,
+                head_scale[2] * 0.28,
+            ]
+            item["start"] = None
+            item["end"] = None
+            item["radius"] = None
+
+        if "arm" in name and "tool" not in name:
+            item["shape"] = "sphere"
+            side = -1.0 if "left" in name else 1.0
+            item["location"] = [
+                body_loc[0] + side * body_scale[0] * 0.92,
+                body_loc[1] - body_scale[1] * 0.58,
+                body_loc[2] + body_scale[2] * 0.05,
+            ]
+            item["scale"] = [
+                body_scale[0] * 0.24,
+                body_scale[1] * 0.24,
+                body_scale[2] * 0.42,
+            ]
+            item["start"] = None
+            item["end"] = None
+            item["radius"] = None
+
+        if "foot" in name or "feet" in name:
+            item["shape"] = "sphere"
+            side = -1.0 if "left" in name else 1.0
+            item["location"] = [
+                body_loc[0] + side * body_scale[0] * 0.48,
+                body_loc[1] - body_scale[1] * 0.38,
+                body_loc[2] - body_scale[2] * 0.86,
+            ]
+            item["scale"] = [
+                body_scale[0] * 0.34,
+                body_scale[1] * 0.44,
+                body_scale[2] * 0.18,
+            ]
+            item["start"] = None
+            item["end"] = None
+            item["radius"] = None
+
+    tail_parts = [
+        item for item in objects
+        if isinstance(item, dict) and "tail" in clean_name(item)
+    ]
+    if len(tail_parts) >= 2:
+        y = body_loc[1] + body_scale[1] * 0.20
+        x0 = body_loc[0] + body_scale[0] * 0.82
+        z0 = body_loc[2] + body_scale[2] * 0.02
+        points = [
+            [x0, y, z0],
+            [body_loc[0] + body_scale[0] * 1.45, y, body_loc[2] + body_scale[2] * 0.38],
+            [body_loc[0] + body_scale[0] * 1.08, y, body_loc[2] + body_scale[2] * 0.72],
+            [body_loc[0] + body_scale[0] * 1.68, y, body_loc[2] + body_scale[2] * 1.06],
+        ]
+        for index, item in enumerate(tail_parts[:3]):
+            item["shape"] = "rod"
+            item["start"] = points[index]
+            item["end"] = points[index + 1]
+            item["radius"] = max(0.06, body_scale[0] * 0.11)
+            item["location"] = points[index]
+            item["scale"] = [1.0, 1.0, 1.0]
+            item["rotation_deg"] = [0.0, 0.0, 0.0]
+            item["color"] = "#FACC15"
+
+    return data
+
+
 def _scene_spec_semantic_tokens(spec: GenericSceneSpec) -> set[str]:
     ignored = {
         "left", "right", "front", "rear", "back", "top", "bottom",
@@ -1535,6 +1698,10 @@ async def _build_generic_scene_spec(job_id: str, auto_research: bool) -> Generic
             result.data,
             str(job_request.get("prompt") or "Generated model"),
         )
+        normalized = _enforce_character_visibility(
+            normalized,
+            str(job_request.get("prompt") or ""),
+        )
         spec = GenericSceneSpec.model_validate(normalized)
     except (OllamaProxyError, httpx.HTTPError, ValidationError, ValueError, TypeError) as exc:
         raise HTTPException(status_code=502, detail=f"Generic scene planning failed: {exc}") from exc
@@ -1747,6 +1914,10 @@ async def refine_generic_scene(job_id: str, request: GenericRefineRequest) -> di
                 temperature=0.1,
             )
             normalized = _normalize_scene_spec_payload(result.data, current_spec.title)
+            normalized = _enforce_character_visibility(
+                normalized,
+                str(job_request.get("prompt") or ""),
+            )
             revised = GenericSceneSpec.model_validate(normalized)
         except (OllamaProxyError, httpx.HTTPError, ValidationError, ValueError, TypeError) as exc:
             append_history(root, "generic_refinement_failed", error=str(exc))

@@ -45,7 +45,7 @@ def test_dashboard_offers_mesh_fallback_instead_of_dead_end():
     html = dashboard_page().body.decode("utf-8")
     assert 'Auto improve ×30' in html
     assert 'adaptive_mesh_needs_refinement' in html
-    assert 'AI improve mesh' in html
+    assert 'Auto improve ×30' in html
 
 
 

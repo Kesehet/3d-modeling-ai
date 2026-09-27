@@ -49,6 +49,7 @@ class FeatureEvaluation(BaseModel):
     passed: bool = False
     visible: bool = False
     criteria_satisfied: bool = False
+    subject_recognizable: bool = False
     confidence: float = Field(default=0.0, ge=0.0, le=1.0)
     reference_match_score: float = Field(default=0.0, ge=0.0, le=1.0)
     regression_detected: bool = False

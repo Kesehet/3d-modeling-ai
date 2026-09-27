@@ -86,7 +86,7 @@ def test_feature_subjobs_follow_dependencies(tmp_path):
     assert next_task.id == "wheels"
 
 
-def test_failed_feature_does_not_freeze_downstream_work(tmp_path):
+def test_failed_required_feature_blocks_dependent_work(tmp_path):
     plan = _car_plan()
     save_feature_plan(tmp_path, plan)
 
@@ -99,17 +99,22 @@ def test_failed_feature_does_not_freeze_downstream_work(tmp_path):
             task.id,
             accepted=False,
             version=None,
-            error="Candidate did not pass feature QA.",
+            error="Candidate did not pass strict feature QA.",
         )
 
     persisted = load_feature_plan(tmp_path)
     assert persisted is not None
     body = next(feature for feature in persisted.features if feature.id == "body-shell")
-    assert body.status == "blocked"
+    assert body.status == "failed"
 
     next_task = active_or_next_feature(persisted)
-    assert next_task is not None
-    assert next_task.id in {"wheels", "windows"}
+    assert next_task is None
+
+    wheels = next(feature for feature in persisted.features if feature.id == "wheels")
+    windows = next(feature for feature in persisted.features if feature.id == "windows")
+    assert wheels.status == "blocked"
+    assert windows.status == "blocked"
+    assert "dependency failed" in wheels.last_error.lower()
 
 
 def test_dependency_cycle_is_recovered_instead_of_deadlocking():
@@ -211,3 +216,31 @@ def test_legacy_accepted_features_are_requeued(tmp_path):
     assert body.status == "retry"
     assert body.accepted_version is None
     assert "strict" in body.last_error.lower()
+
+
+
+def test_feature_name_aliases_are_preserved():
+    payload = normalize_feature_plan_payload(
+        {
+            "subject": "Volkswagen Polo",
+            "features": [
+                {
+                    "id": "body",
+                    "feature_name": "Primary Body Silhouette",
+                    "priority": 10,
+                    "strategy": "base_mesh_region",
+                },
+                {
+                    "id": "headlights",
+                    "part_name": "Headlight Assemblies",
+                    "priority": 8,
+                    "depends_on": ["body"],
+                },
+            ],
+        },
+        subject="Volkswagen Polo",
+    )
+    plan = FeaturePlan.model_validate(payload)
+
+    assert plan.features[0].name == "Primary Body Silhouette"
+    assert plan.features[1].name == "Headlight Assemblies"

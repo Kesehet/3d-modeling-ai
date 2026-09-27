@@ -20,6 +20,7 @@ from PIL import Image, UnidentifiedImageError
 from pydantic import BaseModel, Field, ValidationError
 
 from .builders import pikachu_script
+from .component_assembly import component_assembly_script
 from .config import (
     JOBS_ROOT,
     OLLAMA_PROXY_BASE_URL,
@@ -44,7 +45,9 @@ from .feature_tasks import (
     feature_plan_summary,
     finish_feature,
     invalidate_unverified_acceptances,
+    link_component_job,
     load_feature_plan,
+    mark_component_ready,
     normalize_feature_plan_payload,
     save_feature_plan,
 )
@@ -62,6 +65,9 @@ AUTO_IMPROVE_TASKS: dict[str, asyncio.Task[None]] = {}
 REFERENCE_RECOVERY_TASKS: dict[str, asyncio.Task[None]] = {}
 FEATURE_MAX_ATTEMPTS = 3
 AUTO_IMPROVE_HARD_ROUND_CAP = 60
+COMPONENT_MAX_DEPTH = 2
+COMPONENT_AUTO_IMPROVE_ROUNDS = 6
+COMPONENT_MAX_INSTANCES = 16
 
 
 @app.on_event("startup")
@@ -75,7 +81,7 @@ async def reconcile_interrupted_jobs_after_restart() -> None:
                 continue
 
             plan = load_feature_plan(root)
-            if plan is not None and plan.plan_version < 2:
+            if plan is not None and plan.plan_version < 3:
                 source = root / "feature-plan.json"
                 backup = root / "feature-plan-v1-legacy.json"
                 try:
@@ -89,7 +95,7 @@ async def reconcile_interrupted_jobs_after_restart() -> None:
                     root,
                     "legacy_feature_plan_archived",
                     previous_version=plan.plan_version,
-                    reason="strict visually-verifiable feature plan required",
+                    reason="recursive component-job feature plan v3 required",
                 )
 
                 status = _read_status(root)
@@ -125,7 +131,7 @@ async def reconcile_interrupted_jobs_after_restart() -> None:
                     root,
                     "legacy_feature_acceptances_invalidated",
                     count=reset,
-                    reason="strict reference-based acceptance enabled",
+                    reason="recursive component-job feature plan v3 enabled",
                 )
     _resume_auto_improve_jobs()
     _resume_interrupted_reference_jobs()
@@ -793,6 +799,17 @@ class GenericRefineRequest(BaseModel):
     iterations: int = Field(default=1, ge=1, le=3)
 
 
+class ComponentInstanceSpec(BaseModel):
+    location: list[float] = Field(min_length=3, max_length=3)
+    rotation_deg: list[float] = Field(default_factory=lambda: [0.0, 0.0, 0.0], min_length=3, max_length=3)
+    scale: list[float] = Field(default_factory=lambda: [1.0, 1.0, 1.0], min_length=3, max_length=3)
+
+
+class ComponentAssemblySpec(BaseModel):
+    rationale: str = Field(default="", max_length=1600)
+    instances: list[ComponentInstanceSpec] = Field(min_length=1, max_length=COMPONENT_MAX_INSTANCES)
+
+
 class SubjectPartSpec(BaseModel):
     name: str = Field(min_length=1, max_length=100)
     count: int = Field(default=1, ge=1, le=12)
@@ -948,6 +965,25 @@ async def _build_feature_plan(
             max_images=10,
         ),
     )
+    try:
+        component_depth = int(job_request.get("component_depth") or 0)
+    except (TypeError, ValueError):
+        component_depth = 0
+    component_jobs_allowed = component_depth < COMPONENT_MAX_DEPTH
+    component_policy = (
+        "Recursive component jobs ARE allowed at this depth. Mark build_mode=component_job for an independently "
+        "modelable visible assembly that has meaningful internal visible structure and benefits from isolated QA "
+        "(for example a wheel assembly that itself contains a tire, rim and visible fasteners). Keep the primary "
+        "supporting body/silhouette and ordinary surface details in_place. A component job will be frozen after its "
+        "own children and QA pass, then installed into the parent; do not duplicate its internal details as sibling "
+        "parent features. Repeated identical components should be one component job with count/symmetry metadata, "
+        "not separate rebuilds for each instance. "
+        if component_jobs_allowed
+        else (
+            "This job is already at the maximum recursive component depth. Every feature MUST use build_mode=in_place; "
+            "group smaller internal details into the current component instead of creating more child jobs. "
+        )
+    )
     system = (
         "You are the feature coordinator for an autonomous 3D modeling system. Build an exhaustive but useful "
         "inventory of ALL externally visible features that should be modeled for the requested object. Return JSON "
@@ -955,11 +991,12 @@ async def _build_feature_plan(
         "as wheels, windows, lights, handles, mirrors, openings, trim, screens, feet, buttons, appendages, seams or "
         "other identity-bearing geometry when they are actually visible/relevant. Do not include hidden internals. "
         "Each feature is a separate sub-job. Return features in the intended BUILD ORDER. Give every sub-job a stable "
-        "lowercase id, priority, modeling strategy, target regions, ownership scope, acceptance criteria and dependency "
-        "ids. Priority uses 10=highest/most important and 1=lowest. Dependencies must form a DAG. "
+        "lowercase id, priority, modeling strategy, build_mode, target regions, ownership scope, acceptance criteria, "
+        "assembly anchor/notes where relevant, and dependency ids. Priority uses 10=highest/most important and 1=lowest. "
+        "Dependencies must form a DAG. " + component_policy +
         "The primary silhouette/body should normally be first; dependent details should wait for the supporting "
-        "surface. Workers share one best-so-far model, so ownership scopes must be narrow enough to prevent one "
-        "feature worker from unnecessarily rewriting unrelated geometry. Acceptance criteria MUST be visually "
+        "surface. In-place workers share one best-so-far model, so ownership scopes must be narrow enough to prevent "
+        "one feature worker from unnecessarily rewriting unrelated geometry. Acceptance criteria MUST be visually "
         "verifiable from the supplied references/renders. Do not invent exact millimetres, percentages, tolerances, "
         "materials, badge dimensions, or other measurements unless the user/reference evidence explicitly provides "
         "them. Phrase criteria as visible shape, proportion, count, placement, continuity, and identity checks."
@@ -992,6 +1029,9 @@ async def _build_feature_plan(
                 subject=str(job_request.get("prompt") or ""),
             )
             plan = FeaturePlan.model_validate(normalized)
+            if not component_jobs_allowed:
+                for feature in plan.features:
+                    feature.build_mode = "in_place"
         except (OllamaProxyError, httpx.HTTPError, ValidationError, ValueError, TypeError) as exc:
             errors.append(f"{candidate_model}: {exc}")
             continue
@@ -1029,7 +1069,7 @@ async def _ensure_feature_plan(
 ) -> FeaturePlan | None:
     root = _require_job(job_id)
     existing = load_feature_plan(root)
-    if existing is not None and existing.plan_version >= 2:
+    if existing is not None and existing.plan_version >= 3:
         return existing
     if existing is not None:
         append_history(

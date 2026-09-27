@@ -335,8 +335,10 @@ def begin_feature(root: Path) -> FeatureTask | None:
     if task is None:
         save_feature_plan(root, plan)
         return None
+    already_running = task.status == "running"
     task.status = "running"
-    task.attempts += 1
+    if not already_running:
+        task.attempts += 1
     task.last_error = ""
     plan.active_feature_id = task.id
     save_feature_plan(root, plan)

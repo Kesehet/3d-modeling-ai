@@ -78,10 +78,13 @@ async def call_mcp(payload: ToolCall) -> dict:
         # One Blender process at a time by default. Multiple concurrent model jobs
         # must queue instead of exhausting the VPS with competing Blender/MCP
         # subprocesses.
-        async with MCP_CALL_SEMAPHORE:
-            async with stdio_client(params) as (read, write), ClientSession(read, write) as session:
-                await session.initialize()
-                result = await session.call_tool(payload.tool, arguments=arguments)
+        async with (
+            MCP_CALL_SEMAPHORE,
+            stdio_client(params) as (read, write),
+            ClientSession(read, write) as session,
+        ):
+            await session.initialize()
+            result = await session.call_tool(payload.tool, arguments=arguments)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"MCP tool call failed: {exc}") from exc
 

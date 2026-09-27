@@ -2999,17 +2999,47 @@ async def research_job(job_id: str, request: ResearchRequest) -> dict:
             if digest:
                 known_hashes.add(digest)
 
+    index.extend(accepted_new)
+
+    # Re-cohere the entire automatic pack, including references accepted by older
+    # versions of the verifier. User uploads remain authoritative and untouched.
     coherence_decision: ReferenceCoherenceDecision | None = None
-    if len(accepted_new) > 1:
-        coherent, coherence_rejected, coherence_decision = await _cohere_reference_pack(
+    uploaded_records = [
+        record for record in index
+        if isinstance(record, dict) and record.get("uploaded_at")
+    ]
+    automatic_records = [
+        record for record in index
+        if isinstance(record, dict)
+        and not record.get("uploaded_at")
+        and _is_auto_reference_record(record)
+        and _is_usable_reference_record(record)
+    ]
+    other_records = [
+        record for record in index
+        if isinstance(record, dict)
+        and not record.get("uploaded_at")
+        and not _is_auto_reference_record(record)
+    ]
+
+    if len(automatic_records) > 1:
+        coherent_auto, coherence_rejected, coherence_decision = await _cohere_reference_pack(
             root,
             plan=plan,
-            records=accepted_new,
+            records=automatic_records,
         )
-        accepted_new = coherent
         rejected.extend(coherence_rejected)
+        index = [*uploaded_records, *other_records, *coherent_auto]
+        kept_names = {
+            str(record.get("stored_name") or "")
+            for record in coherent_auto
+        }
+        accepted_new = [
+            record
+            for record in accepted_new
+            if str(record.get("stored_name") or "") in kept_names
+        ]
 
-    index.extend(accepted_new)
     index = _prune_unverified_auto_references(root, index)
     (root / "references.json").write_text(
         json.dumps(index, indent=2, ensure_ascii=False),

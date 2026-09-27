@@ -1,4 +1,4 @@
-from app.main import _enforce_subject_geometry
+from app.main import _enforce_character_visibility, _enforce_subject_geometry
 
 
 def _part(name: str) -> dict:
@@ -106,3 +106,87 @@ def test_sneaker_assembly_uses_wedge_and_lace_rods():
     assert by_name["opening collar"]["shape"] == "torus"
     assert by_name["lace 1"]["shape"] == "rod"
     assert by_name["lace 1"]["start"][1] < by_name["lace 1"]["end"][1]
+
+
+
+def test_pikachu_tail_uses_all_four_attached_beam_segments():
+    data = {
+        "objects": [
+            {
+                **_part("body"),
+                "location": [0.0, 0.0, 1.0],
+                "scale": [1.0, 0.8, 1.2],
+            },
+            {
+                **_part("head"),
+                "location": [0.0, 0.0, 2.7],
+                "scale": [1.2, 1.0, 1.0],
+            },
+            _part("tail segment 1"),
+            _part("tail segment 2"),
+            _part("tail segment 3"),
+            _part("tail segment 4"),
+        ]
+    }
+    result = _enforce_character_visibility(data, "Create a stylized Pikachu character figurine")
+    tails = [item for item in result["objects"] if "tail segment" in item["name"]]
+    assert len(tails) == 4
+    assert all(item["shape"] == "beam" for item in tails)
+    for previous, current in zip(tails, tails[1:]):
+        assert previous["end"] == current["start"]
+
+
+def test_sneaker_assembly_creates_missing_foot_opening_and_layers():
+    data = {
+        "objects": [
+            _part("sole base"),
+            _part("sole layer"),
+            _part("toe box"),
+            _part("upper body"),
+            _part("heel counter"),
+            _part("tongue"),
+            _part("lace 1"),
+            _part("lace 2"),
+            _part("lace 3"),
+            _part("lace 4"),
+        ]
+    }
+    result = _enforce_subject_geometry(data, "Create a stylized low-top sneaker")
+    by_name = {item["name"]: item for item in result["objects"]}
+    assert "foot opening collar" in by_name
+    assert by_name["foot opening collar"]["shape"] == "torus"
+    assert by_name["sole base"]["location"][2] != by_name["sole layer"]["location"][2]
+    assert by_name["lace 1"]["start"][1] == by_name["lace 1"]["end"][1]
+    assert by_name["lace 1"]["start"][0] < by_name["lace 1"]["end"][0]
+
+
+def test_quadruped_handles_joint_and_foot_names_without_leg_token():
+    names = [
+        "torso",
+        "front left upper leg",
+        "front left joint",
+        "front left lower leg",
+        "front left foot",
+        "camera head",
+        "camera lens",
+        "sensor pod left",
+        "sensor pod right",
+        "antenna mast",
+        "antenna tip",
+        "battery pack",
+        "tool arm upper",
+        "tool arm joint",
+        "tool arm lower",
+        "tool end effector",
+    ]
+    data = {"objects": [_part(name) for name in names]}
+    result = _enforce_subject_geometry(
+        data,
+        "Create a quadruped robot with articulated legs and a tool arm",
+    )
+    by_name = {item["name"]: item for item in result["objects"]}
+    assert by_name["front left joint"]["shape"] == "sphere"
+    assert by_name["front left foot"]["shape"] == "cube"
+    assert by_name["camera head"]["shape"] == "cube"
+    assert by_name["camera lens"]["shape"] == "cylinder"
+    assert by_name["camera head"]["location"] != by_name["camera lens"]["location"]

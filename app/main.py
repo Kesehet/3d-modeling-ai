@@ -2085,7 +2085,7 @@ def _auto_improve_progress_signature(root: Path, status: dict) -> tuple[object, 
 
 def _remaining_feature_attempt_budget(root: Path) -> int:
     plan = load_feature_plan(root)
-    if plan is None or plan.plan_version < 3:
+    if plan is None or plan.plan_version < 2:
         return 0
 
     remaining = 0

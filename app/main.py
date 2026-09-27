@@ -2185,8 +2185,11 @@ async def _build_generic_scene_spec(job_id: str, auto_research: bool) -> Generic
                     include_renders=False,
                     max_images=8,
                     instruction=(
-                        "Describe the subject as primitive-friendly 3D forms. Focus on silhouette, "
-                        "relative dimensions, part placement, major colors, and distinctive appendages."
+                        "Analyze the references for a general 3D reconstruction. State whether the subject is "
+                        "recognizable, describe its overall silhouette and relative dimensions, and explicitly "
+                        "name every major visually distinct part needed for recognition, including repeated "
+                        "structural parts and openings/windows/screens where relevant. Do not optimize the "
+                        "description around the primitive builder; describe the subject faithfully first."
                     ),
                 ),
             )
@@ -2211,6 +2214,14 @@ async def _build_generic_scene_spec(job_id: str, auto_research: bool) -> Generic
         except (OSError, json.JSONDecodeError):
             research_context = {}
 
+    inventory = await _build_subject_inventory(
+        root,
+        job_request,
+        visual_context,
+        research_context,
+    )
+    inventory_context = inventory.model_dump() if inventory is not None else {}
+
     system = (
         "You are a 3D blockout planner. Return a safe declarative scene made only from the allowed "
         "primitive types in the supplied JSON schema. Prefer beam for rectangular articulated segments, "
@@ -2224,10 +2235,12 @@ async def _build_generic_scene_spec(job_id: str, auto_research: bool) -> Generic
         "that are physically connected must touch or overlap their parent geometry; do not leave floating "
         "stems, necks, limbs, handles, shades, ears, tails, or connectors. Coordinates should normally stay "
         "within -8..8. Place the subject around the origin and keep its lowest major geometry near Z=0. "
-        "Use meaningful semantic object names and realistic relative proportions. Treat the provided spatial "
-        "guidance as hard geometry constraints, especially the negative-Y front-face convention. Before "
-        "returning JSON, mentally inventory every requested part and verify both that it exists and that it "
-        "will be visibly exposed from at least one standard QA camera view."
+        "Use meaningful semantic object names and realistic relative proportions. Treat the provided subject "
+        "inventory as an acceptance contract: every required major part and required repeated count must be "
+        "represented by clearly named objects unless the safe primitive vocabulary truly cannot represent it. "
+        "Treat the provided spatial guidance as hard geometry constraints, especially the negative-Y front-face "
+        "convention. Before returning JSON, verify that every required inventory part exists and will be visibly "
+        "exposed from at least one standard QA camera view."
     )
     prompt = (
         f"User request: {job_request.get('prompt', '')}\n"
@@ -2235,6 +2248,7 @@ async def _build_generic_scene_spec(job_id: str, auto_research: bool) -> Generic
         f"Target width mm: {job_request.get('target_width_mm')}\n"
         f"Visual reference analysis: {json.dumps(visual_context, ensure_ascii=False)}\n"
         f"Web research context: {json.dumps(research_context, ensure_ascii=False)}\n"
+        f"Required subject inventory: {json.dumps(inventory_context, ensure_ascii=False)}\n"
         f"Spatial/modeling guidance:\n{_generic_spatial_guidance(str(job_request.get('prompt') or ''))}\n"
         "Create a primitive-based blockout scene specification. If the subject is organic, approximate "
         "it with overlapping ellipsoids/cones while keeping distinct head/body/limb/appendage/face forms "
@@ -2266,17 +2280,95 @@ async def _build_generic_scene_spec(job_id: str, auto_research: bool) -> Generic
     except (OllamaProxyError, httpx.HTTPError, ValidationError, ValueError, TypeError) as exc:
         raise HTTPException(status_code=502, detail=f"Generic scene planning failed: {exc}") from exc
 
+    coverage: dict | None = None
+    if inventory is not None:
+        coverage = _scene_inventory_coverage(spec, inventory)
+        if not coverage["passes"]:
+            repair_system = (
+                "Repair a safe declarative SceneSpec so it covers the supplied general subject inventory. "
+                "Return the full SceneSpec JSON only. Preserve existing useful geometry, but add or split "
+                "objects needed for missing REQUIRED parts and repeated counts. Use semantic object names "
+                "that identify each part. Do not invent subject-specific shortcuts outside the allowed schema. "
+                "Favor silhouette and recognition over cosmetic detail."
+            )
+            repair_prompt = (
+                f"User request: {job_request.get('prompt', '')}\n"
+                f"Required inventory: {json.dumps(inventory.model_dump(), ensure_ascii=False)}\n"
+                f"Current SceneSpec: {json.dumps(spec.model_dump(), ensure_ascii=False)}\n"
+                f"Coverage failure: {json.dumps(coverage, ensure_ascii=False)}\n"
+                f"Spatial/modeling guidance:\n{_generic_spatial_guidance(str(job_request.get('prompt') or ''))}\n"
+                "Return a revised full SceneSpec that covers the missing required parts and counts."
+            )
+            try:
+                repair_result = await OllamaProxyClient().chat_json(
+                    model=REASONING_MODEL,
+                    system=repair_system,
+                    prompt=repair_prompt,
+                    schema=GenericSceneSpec.model_json_schema(),
+                    temperature=0.0,
+                )
+                repaired_payload = _normalize_scene_spec_payload(
+                    repair_result.data,
+                    str(job_request.get("prompt") or "Generated model"),
+                )
+                repaired_payload = _enforce_character_visibility(
+                    repaired_payload,
+                    str(job_request.get("prompt") or ""),
+                )
+                repaired_payload = _enforce_subject_geometry(
+                    repaired_payload,
+                    str(job_request.get("prompt") or ""),
+                )
+                repaired = GenericSceneSpec.model_validate(repaired_payload)
+                repaired_coverage = _scene_inventory_coverage(repaired, inventory)
+                if (
+                    repaired_coverage["passes"]
+                    or repaired_coverage["required_coverage"] > coverage["required_coverage"]
+                ):
+                    spec = repaired
+                    coverage = repaired_coverage
+                    append_history(
+                        root,
+                        "scene_inventory_repair",
+                        required_coverage=coverage["required_coverage"],
+                        object_count=len(spec.objects),
+                        missing_required=coverage["missing_required"],
+                    )
+            except (OllamaProxyError, httpx.HTTPError, ValidationError, ValueError, TypeError) as exc:
+                append_history(root, "scene_inventory_repair_failed", error=str(exc))
+
+        (root / "scene-inventory-coverage.json").write_text(
+            json.dumps(coverage, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        if not coverage["passes"]:
+            append_history(
+                root,
+                "scene_inventory_incomplete",
+                strategy=inventory.recommended_strategy,
+                required_coverage=coverage["required_coverage"],
+                missing_required=coverage["missing_required"],
+            )
+
     payload = {
         "job_id": job_id,
         "model": REASONING_MODEL,
         "endpoint": result.endpoint,
         "usage": result.usage,
+        "inventory": inventory.model_dump() if inventory is not None else None,
+        "inventory_coverage": coverage,
         "spec": spec.model_dump(),
         "created_at": datetime.now(UTC).isoformat(),
     }
     (root / "scene-spec.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
     _write_llm_log(root, "scene-spec", payload)
-    append_history(root, "scene_spec", title=spec.title, object_count=len(spec.objects))
+    append_history(
+        root,
+        "scene_spec",
+        title=spec.title,
+        object_count=len(spec.objects),
+        inventory_coverage=coverage.get("required_coverage") if coverage else None,
+    )
     return spec
 
 

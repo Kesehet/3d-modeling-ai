@@ -34,6 +34,7 @@ from .dashboard import (
     reconcile_all_running_jobs,
 )
 from .feature_tasks import (
+    FeatureEvaluation,
     FeaturePlan,
     FeatureTask,
     active_or_next_feature,
@@ -1949,6 +1950,125 @@ async def _compare_generic_versions(
     }
 
 
+
+
+async def _evaluate_feature_candidate(
+    job_id: str,
+    feature_task: FeatureTask,
+    *,
+    baseline_version: int,
+    candidate_version: int,
+) -> dict:
+    root = _require_job(job_id)
+    job_request = json.loads((root / "request.json").read_text(encoding="utf-8"))
+    views = ("front", "front-left", "left", "back", "right", "front-right")
+    reference_paths = sorted(
+        [
+            path
+            for path in (root / "references").glob("*")
+            if path.is_file() and path.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp"}
+        ],
+        key=lambda path: path.stat().st_mtime,
+    )[-4:]
+    baseline_paths = [
+        root / "renders" / f"model-v{baseline_version}-{view}.png"
+        for view in views
+    ]
+    candidate_paths = [
+        root / "renders" / f"model-v{candidate_version}-{view}.png"
+        for view in views
+    ]
+    if not all(path.is_file() for path in baseline_paths + candidate_paths):
+        return {
+            "feature_id": feature_task.id,
+            "passed": False,
+            "visible": False,
+            "confidence": 0.0,
+            "regression_detected": True,
+            "summary": "Feature QA could not run because comparison renders are missing.",
+            "problems": ["missing comparison renders"],
+            "protected_geometry_notes": [],
+            "model": None,
+        }
+
+    image_paths = reference_paths + baseline_paths + candidate_paths
+    images = _encode_vision_images(image_paths)
+    labels = [f"{path.parent.name}/{path.name}" for path in image_paths]
+    system = (
+        "You are the visual QA reviewer for ONE feature sub-job in an autonomous 3D modeling pipeline. "
+        "Compare the baseline and candidate against the references, but judge the active feature's acceptance "
+        "criteria specifically. Set passed=true only when that feature is visibly improved or already convincingly "
+        "satisfied in the candidate AND unrelated protected geometry has not materially regressed. Minor changes to "
+        "supporting surfaces are allowed when required by dependencies. Do not require a tiny feature to cause a large "
+        "whole-object score change. Return JSON only matching the supplied schema."
+    )
+    prompt = (
+        f"User request: {job_request.get('prompt', '')}\n"
+        f"ACTIVE FEATURE SUB-JOB: {json.dumps(feature_task.model_dump(), ensure_ascii=False)}\n"
+        f"Images in order: {labels}\n"
+        f"Reference images come first. Then BASELINE v{baseline_version} views {list(views)}. "
+        f"Then CANDIDATE v{candidate_version} views {list(views)}.\n"
+        "Check the feature's target_regions, owner_scope and acceptance_criteria. Mention any protected geometry "
+        "that regressed."
+    )
+
+    client = OllamaProxyClient()
+    errors: list[str] = []
+    for candidate_model in VISION_MODELS:
+        try:
+            result = await client.chat_json(
+                model=candidate_model,
+                system=system,
+                prompt=prompt,
+                images=images,
+                schema=FeatureEvaluation.model_json_schema(),
+                temperature=0.0,
+                num_predict=4096,
+            )
+            payload = dict(result.data) if isinstance(result.data, dict) else {}
+            payload.setdefault("feature_id", feature_task.id)
+            evaluation = FeatureEvaluation.model_validate(payload)
+        except (OllamaProxyError, httpx.HTTPError, ValidationError, ValueError, TypeError) as exc:
+            errors.append(f"{candidate_model}: {exc}")
+            continue
+
+        response = {
+            **evaluation.model_dump(),
+            "model": candidate_model,
+            "baseline_version": baseline_version,
+            "candidate_version": candidate_version,
+            "images": labels,
+            "created_at": datetime.now(UTC).isoformat(),
+        }
+        _write_llm_log(root, "feature-qa", response)
+        append_history(
+            root,
+            "feature_subjob_qa",
+            feature_id=feature_task.id,
+            feature_name=feature_task.name,
+            passed=evaluation.passed,
+            visible=evaluation.visible,
+            confidence=evaluation.confidence,
+            regression_detected=evaluation.regression_detected,
+            summary=evaluation.summary,
+        )
+        return response
+
+    return {
+        "feature_id": feature_task.id,
+        "passed": False,
+        "visible": False,
+        "confidence": 0.0,
+        "regression_detected": True,
+        "summary": "Feature QA failed across configured vision models.",
+        "problems": errors[-4:] or ["feature QA unavailable"],
+        "protected_geometry_notes": [],
+        "model": None,
+        "baseline_version": baseline_version,
+        "candidate_version": candidate_version,
+    }
+
+
 @app.post("/v1/jobs/{job_id}/plan", dependencies=[Depends(require_api_token)])
 async def build_plan(job_id: str, request: PlanRequest) -> dict:
     root = _require_job(job_id)
@@ -2476,7 +2596,8 @@ async def _build_adaptive_loft_spec(job_id: str, *, reason: str) -> AdaptiveLoft
         f"Target width mm: {job_request.get('target_width_mm')}\n"
         f"Reason for strategy switch: {reason}\n"
         f"Subject inventory: {json.dumps(inventory.model_dump() if inventory else {}, ensure_ascii=False)}\n"
-        f"Visible-feature sub-job plan: {json.dumps(feature_plan_context, ensure_ascii=False)}\n"        f"Latest visual critique: {json.dumps(latest_vision, ensure_ascii=False)}\n"
+        f"Visible-feature sub-job plan: {json.dumps(feature_plan_context, ensure_ascii=False)}\n"
+        f"Latest visual critique: {json.dumps(latest_vision, ensure_ascii=False)}\n"
         f"Images in order: {labels}\n"
         "Create a substantially more recognizable continuous base mesh. For an 8-point cross section, a useful "
         "order is around the perimeter from lower-left -> mid-left -> upper-left/shoulder -> top-left -> "
@@ -2863,6 +2984,16 @@ async def _refine_adaptive_mesh(job_id: str, *, decision: dict) -> dict:
         baseline_version=baseline_version,
         candidate_version=version,
     )
+    feature_evaluation = (
+        await _evaluate_feature_candidate(
+            job_id,
+            feature_task,
+            baseline_version=baseline_version,
+            candidate_version=version,
+        )
+        if feature_task is not None
+        else None
+    )
 
     try:
         quality = await _generic_recognizability_check(
@@ -2882,7 +3013,12 @@ async def _refine_adaptive_mesh(job_id: str, *, decision: dict) -> dict:
 
     recognizable = quality.get("recognizable")
     better = bool(comparison.get("candidate_is_better"))
-    accept_candidate = recognizable is True or better
+    feature_passed = bool(
+        feature_evaluation
+        and feature_evaluation.get("passed")
+        and not feature_evaluation.get("regression_detected")
+    )
+    accept_candidate = recognizable is True or better or feature_passed
 
     if accept_candidate:
         stage = "adaptive_mesh_recognizable" if recognizable is True else "adaptive_mesh_needs_refinement"
@@ -2914,7 +3050,12 @@ async def _refine_adaptive_mesh(job_id: str, *, decision: dict) -> dict:
                 feature_task.id,
                 accepted=True,
                 version=version,
-                summary=str(comparison.get("summary") or quality.get("summary") or ""),
+                summary=str(
+                    (feature_evaluation or {}).get("summary")
+                    or comparison.get("summary")
+                    or quality.get("summary")
+                    or ""
+                ),
             )
             append_history(
                 root,
@@ -2972,6 +3113,7 @@ async def _refine_adaptive_mesh(job_id: str, *, decision: dict) -> dict:
             )
 
     build["comparison"] = comparison
+    build["feature_evaluation"] = feature_evaluation
     build["quality_gate"] = quality
     build["status"] = status
     return build

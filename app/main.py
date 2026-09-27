@@ -2838,27 +2838,26 @@ async def generate_generic_scene_api(job_id: str, request: GenericGenerateReques
 async def refine_generic_scene(job_id: str, request: GenericRefineRequest) -> dict:
     root = _require_job(job_id)
     status_path = root / "status.json"
+    existing_status: dict = {}
     if status_path.exists():
         try:
             existing_status = json.loads(status_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             existing_status = {}
-        if existing_status.get("stage") == "generic_needs_strategy_switch":
-            raise HTTPException(
-                status_code=409,
-                detail=(
-                    "The active primitive SceneSpec failed the recognizability gate. "
-                    "Further primitive refinement is disabled; this job needs a mesh/hybrid strategy."
-                ),
-            )
-        if existing_status.get("stage") == "generic_quality_unverified":
-            raise HTTPException(
-                status_code=409,
-                detail=(
-                    "The active model could not be quality-verified. "
-                    "Refinement is disabled until visual QA is available again."
-                ),
-            )
+    rebuild_mode = existing_status.get("stage") in {
+        "generic_needs_strategy_switch",
+        "generic_quality_unverified",
+        "generic_needs_refinement",
+    } or (
+        isinstance(existing_status.get("quality_gate"), dict)
+        and existing_status["quality_gate"].get("recognizable") is False
+    )
+    if rebuild_mode:
+        append_history(
+            root,
+            "generic_reconstruction_mode",
+            reason=existing_status.get("stage") or "quality gate rejected active model",
+        )
 
     spec_files = sorted(
         root.glob("scene-spec-v*.json"),
@@ -2888,6 +2887,14 @@ async def refine_generic_scene(job_id: str, request: GenericRefineRequest) -> di
     current_payload = json.loads(current_spec_path.read_text(encoding="utf-8"))
     current_spec = GenericSceneSpec.model_validate(current_payload["spec"])
     current_version = int(current_payload.get("version") or 1)
+    inventory: SubjectInventory | None = None
+    inventory_path = root / "subject-inventory.json"
+    if inventory_path.exists():
+        try:
+            inventory_payload = json.loads(inventory_path.read_text(encoding="utf-8"))
+            inventory = SubjectInventory.model_validate(inventory_payload.get("inventory") or {})
+        except (OSError, json.JSONDecodeError, ValidationError, TypeError):
+            inventory = None
     completed = []
     rejected: dict | None = None
 
@@ -2918,38 +2925,75 @@ async def refine_generic_scene(job_id: str, request: GenericRefineRequest) -> di
             )
             break
 
-        system = (
-            "Revise a safe declarative 3D SceneSpec using the visual critique. Return JSON only matching "
-            "the supplied schema. This is a SURGICAL REPAIR, not a redesign. Preserve every unaffected "
-            "current object and its semantic role. Fix only the 1-3 highest-priority visible defects per pass. "
-            "Do not simplify the model, remove defining parts, or replace a detailed assembly with generic "
-            "blobs. You may add, resize, rotate, recolor, or reposition objects; remove an object only when "
-            "the critique explicitly identifies it as wrong or redundant. You may only use the schema's "
-            "allowed primitive shapes. Prefer rod objects for articulated limbs, stems, necks, struts and "
-            "connectors when two endpoints are known. Connected parts must touch or overlap their parent "
-            "geometry rather than float. Keep the coordinate convention fixed: negative Y is the visible "
-            "front surface, positive Y is the back, and Z is up. Do not move face/front details behind the "
-            "parent surface or bury them inside it. Preserve good geometry and make the smallest changes that "
-            "address the critique. Do not output Python."
-        )
+        if rebuild_mode or report.get("recognizable") is False:
+            system = (
+                "Reconstruct the full safe declarative 3D SceneSpec from the references and visual critique. "
+                "Return JSON only matching the supplied schema. The current model is NOT a trustworthy baseline, "
+                "so this is a REBUILD rather than a surgical edit. Preserve only geometry that is genuinely useful. "
+                "Re-establish the target silhouette, primary masses, repeated structural parts and identity-defining "
+                "features from the references. The supplied subject inventory is an acceptance contract. You may "
+                "replace, resize, rotate, recolor, reposition, add or remove objects as needed. Use the full primitive "
+                "budget when useful; do not optimize for few objects. Keep the coordinate convention fixed: negative Y "
+                "is front, positive Y is back, Z is up. Connected parts must touch or overlap. Do not output Python."
+            )
+        else:
+            system = (
+                "Revise a safe declarative 3D SceneSpec using the visual critique. Return JSON only matching "
+                "the supplied schema. This is a SURGICAL REPAIR, not a redesign. Preserve every unaffected "
+                "current object and its semantic role. Fix only the 1-3 highest-priority visible defects per pass. "
+                "Do not simplify the model, remove defining parts, or replace a detailed assembly with generic "
+                "blobs. You may add, resize, rotate, recolor, or reposition objects; remove an object only when "
+                "the critique explicitly identifies it as wrong or redundant. You may only use the schema's "
+                "allowed primitive shapes. Connected parts must touch or overlap their parent geometry rather "
+                "than float. Keep the coordinate convention fixed: negative Y is front, positive Y is back, Z is up. "
+                "Preserve good geometry and make the smallest changes that address the critique. Do not output Python."
+            )
         job_request = json.loads((root / "request.json").read_text(encoding="utf-8"))
         prompt = (
+            f"Exact user request: {job_request.get('prompt', '')}\n"
             f"Current SceneSpec: {json.dumps(current_spec.model_dump(), ensure_ascii=False)}\n"
+            f"Subject inventory: {json.dumps(inventory.model_dump() if inventory else {}, ensure_ascii=False)}\n"
             f"Visual critique: {json.dumps(report, ensure_ascii=False)}\n"
+            f"Reconstruction mode: {bool(rebuild_mode or report.get('recognizable') is False)}\n"
             f"Spatial/modeling guidance:\n{_generic_spatial_guidance(str(job_request.get('prompt') or ''))}\n"
-            "Return the improved full SceneSpec. Keep unaffected object names and parts. Do not reduce the "
-            "overall part inventory unless the critique explicitly requires removal. The candidate will be "
-            "rejected automatically if it loses too many existing semantic parts."
+            "Return the improved full SceneSpec. When reconstruction mode is true, prioritize recognizable target "
+            "geometry over preserving the current object list."
         )
+        refine_images, refine_labels = _collect_images(
+            root,
+            VisionAnalyzeRequest(
+                stage="generic_scene_reconstruction" if rebuild_mode else "generic_scene_refinement",
+                include_references=True,
+                include_renders=True,
+                max_images=16,
+            ),
+        )
+        prompt += f"\nImages supplied directly to the SceneSpec planner in order: {refine_labels}\n"
+        candidate_models = (*VISION_MODELS, REASONING_MODEL) if refine_images else (REASONING_MODEL,)
+        result = None
+        refine_errors: list[str] = []
+        client = OllamaProxyClient()
         try:
-            result = await OllamaProxyClient().chat_json(
-                model=REASONING_MODEL,
-                system=system,
-                prompt=prompt,
-                schema=GenericSceneSpec.model_json_schema(),
-                temperature=0.1,
-            )
-            normalized = _normalize_scene_spec_payload(result.data, current_spec.title)
+            for candidate_model in candidate_models:
+                try:
+                    candidate_result = await client.chat_json(
+                        model=candidate_model,
+                        system=system,
+                        prompt=prompt,
+                        images=refine_images or None,
+                        schema=GenericSceneSpec.model_json_schema(),
+                        temperature=0.0,
+                        num_predict=8192,
+                    )
+                    normalized = _normalize_scene_spec_payload(candidate_result.data, current_spec.title)
+                    result = candidate_result
+                    break
+                except (OllamaProxyError, httpx.HTTPError, ValidationError, ValueError, TypeError) as exc:
+                    refine_errors.append(f"{candidate_model}: {exc}")
+            if result is None:
+                raise OllamaProxyError(
+                    "Generic refinement failed across configured models: " + " | ".join(refine_errors[-4:])
+                )
             normalized = _enforce_character_visibility(
                 normalized,
                 str(job_request.get("prompt") or ""),
@@ -2959,6 +3003,21 @@ async def refine_generic_scene(job_id: str, request: GenericRefineRequest) -> di
                 str(job_request.get("prompt") or ""),
             )
             revised = GenericSceneSpec.model_validate(normalized)
+            if inventory is not None:
+                revised_coverage = _scene_inventory_coverage(revised, inventory)
+                current_coverage = _scene_inventory_coverage(current_spec, inventory)
+                if (
+                    revised_coverage["required_coverage"] < current_coverage["required_coverage"]
+                    or (
+                        rebuild_mode
+                        and not revised_coverage["passes"]
+                        and revised_coverage["required_coverage"] < 0.80
+                    )
+                ):
+                    raise ValueError(
+                        "Revised SceneSpec failed subject-inventory coverage: "
+                        + ", ".join(revised_coverage["missing_required"])
+                    )
         except (OllamaProxyError, httpx.HTTPError, ValidationError, ValueError, TypeError) as exc:
             append_history(root, "generic_refinement_failed", error=str(exc))
             raise HTTPException(status_code=502, detail=f"Generic refinement failed: {exc}") from exc
@@ -2967,7 +3026,7 @@ async def refine_generic_scene(job_id: str, request: GenericRefineRequest) -> di
             append_history(root, "generic_refinement_stop", reason="revised SceneSpec was unchanged")
             break
 
-        regression_reasons = _scene_spec_regression_reasons(current_spec, revised)
+        regression_reasons = [] if rebuild_mode else _scene_spec_regression_reasons(current_spec, revised)
         if regression_reasons:
             rejected = {
                 "reasons": regression_reasons,
@@ -3030,6 +3089,7 @@ async def refine_generic_scene(job_id: str, request: GenericRefineRequest) -> di
         )
         current_spec = revised
         current_version = version
+        rebuild_mode = False
 
     if rejected:
         active_renders = [

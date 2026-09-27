@@ -6099,6 +6099,7 @@ async def _refine_hard_surface_cage_incrementally(
 
     feature_evaluation: dict | None = None
     feature_complete = False
+    recognizability: dict | None = None
     if feature_task is not None:
         feature_evaluation = await _evaluate_feature_candidate(
             job_id,
@@ -6107,6 +6108,19 @@ async def _refine_hard_surface_cage_incrementally(
             candidate_version=version,
         )
         feature_complete = _feature_evaluation_accepts(feature_task, feature_evaluation)
+    elif improved:
+        try:
+            recognizability = await _generic_recognizability_check(
+                job_id,
+                stage="iterative_cage_quality",
+            )
+        except HTTPException as exc:
+            recognizability = {
+                "recognizable": None,
+                "subject_match_score": None,
+                "summary": str(exc.detail),
+                "director_action": "refine_mesh",
+            }
 
     active_model = (
         dict(previous_status.get("generic_model"))
@@ -6133,6 +6147,8 @@ async def _refine_hard_surface_cage_incrementally(
 
     if improved:
         candidate_model = build["status"].get("generic_model")
+        if recognizability and recognizability.get("recognizable") is True:
+            better_than_active = True
         next_active_model = candidate_model if better_than_active else active_model
         quality = dict(
             previous_status.get("quality_gate")
@@ -6143,6 +6159,13 @@ async def _refine_hard_surface_cage_incrementally(
             quality["summary"] = feature_evaluation.get("summary") or comparison.get("summary")
             quality["active_feature_id"] = feature_task.id
             quality["active_feature_passed"] = feature_complete
+            if feature_evaluation.get("subject_recognizable") is not None:
+                quality["recognizable"] = bool(feature_evaluation.get("subject_recognizable"))
+            if feature_evaluation.get("reference_match_score") is not None:
+                quality["subject_match_score"] = feature_evaluation.get("reference_match_score")
+        elif recognizability:
+            quality.update(recognizability)
+            quality["summary"] = recognizability.get("summary") or comparison.get("summary")
         else:
             quality["summary"] = comparison.get("summary") or quality.get("summary")
         quality["representation"] = "hard_surface_cage"
@@ -6153,7 +6176,9 @@ async def _refine_hard_surface_cage_incrementally(
             root,
             state="ready",
             stage=(
-                "hard_surface_cage_feature_complete"
+                "hard_surface_cage_recognizable"
+                if recognizability and recognizability.get("recognizable") is True
+                else "hard_surface_cage_feature_complete"
                 if feature_complete
                 else "hard_surface_cage_needs_refinement"
             ),
@@ -6260,6 +6285,7 @@ async def _refine_hard_surface_cage_incrementally(
     build["action"] = action.model_dump()
     build["comparison"] = comparison
     build["feature_evaluation"] = feature_evaluation
+    build["recognizability"] = recognizability
     build["status"] = status
     return build
 

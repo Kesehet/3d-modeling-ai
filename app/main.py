@@ -74,6 +74,8 @@ class VisionIssue(BaseModel):
 class VisionReport(BaseModel):
     summary: str
     recommended_modeling_strategy: Literal["procedural", "base_mesh", "hybrid"]
+    recognizable: bool | None = None
+    subject_match_score: float | None = Field(default=None, ge=0.0, le=1.0)
     observations: list[str] = Field(default_factory=list)
     issues: list[VisionIssue] = Field(default_factory=list)
     priority_actions: list[str] = Field(default_factory=list)
@@ -324,6 +326,51 @@ def _normalize_vision_report_payload(data: object) -> dict:
             return ""
         return str(value)
 
+    def find_value(keys: tuple[str, ...]) -> object | None:
+        queue: list[dict] = [data]
+        seen: set[int] = set()
+        while queue:
+            node = queue.pop(0)
+            node_id = id(node)
+            if node_id in seen:
+                continue
+            seen.add(node_id)
+            for key in keys:
+                if key in node:
+                    return node[key]
+            for key in ("analysis", "evaluation", "assessment", "result", "overall", "visual_quality"):
+                child = node.get(key)
+                if isinstance(child, dict):
+                    queue.append(child)
+        return None
+
+    def as_bool(value: object) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        return str(value).strip().lower() in {
+            "1", "true", "yes", "recognizable", "recognisable", "match", "matched", "pass", "passed",
+        }
+
+    recognizable_raw = find_value(
+        ("recognizable", "recognisable", "is_recognizable", "subject_recognizable", "subject_match")
+    )
+    recognizable = as_bool(recognizable_raw) if recognizable_raw is not None else None
+
+    score_raw = find_value(
+        ("subject_match_score", "match_score", "recognizability_score", "recognition_score")
+    )
+    subject_match_score: float | None = None
+    if score_raw is not None:
+        try:
+            subject_match_score = float(score_raw)
+            if subject_match_score > 1.0 and subject_match_score <= 100.0:
+                subject_match_score /= 100.0
+            subject_match_score = max(0.0, min(1.0, subject_match_score))
+        except (TypeError, ValueError):
+            subject_match_score = None
+
     observations: list[str] = []
     raw_observations = data.get("observations")
     if isinstance(raw_observations, list):
@@ -437,13 +484,14 @@ def _normalize_vision_report_payload(data: object) -> dict:
     if not priority_actions:
         priority_actions = [item["suggested_change"] for item in issues[:6]]
 
-    summary = text_value(data.get("summary") or data.get("overall_summary"))
+    summary = text_value(
+        find_value(("summary", "overall_summary", "overall_assessment", "assessment_summary", "verdict"))
+    )
     if not summary:
         summary = " ".join(observations[:3]).strip()[:1800] or "Visual analysis completed."
 
     strategy_raw = str(
-        data.get("recommended_modeling_strategy")
-        or data.get("modeling_strategy")
+        find_value(("recommended_modeling_strategy", "modeling_strategy", "recommended_strategy"))
         or "procedural"
     ).lower()
     if "hybrid" in strategy_raw:
@@ -456,6 +504,8 @@ def _normalize_vision_report_payload(data: object) -> dict:
     return {
         "summary": summary,
         "recommended_modeling_strategy": strategy,
+        "recognizable": recognizable,
+        "subject_match_score": subject_match_score,
         "observations": observations[:30],
         "issues": issues[:30],
         "priority_actions": priority_actions[:10],
@@ -1192,7 +1242,7 @@ def _collect_images(root: Path, request: VisionAnalyzeRequest) -> tuple[list[str
 
     # Generic refinement must critique one coherent model version. Mixing older model-vN
     # renders into the current set can make the vision model "fix" geometry that no longer exists.
-    if request.stage == "generic_visual_refinement" and renders:
+    if request.stage.startswith("generic_") and renders:
         versioned: list[tuple[int, Path]] = []
         for path in renders:
             stem = path.stem
@@ -1557,7 +1607,10 @@ async def analyze_vision(job_id: str, request: VisionAnalyzeRequest) -> dict:
         "You are the visual QA component of an autonomous Blender 3D modeling system. "
         "Compare all supplied reference/current-render images together. Focus on geometry, silhouette, "
         "proportions, spatial relationships, missing features, and whether procedural modeling, a generated "
-        "base mesh, or a hybrid workflow is appropriate. Return only JSON matching the supplied schema. "
+        "base mesh, or a hybrid workflow is appropriate. When current renders are supplied, explicitly set "
+        "recognizable=true only if the rendered model clearly reads as the user's requested subject without "
+        "needing the filename or prompt to explain what it is; otherwise set recognizable=false. Set "
+        "subject_match_score from 0.0 to 1.0 when possible. Return only JSON matching the supplied schema. "
         "Do not claim details that cannot be seen."
     )
     prompt = (

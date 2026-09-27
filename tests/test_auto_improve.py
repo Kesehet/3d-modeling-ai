@@ -99,3 +99,39 @@ def test_auto_improve_without_feature_plan_stops_when_recognizable(tmp_path):
 
     status = json.loads(status_path.read_text(encoding="utf-8"))
     assert _auto_improve_goal_reached(tmp_path, status) is True
+
+
+
+def test_auto_improve_does_not_call_blocked_required_features_complete(tmp_path):
+    status = {
+        "stage": "adaptive_mesh_recognizable",
+        "quality_gate": {"recognizable": True, "subject_match_score": 0.88},
+        "generic_model": {"version": 5},
+    }
+    plan = FeaturePlan.model_validate(
+        {
+            "subject": "car",
+            "features": [
+                {
+                    "id": "body",
+                    "name": "Body",
+                    "required": True,
+                    "priority": 10,
+                    "status": "accepted",
+                    "accepted_version": 5,
+                },
+                {
+                    "id": "wheels",
+                    "name": "Wheels",
+                    "required": True,
+                    "priority": 9,
+                    "status": "blocked",
+                    "attempts": 3,
+                    "depends_on": ["body"],
+                },
+            ],
+        }
+    )
+    save_feature_plan(tmp_path, plan)
+
+    assert _auto_improve_goal_reached(tmp_path, status) is False

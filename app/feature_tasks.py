@@ -392,6 +392,15 @@ def feature_plan_summary(root: Path) -> dict | None:
             feature.status in {"accepted", "blocked", "failed"}
             for feature in plan.features
         ),
+        "required_complete": all(
+            (not feature.required) or feature.status == "accepted"
+            for feature in plan.features
+        ),
+        "required_unresolved": [
+            feature.id
+            for feature in plan.features
+            if feature.required and feature.status != "accepted"
+        ],
         "features": [feature.model_dump() for feature in plan.features],
         "updated_at": plan.updated_at,
     }

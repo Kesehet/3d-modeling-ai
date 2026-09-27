@@ -1211,7 +1211,12 @@ def _auto_improve_goal_reached(root: Path, status: dict) -> bool:
         return False
 
     plan = feature_plan_summary(root)
-    return plan is None or bool(plan.get("complete"))
+    if plan is None:
+        return True
+    # Do not call an object "completed" merely because required feature workers
+    # exhausted their retries. The autonomous loop may eventually stall safely,
+    # but completion means the required visible features were actually accepted.
+    return bool(plan.get("required_complete"))
 
 
 def _auto_improve_progress_signature(root: Path, status: dict) -> tuple[object, ...]:

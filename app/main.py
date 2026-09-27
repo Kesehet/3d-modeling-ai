@@ -7064,6 +7064,23 @@ async def auto_improve_job_api(job_id: str, request: AutoImproveRequest) -> dict
     }
 
 
+def _catastrophic_visual_failure(quality_gate: object, *, threshold: float = 0.20) -> tuple[bool, float]:
+    if not isinstance(quality_gate, dict):
+        return False, 0.0
+    raw_score = (
+        quality_gate.get("subject_match_score")
+        if quality_gate.get("subject_match_score") is not None
+        else quality_gate.get("reference_match_score")
+        if quality_gate.get("reference_match_score") is not None
+        else 0.0
+    )
+    try:
+        score = float(raw_score)
+    except (TypeError, ValueError):
+        score = 0.0
+    return quality_gate.get("recognizable") is False and score <= threshold, score
+
+
 async def refine_generic_scene(job_id: str, request: GenericRefineRequest) -> dict:
     root = _require_job(job_id)
     if not _usable_reference_index(root):
@@ -7164,19 +7181,8 @@ async def refine_generic_scene(job_id: str, request: GenericRefineRequest) -> di
                 if isinstance(status_payload.get("quality_gate"), dict)
                 else {}
             )
-            try:
-                active_score = float(
-                    quality_gate.get("subject_match_score")
-                    if quality_gate.get("subject_match_score") is not None
-                    else quality_gate.get("reference_match_score")
-                    if quality_gate.get("reference_match_score") is not None
-                    else 0.0
-                )
-            except (TypeError, ValueError):
-                active_score = 0.0
-            severe_representation_failure = (
-                quality_gate.get("recognizable") is False
-                and active_score <= 0.20
+            severe_representation_failure, active_score = _catastrophic_visual_failure(
+                quality_gate
             )
             # A catastrophic visual miss is evidence that the representation is
             # wrong, not merely that its numeric parameters need another pass.

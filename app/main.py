@@ -858,7 +858,7 @@ async def _build_subject_inventory(
         ),
     )
     prompt += f"\nReference images in order: {reference_labels}\n"
-    candidate_models = (*VISION_MODELS, REASONING_MODEL) if reference_images else (REASONING_MODEL,)
+    candidate_models = (*VISION_MODELS, REASONING_MODEL)
     result = None
     inventory = None
     selected_model = None
@@ -1567,6 +1567,26 @@ def _load_reference_index(root: Path) -> list[dict]:
     return data if isinstance(data, list) else []
 
 
+def _encode_vision_image(path: Path, *, max_side: int = 640, quality: int = 70) -> str:
+    """Encode a compact vision-only copy without modifying the persisted artifact."""
+    try:
+        with Image.open(path) as source:
+            image = source.convert("RGB")
+            image.thumbnail((max_side, max_side), Image.Resampling.LANCZOS)
+            buffer = BytesIO()
+            image.save(
+                buffer,
+                format="JPEG",
+                quality=max(45, min(85, quality)),
+                optimize=True,
+                progressive=True,
+            )
+            payload = buffer.getvalue()
+    except (UnidentifiedImageError, OSError, Image.DecompressionBombError) as exc:
+        raise ValueError(f"Could not prepare vision image {path.name}: {exc}") from exc
+    return base64.b64encode(payload).decode("ascii")
+
+
 def _collect_images(root: Path, request: VisionAnalyzeRequest) -> tuple[list[str], list[str]]:
     def images_in(folder: str) -> list[Path]:
         paths = []
@@ -1613,7 +1633,7 @@ def _collect_images(root: Path, request: VisionAnalyzeRequest) -> tuple[list[str
     else:
         image_paths = (references or renders)[-request.max_images :]
 
-    encoded = [base64.b64encode(path.read_bytes()).decode("ascii") for path in image_paths]
+    encoded = [_encode_vision_image(path) for path in image_paths]
     labels = [f"{path.parent.name}/{path.name}" for path in image_paths]
     return encoded, labels
 
@@ -2459,7 +2479,7 @@ async def _build_generic_scene_spec(job_id: str, auto_research: bool) -> Generic
         ),
     )
     prompt += f"\nReference images supplied directly to the planner in this order: {reference_labels}\n"
-    planner_models = (*VISION_MODELS, REASONING_MODEL) if reference_images else (REASONING_MODEL,)
+    planner_models = (*VISION_MODELS, REASONING_MODEL)
     result = None
     spec = None
     selected_planner_model = None
@@ -2720,11 +2740,35 @@ def _normalize_adaptive_loft_payload(data: object, fallback_title: str) -> dict:
         raise TypeError("Adaptive loft response is not a JSON object.")
 
     normalized = dict(data)
+    # Multimodal models sometimes wrap the schema even when a JSON schema is supplied.
+    for wrapper in (
+        "adaptive_loft_spec",
+        "adaptive_loft",
+        "loft_spec",
+        "loft",
+        "mesh_spec",
+        "mesh",
+        "spec",
+        "result",
+    ):
+        candidate = normalized.get(wrapper)
+        if isinstance(candidate, dict) and any(
+            key in candidate
+            for key in ("sections", "cross_sections", "profiles", "slices")
+        ):
+            normalized = dict(candidate)
+            break
+
     normalized["title"] = str(normalized.get("title") or fallback_title or "Adaptive mesh")[:120]
-    normalized["rationale"] = str(normalized.get("rationale") or "")[:2400]
-    axis = str(normalized.get("axis") or "y").lower()
+    normalized["rationale"] = str(
+        normalized.get("rationale")
+        or normalized.get("reasoning")
+        or normalized.get("description")
+        or ""
+    )[:2400]
+    axis = str(normalized.get("axis") or normalized.get("loft_axis") or "y").lower()
     normalized["axis"] = axis if axis in {"x", "y", "z"} else "y"
-    color = str(normalized.get("color") or "#B8BDC6")
+    color = str(normalized.get("color") or normalized.get("base_color") or "#B8BDC6")
     if not (
         len(color) == 7
         and color.startswith("#")
@@ -2732,40 +2776,94 @@ def _normalize_adaptive_loft_payload(data: object, fallback_title: str) -> dict:
     ):
         color = "#B8BDC6"
     normalized["color"] = color.upper()
-    normalized["subdivision_levels"] = max(
-        0,
-        min(2, int(normalized.get("subdivision_levels") or 0)),
+    raw_subdivision = (
+        normalized.get("subdivision_levels")
+        if normalized.get("subdivision_levels") is not None
+        else normalized.get("subdivision", 0)
     )
+    try:
+        subdivision = int(raw_subdivision or 0)
+    except (TypeError, ValueError):
+        subdivision = 0
+    normalized["subdivision_levels"] = max(0, min(2, subdivision))
     normalized["smooth"] = bool(normalized.get("smooth", True))
     normalized["presentation_base"] = bool(normalized.get("presentation_base", True))
 
     sections = []
-    raw_sections = normalized.get("sections")
+    raw_sections = (
+        normalized.get("sections")
+        or normalized.get("cross_sections")
+        or normalized.get("profiles")
+        or normalized.get("slices")
+    )
+    if isinstance(raw_sections, dict):
+        for container_key in ("items", "sections", "cross_sections", "profiles", "slices"):
+            candidate = raw_sections.get(container_key)
+            if isinstance(candidate, list):
+                raw_sections = candidate
+                break
+        else:
+            dict_values = list(raw_sections.values())
+            if dict_values and all(isinstance(item, dict) for item in dict_values):
+                raw_sections = dict_values
     if not isinstance(raw_sections, list):
-        raise TypeError("Adaptive loft sections must be a list.")
+        raise TypeError("Adaptive loft sections could not be normalized to a list.")
+
     for raw in raw_sections[:12]:
         if not isinstance(raw, dict):
             continue
-        raw_contour = raw.get("contour")
+        raw_contour = (
+            raw.get("contour")
+            or raw.get("points")
+            or raw.get("perimeter")
+            or raw.get("profile")
+        )
+        if isinstance(raw_contour, dict):
+            raw_contour = (
+                raw_contour.get("points")
+                or raw_contour.get("contour")
+                or raw_contour.get("vertices")
+            )
         if not isinstance(raw_contour, list) or len(raw_contour) != 8:
             continue
         contour: list[list[float]] = []
         valid = True
         for point in raw_contour:
-            if not isinstance(point, (list, tuple)) or len(point) < 2:
+            if isinstance(point, dict):
+                if "u" in point and "v" in point:
+                    pair = (point.get("u"), point.get("v"))
+                elif "x" in point and "z" in point:
+                    pair = (point.get("x"), point.get("z"))
+                elif "x" in point and "y" in point:
+                    pair = (point.get("x"), point.get("y"))
+                else:
+                    valid = False
+                    break
+            elif isinstance(point, (list, tuple)) and len(point) >= 2:
+                pair = (point[0], point[1])
+            else:
                 valid = False
                 break
             try:
-                u = max(-10.0, min(10.0, float(point[0])))
-                v = max(-10.0, min(10.0, float(point[1])))
+                u = max(-10.0, min(10.0, float(pair[0])))
+                v = max(-10.0, min(10.0, float(pair[1])))
             except (TypeError, ValueError):
                 valid = False
                 break
             contour.append([u, v])
         if not valid:
             continue
+        raw_position = raw.get("position")
+        if raw_position is None:
+            raw_position = (
+                raw.get("axis_position")
+                if raw.get("axis_position") is not None
+                else raw.get("offset")
+            )
+        if raw_position is None:
+            raw_position = raw.get(normalized["axis"])
         try:
-            position = max(-10.0, min(10.0, float(raw.get("position"))))
+            position = max(-10.0, min(10.0, float(raw_position)))
         except (TypeError, ValueError):
             continue
         sections.append({"position": position, "contour": contour})
@@ -2780,7 +2878,14 @@ def _normalize_adaptive_loft_payload(data: object, fallback_title: str) -> dict:
         raise ValueError("Adaptive loft needs at least four distinct valid cross sections.")
     normalized["sections"] = deduped
 
-    attachments = normalized.get("attachments")
+    attachments = (
+        normalized.get("attachments")
+        or normalized.get("separate_parts")
+        or normalized.get("details")
+        or []
+    )
+    if isinstance(attachments, dict):
+        attachments = list(attachments.values())
     if not isinstance(attachments, list):
         attachments = []
     normalized_attachments = _normalize_scene_spec_payload(

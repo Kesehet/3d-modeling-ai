@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import copy
 import math
+from itertools import pairwise
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -211,7 +212,7 @@ def apply_cage_edit_action(spec: dict, action: CageEditAction) -> dict:
 
     # Prevent near-duplicate station positions, which create collapsed faces.
     positions = [float(station["position"]) for station in updated["stations"]]
-    for left, right in zip(positions, positions[1:]):
+    for left, right in pairwise(positions):
         if not math.isfinite(left) or not math.isfinite(right) or right - left < 0.03:
             raise ValueError("Cage edit collapsed adjacent longitudinal stations.")
 

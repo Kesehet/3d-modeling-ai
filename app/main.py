@@ -977,7 +977,9 @@ async def _build_feature_plan(
         "supporting body/silhouette and ordinary surface details in_place. A component job will be frozen after its "
         "own children and QA pass, then installed into the parent; do not duplicate its internal details as sibling "
         "parent features. Repeated identical components should be one component job with count/symmetry metadata, "
-        "not separate rebuilds for each instance. "
+        "not separate rebuilds for each instance. Treat component_job features as terminal assembly leaves at the parent level: "
+        "finish all supporting in_place shell/surface work first, and do not make a later in_place feature depend on an "
+        "installed component. If a detail only makes sense inside that component, put it in the child component plan. "
         if component_jobs_allowed
         else (
             "This job is already at the maximum recursive component depth. Every feature MUST use build_mode=in_place; "

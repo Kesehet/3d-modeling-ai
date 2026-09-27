@@ -339,7 +339,8 @@ jobs:
               -d '{"auto_research":false}' \
               -X POST "$BASE_URL/dashboard/jobs/$JOB_ID/generate" || true)
             if [ "$HTTP_CODE" -lt 200 ] || [ "$HTTP_CODE" -ge 300 ] \
-              || ! jq -e '.status.stage == "generic_rendered_v1"' "/tmp/quality-$key-generate.json" >/dev/null \
+              || ! jq -e '.status.stage == "generic_initial_recognizable"' "/tmp/quality-$key-generate.json" >/dev/null \
+              || ! jq -e '.status.quality_gate.recognizable == true' "/tmp/quality-$key-generate.json" >/dev/null \
               || ! jq -e '.renders | length == 9' "/tmp/quality-$key-generate.json" >/dev/null; then
               echo "FAIL: $key generation failed"
               cat "/tmp/quality-$key-generate.json" | jq . || cat "/tmp/quality-$key-generate.json"

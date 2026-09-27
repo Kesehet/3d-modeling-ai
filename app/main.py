@@ -141,7 +141,7 @@ IMAGE_FORMATS = {
     "PNG": ("image/png", ".png"),
     "WEBP": ("image/webp", ".webp"),
 }
-ARTIFACT_CATEGORIES = {"references", "scene", "renders", "exports", "logs"}
+ARTIFACT_CATEGORIES = {"references", "reference-candidates", "scene", "renders", "exports", "logs"}
 
 # Keep multimodal requests comfortably below the MediaPitch Ollama proxy body limit.
 # The budget counts base64 image characters only; prompt/schema/JSON overhead still has headroom.
@@ -2450,6 +2450,24 @@ def _metadata_supports_reference_identity(
     return all(term in metadata_tokens for term in identity_terms)
 
 
+def _archive_reference_candidate(root: Path, stored_name: str) -> str | None:
+    """Keep rejected web candidates available for production diagnostics."""
+    safe_name = Path(stored_name).name
+    if not safe_name:
+        return None
+    source = root / "references" / safe_name
+    if not source.is_file():
+        return None
+    destination_dir = root / "reference-candidates"
+    destination_dir.mkdir(parents=True, exist_ok=True)
+    destination = destination_dir / safe_name
+    try:
+        source.replace(destination)
+    except OSError:
+        return None
+    return destination.name
+
+
 async def _verify_reference_batch(
     root: Path,
     *,
@@ -2574,11 +2592,13 @@ async def _verify_reference_batch(
         if should_accept:
             accepted.append(verified_record)
         else:
-            rejected.append(verified_record)
-            try:
-                (root / "references" / Path(stored_name).name).unlink(missing_ok=True)
-            except OSError:
-                pass
+            archived_name = _archive_reference_candidate(root, stored_name)
+            rejected.append(
+                {
+                    **verified_record,
+                    "candidate_artifact": archived_name,
+                }
+            )
 
     append_history(
         root,
@@ -2626,20 +2646,14 @@ async def _verify_reference_candidates(
             )
             stored_name = str(overflow.get("stored_name") or "")
             if stored_name:
-                try:
-                    (root / "references" / Path(stored_name).name).unlink(missing_ok=True)
-                except OSError:
-                    pass
+                _archive_reference_candidate(root, stored_name)
         if len(accepted) >= max_images:
             # Candidates not evaluated because we already have enough should not remain
             # loose in the references directory.
             for record in records[start + 4 :]:
                 stored_name = str(record.get("stored_name") or "")
                 if stored_name:
-                    try:
-                        (root / "references" / Path(stored_name).name).unlink(missing_ok=True)
-                    except OSError:
-                        pass
+                    _archive_reference_candidate(root, stored_name)
             break
     return accepted, rejected
 

@@ -166,6 +166,75 @@ class OllamaProxyClient:
         try:
             data = decode_structured_json(body.get("response") or "")
         except OllamaProxyError as generate_error:
+            if schema:
+                # Some hosted multimodal models accept JSON mode but do not
+                # reliably obey a full JSON-schema response format. Retry the
+                # same visual task in plain JSON mode before rejecting the
+                # model. Validation/normalization still happens at the caller.
+                relaxed_payload = {
+                    **payload,
+                    "format": "json",
+                    "messages": [
+                        {
+                            "role": "system",
+                            "content": (
+                                system
+                                + "\nReturn one valid JSON object only. "
+                                "Do not use Markdown fences or commentary."
+                            ),
+                        },
+                        user_message,
+                    ],
+                }
+                relaxed_response = await self._post("/api/chat", relaxed_payload)
+                if relaxed_response.status_code not in {404, 405}:
+                    self._raise_for_response(relaxed_response, "/api/chat")
+                    relaxed_body = relaxed_response.json()
+                    relaxed_content = (relaxed_body.get("message") or {}).get("content") or ""
+                    try:
+                        relaxed_data = decode_structured_json(relaxed_content)
+                    except OllamaProxyError:
+                        pass
+                    else:
+                        return OllamaJSONResult(
+                            data=relaxed_data,
+                            endpoint="/api/chat?format=json",
+                            usage={
+                                "prompt_eval_count": int(relaxed_body.get("prompt_eval_count") or 0),
+                                "eval_count": int(relaxed_body.get("eval_count") or 0),
+                            },
+                        )
+
+                relaxed_generate_payload = {
+                    **generate_payload,
+                    "format": "json",
+                    "prompt": (
+                        f"[SYSTEM]\n{system}\n\n[USER]\n{prompt}\n\n"
+                        "Return one valid JSON object only. Do not use Markdown fences or commentary."
+                    ),
+                }
+                relaxed_response = await self._post("/api/generate", relaxed_generate_payload)
+                self._raise_for_response(relaxed_response, "/api/generate")
+                relaxed_body = relaxed_response.json()
+                try:
+                    relaxed_data = decode_structured_json(relaxed_body.get("response") or "")
+                except OllamaProxyError as relaxed_error:
+                    if chat_decode_error:
+                        raise OllamaProxyError(
+                            "Ollama returned malformed structured JSON from schema-mode /api/chat "
+                            f"({chat_decode_error}), schema-mode /api/generate ({generate_error}), "
+                            f"and relaxed JSON mode ({relaxed_error})."
+                        ) from relaxed_error
+                    raise
+                return OllamaJSONResult(
+                    data=relaxed_data,
+                    endpoint="/api/generate?format=json",
+                    usage={
+                        "prompt_eval_count": int(relaxed_body.get("prompt_eval_count") or 0),
+                        "eval_count": int(relaxed_body.get("eval_count") or 0),
+                    },
+                )
+
             if chat_decode_error:
                 raise OllamaProxyError(
                     "Ollama returned malformed structured JSON from both /api/chat "

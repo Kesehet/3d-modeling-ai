@@ -186,10 +186,10 @@ jobs:
             -H "Authorization: Bearer $THREED_API_TOKEN" \
             "$BASE_URL/v1/capabilities")
           echo "$CAPABILITIES" | jq .
-          echo "$CAPABILITIES" | jq -e '.vision_model == "qwen3-vl:235b-cloud"' >/dev/null
-          echo "$CAPABILITIES" | jq -e '.vision_models | index("gemma4:31b-cloud") != null' >/dev/null
+          echo "$CAPABILITIES" | jq -e '.vision_model == "gemma4:31b-cloud"' >/dev/null
           echo "$CAPABILITIES" | jq -e '.vision_models | index("gemma4:cloud") != null' >/dev/null
-          echo "Verified Qwen VL primary + Gemma multimodal fallback configuration."
+          echo "$CAPABILITIES" | jq -e '.vision_models | index("qwen3-vl:235b-cloud") == null' >/dev/null
+          echo "Verified current Gemma multimodal configuration; retired Qwen VL is disabled."
 
           curl --fail --silent --show-error \
             -H "Authorization: Bearer $THREED_API_TOKEN" \

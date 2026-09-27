@@ -43,7 +43,7 @@ jobs:
         run: |
           set -uo pipefail
           BASE_URL="https://$THREED_HOSTNAME"
-          mkdir -p diagnostics/references diagnostics/renders diagnostics/json
+          mkdir -p diagnostics/references diagnostics/reference-candidates diagnostics/renders diagnostics/json
 
           command_line=$(printf '%s\n' "$COMMENT_BODY" | head -n 1 | tr -d '\r')
           read -r prefix action rest <<< "$command_line"
@@ -90,6 +90,7 @@ jobs:
             fi
 
             api_json GET "/v1/jobs/$job_id/history" "" diagnostics/json/history.json               > diagnostics/history-http.txt || true
+            api_json GET "/v1/jobs/$job_id/artifacts" "" diagnostics/json/artifacts.json             > diagnostics/artifacts-http.txt || true
 
             if [ -s diagnostics/json/job.json ]; then
               echo "=== LIVE JOB SNAPSHOT ==="
@@ -101,17 +102,15 @@ jobs:
                 latest_vision_images
               }' diagnostics/json/job.json || true
 
-              while IFS= read -r name; do
-                [ -n "$name" ] || continue
-                encoded=$(python -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$name")
-                curl --fail --silent --show-error --max-time 60                   "$BASE_URL/dashboard/artifacts/$job_id/references/$encoded"                   -o "diagnostics/references/$name" || true
-              done < <(jq -r '.references[]?.name // empty' diagnostics/json/job.json)
-
-              while IFS= read -r name; do
-                [ -n "$name" ] || continue
-                encoded=$(python -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$name")
-                curl --fail --silent --show-error --max-time 60                   "$BASE_URL/dashboard/renders/$job_id/$encoded"                   -o "diagnostics/renders/$name" || true
-              done < <(jq -r '.renders[]?.name // empty' diagnostics/json/job.json)
+              if [ -s diagnostics/json/artifacts.json ]; then
+                for category in references reference-candidates renders; do
+                  while IFS= read -r name; do
+                    [ -n "$name" ] || continue
+                    encoded=$(python -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$name")
+                    curl --fail --silent --show-error --max-time 60                       -H "Authorization: Bearer $THREED_API_TOKEN"                       "$BASE_URL/v1/jobs/$job_id/artifacts/$category/$encoded"                       -o "diagnostics/$category/$name" || true
+                  done < <(jq -r --arg category "$category" '.artifacts[$category][]?.name // empty' diagnostics/json/artifacts.json)
+                done
+              fi
             fi
 
             find diagnostics -maxdepth 2 -type f -printf '%P\t%s bytes\n'               | sort > diagnostics/inventory.txt

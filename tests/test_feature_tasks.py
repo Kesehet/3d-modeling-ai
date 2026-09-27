@@ -361,3 +361,63 @@ def test_in_place_parent_work_is_scheduled_before_component_installation():
 
     assert task is not None
     assert task.id == "windows"
+
+
+
+def test_feature_plan_normalizer_accepts_nested_plan_wrapper():
+    payload = normalize_feature_plan_payload(
+        {
+            "result": {
+                "feature_plan": {
+                    "subject": "Toyota Prius",
+                    "notes": "Build the shell before isolated assemblies.",
+                    "components": [
+                        {
+                            "id": "body",
+                            "name": "Primary body shell",
+                            "build_mode": "in_place",
+                        },
+                        {
+                            "id": "wheel",
+                            "name": "Wheel assembly",
+                            "build_mode": "component_job",
+                            "count": 4,
+                            "depends_on": ["body"],
+                        },
+                    ],
+                }
+            }
+        },
+        subject="fallback subject",
+    )
+
+    plan = FeaturePlan.model_validate(payload)
+
+    assert plan.plan_version == 3
+    assert plan.subject == "Toyota Prius"
+    assert "shell" in plan.coordinator_notes.lower()
+    assert [feature.id for feature in plan.features] == ["body", "wheel"]
+    assert plan.features[1].build_mode == "component_job"
+    assert plan.features[1].depends_on == ["body"]
+
+
+def test_feature_plan_normalizer_accepts_plan_list_wrapper_and_top_level_list():
+    wrapped = normalize_feature_plan_payload(
+        {
+            "plan": [
+                {"id": "body", "name": "Body shell"},
+                {"id": "wheel", "name": "Wheel assembly", "execution_mode": "recursive"},
+            ]
+        },
+        subject="Toyota Prius",
+    )
+    direct = normalize_feature_plan_payload(
+        [
+            {"id": "body", "name": "Body shell"},
+            {"id": "wheel", "name": "Wheel assembly", "worker_mode": "component"},
+        ],
+        subject="Toyota Prius",
+    )
+
+    assert FeaturePlan.model_validate(wrapped).features[1].build_mode == "component_job"
+    assert FeaturePlan.model_validate(direct).features[1].build_mode == "component_job"

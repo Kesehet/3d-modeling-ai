@@ -59,6 +59,7 @@ from .security import require_api_token
 
 app = FastAPI(title="3D Modeling AI", version="0.2.0")
 AUTO_IMPROVE_TASKS: dict[str, asyncio.Task[None]] = {}
+REFERENCE_RECOVERY_TASKS: dict[str, asyncio.Task[None]] = {}
 FEATURE_MAX_ATTEMPTS = 3
 AUTO_IMPROVE_HARD_ROUND_CAP = 60
 
@@ -127,6 +128,7 @@ async def reconcile_interrupted_jobs_after_restart() -> None:
                     reason="strict reference-based acceptance enabled",
                 )
     _resume_auto_improve_jobs()
+    _resume_interrupted_reference_jobs()
 
 
 Image.MAX_IMAGE_PIXELS = 40_000_000
@@ -1632,6 +1634,65 @@ async def _run_auto_improve(job_id: str, max_rounds: int) -> None:
         round=round_number,
         reason="hard safety cap reached",
     )
+
+
+async def _recover_interrupted_reference_job(job_id: str) -> None:
+    root = _job_dir(job_id)
+    if not root.is_dir():
+        return
+    append_history(root, "reference_gated_job_recovery_started")
+    try:
+        await generate_generic_scene(
+            job_id,
+            GenericGenerateRequest(auto_research=True, auto_improve_rounds=0),
+        )
+    except Exception as exc:  # noqa: BLE001 - recovery must persist failure state
+        detail = str(exc.detail) if isinstance(exc, HTTPException) else str(exc)
+        append_history(root, "reference_gated_job_recovery_failed", error=detail)
+        return
+
+    append_history(root, "reference_gated_job_recovery_completed")
+    _schedule_auto_improve(job_id, 30)
+
+
+def _resume_interrupted_reference_jobs() -> None:
+    if not JOBS_ROOT.exists():
+        return
+
+    recoverable_stages = {
+        "researching_references",
+        "waiting_for_references",
+        "agent_selected_procedural",
+        "agent_selected_mesh",
+    }
+    for root in JOBS_ROOT.iterdir():
+        if not root.is_dir() or not (root / "request.json").is_file():
+            continue
+        status = _read_status(root)
+        if status.get("interrupted") is not True:
+            continue
+        if str(status.get("stage") or "") not in recoverable_stages:
+            continue
+        if _usable_reference_index(root):
+            continue
+        if list((root / "renders").glob("*.png")) if (root / "renders").is_dir() else []:
+            continue
+        if list((root / "scene").glob("model-v*.blend")) if (root / "scene").is_dir() else []:
+            continue
+
+        job_id = root.name
+        existing = REFERENCE_RECOVERY_TASKS.get(job_id)
+        if existing is not None and not existing.done():
+            continue
+
+        task = asyncio.create_task(_recover_interrupted_reference_job(job_id))
+        REFERENCE_RECOVERY_TASKS[job_id] = task
+
+        def _cleanup(completed: asyncio.Task[None], *, recovery_job_id: str = job_id) -> None:
+            if REFERENCE_RECOVERY_TASKS.get(recovery_job_id) is completed:
+                REFERENCE_RECOVERY_TASKS.pop(recovery_job_id, None)
+
+        task.add_done_callback(_cleanup)
 
 
 def _schedule_auto_improve(job_id: str, max_rounds: int = 30) -> bool:

@@ -1358,6 +1358,17 @@ async def _run_auto_improve(job_id: str, max_rounds: int) -> None:
     if not root.is_dir():
         return
 
+    if not _usable_reference_index(root):
+        append_history(root, "reference_research_retry", reason="auto-improve had no usable references")
+        try:
+            await research_job(job_id, ResearchRequest(max_images=5))
+        except HTTPException as exc:
+            append_history(
+                root,
+                "reference_research_retry_failed",
+                error=str(exc.detail),
+            )
+
     requested_rounds = max(1, min(30, int(max_rounds)))
     round_limit = requested_rounds
     round_number = 0
@@ -4870,6 +4881,16 @@ async def auto_improve_job_api(job_id: str, request: AutoImproveRequest) -> dict
 
 async def refine_generic_scene(job_id: str, request: GenericRefineRequest) -> dict:
     root = _require_job(job_id)
+    if not _usable_reference_index(root):
+        append_history(root, "reference_research_retry", reason="refinement had no usable references")
+        try:
+            await research_job(job_id, ResearchRequest(max_images=5))
+        except HTTPException as exc:
+            append_history(
+                root,
+                "reference_research_retry_failed",
+                error=str(exc.detail),
+            )
     await _ensure_feature_plan(job_id, _load_subject_inventory(root))
     status_path = root / "status.json"
     status_payload: dict = {}

@@ -2248,6 +2248,10 @@ async def refine_generic_scene(job_id: str, request: GenericRefineRequest) -> di
                 normalized,
                 str(job_request.get("prompt") or ""),
             )
+            normalized = _enforce_subject_geometry(
+                normalized,
+                str(job_request.get("prompt") or ""),
+            )
             revised = GenericSceneSpec.model_validate(normalized)
         except (OllamaProxyError, httpx.HTTPError, ValidationError, ValueError, TypeError) as exc:
             append_history(root, "generic_refinement_failed", error=str(exc))

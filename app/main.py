@@ -5836,6 +5836,42 @@ def _recent_cage_edit_events(root: Path, limit: int = 6) -> list[dict]:
     return events[-limit:]
 
 
+def _normalize_cage_edit_action_payload(data: object) -> dict:
+    """Normalize harmless LLM field-name drift without inventing edit semantics."""
+
+    if not isinstance(data, dict):
+        raise TypeError("Visual cage edit decision is not a JSON object.")
+
+    normalized = dict(data)
+    if normalized.get("operation") is None and normalized.get("action") is not None:
+        normalized["operation"] = normalized.get("action")
+    if normalized.get("target_index") is None:
+        for key in ("station_index", "cutter_index", "target_station", "target_cutter"):
+            if normalized.get(key) is not None:
+                normalized["target_index"] = normalized.get(key)
+                break
+    if normalized.get("point_index") is None:
+        for key in ("profile_point_index", "target_point", "profile_index"):
+            if normalized.get(key) is not None:
+                normalized["point_index"] = normalized.get(key)
+                break
+    if not normalized.get("reason"):
+        normalized["reason"] = str(
+            normalized.get("summary")
+            or normalized.get("diagnosis")
+            or normalized.get("rationale")
+            or "Visual edit director selected this bounded action."
+        )
+    if not normalized.get("expected_visual_effect"):
+        normalized["expected_visual_effect"] = str(
+            normalized.get("expected_effect")
+            or normalized.get("expected_improvement")
+            or normalized.get("goal")
+            or ""
+        )
+    return normalized
+
+
 async def _decide_hard_surface_cage_edit(
     job_id: str,
     *,
@@ -5949,7 +5985,9 @@ async def _decide_hard_surface_cage_edit(
                 temperature=0.0,
                 num_predict=2048,
             )
-            action = CageEditAction.model_validate(result.data)
+            action = CageEditAction.model_validate(
+                _normalize_cage_edit_action_payload(result.data)
+            )
         except (OllamaProxyError, httpx.HTTPError, ValidationError, ValueError, TypeError) as exc:
             errors.append(f"{candidate_model}: {exc}")
             continue

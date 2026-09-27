@@ -159,6 +159,7 @@ def jobs_snapshot() -> dict:
                     "intended_use": request.get("intended_use", "unknown"),
                     "state": status.get("state", "unknown"),
                     "stage": status.get("stage", "unknown"),
+                    "modeling_strategy": status.get("modeling_strategy"),
                     "quality_gate": status.get("quality_gate") if isinstance(status.get("quality_gate"), dict) else None,
                     "updated_at": status.get("updated_at"),
                     "renders": renders,
@@ -306,15 +307,20 @@ function renderDetail(job){
   els.title.textContent=job.prompt;
   els.meta.textContent=(job.state||"")+" · "+(job.stage||"")+" · "+job.job_id;
   const quality=job.quality_gate||null;
-  const blocksRefinement=job.stage==="generic_needs_strategy_switch"||job.stage==="generic_quality_unverified";
+  const needsMesh=job.stage==="generic_needs_strategy_switch";
+  const improvingMesh=job.stage==="adaptive_mesh_needs_refinement";
+  const blocksRefinement=job.stage==="generic_quality_unverified";
   if(quality?.recognizable===false){
-    const strategy=quality.recommended_strategy?(" Recommended next strategy: "+quality.recommended_strategy+"."):"";
-    els.quality.innerHTML='<strong>Quality gate: current model is not recognizable enough.</strong>'+esc(quality.summary||"The generated geometry does not sufficiently match the requested subject.")+esc(strategy);
+    if(needsMesh){
+      els.quality.innerHTML='<strong>Primitive model is not recognizable enough.</strong>'+esc(quality.summary||"The primitive blockout does not sufficiently match the requested subject.")+' The next improvement will switch to the adaptive mesh builder.';
+    }else if(improvingMesh){
+      els.quality.innerHTML='<strong>Mesh fallback is closer, but still needs work.</strong>'+esc(quality.summary||"The adaptive mesh has not passed recognizability yet.")+' Improve will generate another reference-driven mesh pass.';
+    }else{
+      const strategy=quality.recommended_strategy?(" Recommended next strategy: "+quality.recommended_strategy+"."):"";
+      els.quality.innerHTML='<strong>Quality gate: current model is not recognizable enough.</strong>'+esc(quality.summary||"The generated geometry does not sufficiently match the requested subject.")+esc(strategy);
+    }
     els.quality.classList.add("show");
   }else if(job.stage==="generic_quality_unverified"){
-    els.quality.innerHTML='<strong>Quality gate could not verify this model.</strong>Further automatic refinement is paused instead of making blind changes.';
-    els.quality.classList.add("show");
-  }else{
     els.quality.classList.remove("show");
     els.quality.textContent="";
   }
@@ -336,9 +342,12 @@ function renderDetail(job){
   els.files.innerHTML=files.length
     ? files.map(([category,file])=>'<a class="file" download href="'+fileUrl(job.job_id,category,file.name)+'"><b>↓</b>'+esc(file.name)+'</a>').join("")
     : '<span style="color:var(--muted)">No downloadable model files yet.</span>';
-  els.json.textContent=JSON.stringify({status:{state:job.state,stage:job.stage,quality_gate:job.quality_gate},references:job.references,latest_vision_images:job.latest_vision_images,qa:job.qa,history:job.history},null,2);
+  els.json.textContent=JSON.stringify({status:{state:job.state,stage:job.stage,modeling_strategy:job.modeling_strategy,quality_gate:job.quality_gate},references:job.references,latest_vision_images:job.latest_vision_images,qa:job.qa,history:job.history},null,2);
   els.improve.disabled=busy||!scene.length||blocksRefinement;
-  els.improve.title=blocksRefinement?"Primitive refinement is paused because this model needs a different modeling strategy.":"";
+  if(!busy){
+    els.improve.textContent=needsMesh?"Build mesh fallback":(improvingMesh?"Improve mesh":"Improve model");
+  }
+  els.improve.title=blocksRefinement?"Visual QA is unavailable, so the system cannot safely judge another iteration.":(needsMesh?"Switch from primitive blockout to a reference-driven continuous mesh.":"");
   els.deleteBtn.disabled=busy||job.state==="running";
 }
 async function refresh(){

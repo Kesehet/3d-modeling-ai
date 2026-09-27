@@ -82,6 +82,14 @@ class VisionReport(BaseModel):
     priority_actions: list[str] = Field(default_factory=list)
 
 
+class GenericQualityVerdict(BaseModel):
+    recognizable: bool
+    subject_match_score: float = Field(ge=0.0, le=1.0)
+    recommended_strategy: Literal["procedural", "base_mesh", "hybrid"] = "procedural"
+    summary: str = Field(default="", max_length=1600)
+    major_missing_parts: list[str] = Field(default_factory=list, max_length=20)
+
+
 class RefinementComparison(BaseModel):
     candidate_is_better: bool
     summary: str = ""
@@ -513,6 +521,144 @@ def _normalize_vision_report_payload(data: object) -> dict:
     }
 
 
+def _normalize_generic_quality_payload(data: object) -> dict:
+    if not isinstance(data, dict):
+        raise TypeError("Generic quality response is not a JSON object.")
+
+    def find(keys: tuple[str, ...]) -> object | None:
+        queue: list[dict] = [data]
+        seen: set[int] = set()
+        while queue:
+            node = queue.pop(0)
+            marker = id(node)
+            if marker in seen:
+                continue
+            seen.add(marker)
+            for key in keys:
+                if key in node:
+                    return node[key]
+            for key in ("analysis", "evaluation", "assessment", "result", "overall", "visual_quality"):
+                child = node.get(key)
+                if isinstance(child, dict):
+                    queue.append(child)
+        return None
+
+    raw_recognizable = find(
+        ("recognizable", "recognisable", "is_recognizable", "subject_recognizable", "subject_match")
+    )
+    if raw_recognizable is None:
+        raise ValueError("Quality verdict omitted recognizable.")
+    if isinstance(raw_recognizable, bool):
+        recognizable = raw_recognizable
+    elif isinstance(raw_recognizable, (int, float)):
+        recognizable = bool(raw_recognizable)
+    else:
+        value = str(raw_recognizable).strip().lower()
+        if value in {"true", "yes", "recognizable", "recognisable", "match", "matched", "pass", "passed"}:
+            recognizable = True
+        elif value in {"false", "no", "unrecognizable", "unrecognisable", "mismatch", "failed", "fail"}:
+            recognizable = False
+        else:
+            raise ValueError(f"Ambiguous recognizable verdict: {raw_recognizable}")
+
+    raw_score = find(
+        ("subject_match_score", "match_score", "recognizability_score", "recognition_score", "score")
+    )
+    if raw_score is None:
+        raise ValueError("Quality verdict omitted subject_match_score.")
+    score = float(raw_score)
+    if 1.0 < score <= 100.0:
+        score /= 100.0
+    score = max(0.0, min(1.0, score))
+
+    raw_strategy = str(
+        find(("recommended_strategy", "recommended_modeling_strategy", "modeling_strategy"))
+        or "procedural"
+    ).lower()
+    if "hybrid" in raw_strategy:
+        strategy = "hybrid"
+    elif "base" in raw_strategy or "mesh" in raw_strategy or "sculpt" in raw_strategy:
+        strategy = "base_mesh"
+    else:
+        strategy = "procedural"
+
+    raw_missing = find(("major_missing_parts", "missing_parts", "missing_features", "major_failures"))
+    if isinstance(raw_missing, list):
+        missing = [str(item).strip() for item in raw_missing if str(item).strip()][:20]
+    elif raw_missing:
+        missing = [str(raw_missing).strip()]
+    else:
+        missing = []
+
+    raw_summary = find(("summary", "verdict", "overall_summary", "overall_assessment"))
+    summary = str(raw_summary or "").strip()[:1600]
+    return {
+        "recognizable": recognizable,
+        "subject_match_score": score,
+        "recommended_strategy": strategy,
+        "summary": summary,
+        "major_missing_parts": missing,
+    }
+
+
+def _aggregate_generic_quality_verdicts(verdicts: list[dict]) -> dict:
+    if not verdicts:
+        raise ValueError("No valid quality verdicts.")
+
+    positives = [item for item in verdicts if item.get("recognizable") is True]
+    negatives = [item for item in verdicts if item.get("recognizable") is False]
+    scores = sorted(float(item.get("subject_match_score") or 0.0) for item in verdicts)
+    median_score = scores[len(scores) // 2]
+
+    if len(verdicts) >= 2:
+        recognizable = len(positives) >= 2 and median_score >= 0.72
+    else:
+        only = verdicts[0]
+        recognizable = (
+            only.get("recognizable") is True
+            and float(only.get("subject_match_score") or 0.0) >= 0.82
+            and not only.get("major_missing_parts")
+        )
+
+    # One extremely confident negative vetoes an optimistic majority.
+    if any(float(item.get("subject_match_score") or 0.0) <= 0.35 for item in negatives):
+        recognizable = False
+
+    strategy_votes = [
+        item.get("recommended_strategy")
+        for item in verdicts
+        if item.get("recommended_strategy") in {"procedural", "base_mesh", "hybrid"}
+    ]
+    if not recognizable and "hybrid" in strategy_votes:
+        strategy = "hybrid"
+    elif not recognizable and "base_mesh" in strategy_votes:
+        strategy = "base_mesh"
+    else:
+        strategy = strategy_votes[0] if strategy_votes else "procedural"
+
+    missing: list[str] = []
+    for item in verdicts:
+        for part in item.get("major_missing_parts") or []:
+            if part not in missing:
+                missing.append(part)
+
+    summaries = [
+        str(item.get("summary") or "").strip()
+        for item in verdicts
+        if str(item.get("summary") or "").strip()
+    ]
+    return {
+        "recognizable": recognizable,
+        "subject_match_score": round(median_score, 4),
+        "recommended_strategy": strategy,
+        "summary": " | ".join(summaries[:3])[:2400],
+        "major_missing_parts": missing[:20],
+        "positive_votes": len(positives),
+        "negative_votes": len(negatives),
+        "verdict_count": len(verdicts),
+    }
+
+
 class PlanRequest(BaseModel):
     instruction: str | None = Field(default=None, max_length=4000)
 
@@ -702,21 +848,49 @@ async def _build_subject_inventory(
         f"Research context: {json.dumps(research_context, ensure_ascii=False)}\n"
         "Return a conservative major-part inventory. Do not add brand trivia or invisible internal components."
     )
-    try:
-        result = await OllamaProxyClient().chat_json(
-            model=REASONING_MODEL,
-            system=system,
-            prompt=prompt,
-            schema=SubjectInventory.model_json_schema(),
-            temperature=0.0,
-        )
-        inventory = SubjectInventory.model_validate(result.data)
-    except (OllamaProxyError, httpx.HTTPError, ValidationError, ValueError, TypeError) as exc:
-        append_history(root, "subject_inventory_failed", error=str(exc))
+    reference_images, reference_labels = _collect_images(
+        root,
+        VisionAnalyzeRequest(
+            stage="subject_inventory",
+            include_references=True,
+            include_renders=False,
+            max_images=8,
+        ),
+    )
+    prompt += f"\nReference images in order: {reference_labels}\n"
+    candidate_models = (*VISION_MODELS, REASONING_MODEL) if reference_images else (REASONING_MODEL,)
+    result = None
+    inventory = None
+    selected_model = None
+    errors: list[str] = []
+    client = OllamaProxyClient()
+    for candidate_model in candidate_models:
+        try:
+            candidate_result = await client.chat_json(
+                model=candidate_model,
+                system=system,
+                prompt=prompt,
+                images=reference_images or None,
+                schema=SubjectInventory.model_json_schema(),
+                temperature=0.0,
+                num_predict=4096,
+            )
+            candidate_inventory = SubjectInventory.model_validate(candidate_result.data)
+        except (OllamaProxyError, httpx.HTTPError, ValidationError, ValueError, TypeError) as exc:
+            errors.append(f"{candidate_model}: {exc}")
+            continue
+        result = candidate_result
+        inventory = candidate_inventory
+        selected_model = candidate_model
+        break
+
+    if result is None or inventory is None or selected_model is None:
+        append_history(root, "subject_inventory_failed", error=" | ".join(errors[-4:]))
         return None
 
     payload = {
-        "model": REASONING_MODEL,
+        "model": selected_model,
+        "reference_images": reference_labels,
         "inventory": inventory.model_dump(),
         "created_at": datetime.now(UTC).isoformat(),
     }
@@ -1800,7 +1974,8 @@ async def analyze_vision(job_id: str, request: VisionAnalyzeRequest) -> dict:
                 prompt=prompt,
                 images=images,
                 schema=VisionReport.model_json_schema(),
-                temperature=0.1,
+                temperature=0.0,
+                num_predict=4096,
             )
             normalized_report = _normalize_vision_report_payload(candidate_result.data)
             candidate_report = VisionReport.model_validate(normalized_report)
@@ -1999,7 +2174,7 @@ async def _compare_generic_versions(
             if path.is_file() and path.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp"}
         ],
         key=lambda path: path.stat().st_mtime,
-    )[-2:]
+    )[-4:]
     baseline_paths = [
         root / "renders" / f"model-v{baseline_version}-{view}.png"
         for view in views
@@ -2274,29 +2449,59 @@ async def _build_generic_scene_spec(job_id: str, auto_research: bool) -> Generic
         "the mechanical connection chain explicit (for example base -> stem/neck -> joint -> shade). "
         "Favor recognizability, requested-part coverage and physical connectivity over primitive count."
     )
-    try:
-        result = await OllamaProxyClient().chat_json(
-            model=REASONING_MODEL,
-            system=system,
-            prompt=prompt,
-            schema=GenericSceneSpec.model_json_schema(),
-            temperature=0.1,
+    reference_images, reference_labels = _collect_images(
+        root,
+        VisionAnalyzeRequest(
+            stage="generic_scene_planning",
+            include_references=True,
+            include_renders=False,
+            max_images=8,
+        ),
+    )
+    prompt += f"\nReference images supplied directly to the planner in this order: {reference_labels}\n"
+    planner_models = (*VISION_MODELS, REASONING_MODEL) if reference_images else (REASONING_MODEL,)
+    result = None
+    spec = None
+    selected_planner_model = None
+    planning_errors: list[str] = []
+    client = OllamaProxyClient()
+    for candidate_model in planner_models:
+        try:
+            candidate_result = await client.chat_json(
+                model=candidate_model,
+                system=system,
+                prompt=prompt,
+                images=reference_images or None,
+                schema=GenericSceneSpec.model_json_schema(),
+                temperature=0.0,
+                num_predict=8192,
+            )
+            normalized = _normalize_scene_spec_payload(
+                candidate_result.data,
+                str(job_request.get("prompt") or "Generated model"),
+            )
+            normalized = _enforce_character_visibility(
+                normalized,
+                str(job_request.get("prompt") or ""),
+            )
+            normalized = _enforce_subject_geometry(
+                normalized,
+                str(job_request.get("prompt") or ""),
+            )
+            candidate_spec = GenericSceneSpec.model_validate(normalized)
+        except (OllamaProxyError, httpx.HTTPError, ValidationError, ValueError, TypeError) as exc:
+            planning_errors.append(f"{candidate_model}: {exc}")
+            continue
+        result = candidate_result
+        spec = candidate_spec
+        selected_planner_model = candidate_model
+        break
+
+    if result is None or spec is None or selected_planner_model is None:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Generic scene planning failed across configured models: {' | '.join(planning_errors[-4:])}",
         )
-        normalized = _normalize_scene_spec_payload(
-            result.data,
-            str(job_request.get("prompt") or "Generated model"),
-        )
-        normalized = _enforce_character_visibility(
-            normalized,
-            str(job_request.get("prompt") or ""),
-        )
-        normalized = _enforce_subject_geometry(
-            normalized,
-            str(job_request.get("prompt") or ""),
-        )
-        spec = GenericSceneSpec.model_validate(normalized)
-    except (OllamaProxyError, httpx.HTTPError, ValidationError, ValueError, TypeError) as exc:
-        raise HTTPException(status_code=502, detail=f"Generic scene planning failed: {exc}") from exc
 
     coverage: dict | None = None
     if inventory is not None:
@@ -2318,13 +2523,27 @@ async def _build_generic_scene_spec(job_id: str, auto_research: bool) -> Generic
                 "Return a revised full SceneSpec that covers the missing required parts and counts."
             )
             try:
-                repair_result = await OllamaProxyClient().chat_json(
-                    model=REASONING_MODEL,
-                    system=repair_system,
-                    prompt=repair_prompt,
-                    schema=GenericSceneSpec.model_json_schema(),
-                    temperature=0.0,
-                )
+                repair_result = None
+                repair_errors: list[str] = []
+                for repair_model in planner_models:
+                    try:
+                        repair_result = await client.chat_json(
+                            model=repair_model,
+                            system=repair_system,
+                            prompt=repair_prompt + f"\nReference images in order: {reference_labels}\n",
+                            images=reference_images or None,
+                            schema=GenericSceneSpec.model_json_schema(),
+                            temperature=0.0,
+                            num_predict=8192,
+                        )
+                    except (OllamaProxyError, httpx.HTTPError, ValueError, TypeError) as exc:
+                        repair_errors.append(f"{repair_model}: {exc}")
+                        continue
+                    break
+                if repair_result is None:
+                    raise OllamaProxyError(
+                        "Scene inventory repair failed: " + " | ".join(repair_errors[-4:])
+                    )
                 repaired_payload = _normalize_scene_spec_payload(
                     repair_result.data,
                     str(job_request.get("prompt") or "Generated model"),
@@ -2370,9 +2589,10 @@ async def _build_generic_scene_spec(job_id: str, auto_research: bool) -> Generic
 
     payload = {
         "job_id": job_id,
-        "model": REASONING_MODEL,
+        "model": selected_planner_model,
         "endpoint": result.endpoint,
         "usage": result.usage,
+        "reference_images": reference_labels,
         "inventory": inventory.model_dump() if inventory is not None else None,
         "inventory_coverage": coverage,
         "spec": spec.model_dump(),
@@ -2638,7 +2858,8 @@ async def _build_adaptive_loft_spec(job_id: str, *, reason: str) -> AdaptiveLoft
                 prompt=prompt,
                 images=images,
                 schema=AdaptiveLoftSpec.model_json_schema(),
-                temperature=0.05,
+                temperature=0.0,
+                num_predict=8192,
             )
             normalized = _normalize_adaptive_loft_payload(
                 result.data,
@@ -2907,42 +3128,97 @@ async def _generate_adaptive_mesh_fallback(job_id: str, *, reason: str) -> dict:
 
 async def _generic_recognizability_check(job_id: str, *, stage: str) -> dict:
     root = _require_job(job_id)
-    vision = await analyze_vision(
-        job_id,
+    images, labels = _collect_images(
+        root,
         VisionAnalyzeRequest(
             stage=stage,
             include_references=True,
             include_renders=True,
-            max_images=12,
-            instruction=(
-                "This is a strict generic-model quality gate. Compare the ACTIVE model renders with the exact "
-                "user request and any reference images. Set recognizable=true only if an unfamiliar viewer "
-                "would identify the requested subject from the geometry alone. Missing the subject's main "
-                "silhouette, primary body masses, required repeated structural parts, or identity-defining "
-                "features means recognizable=false even if a few colors or primitive parts are plausible. "
-                "If the primitive SceneSpec approach is fundamentally inadequate, recommend base_mesh or hybrid."
-            ),
+            max_images=16,
         ),
     )
-    report = vision.get("report") or {}
-    recognizable = report.get("recognizable")
+    if not images:
+        raise HTTPException(status_code=400, detail="No reference or render images are available.")
+
+    job_request = json.loads((root / "request.json").read_text(encoding="utf-8"))
+    inventory = _load_subject_inventory(root)
+    system = (
+        "You are one independent visual judge in a high-stakes 3D quality ensemble. Judge only what is "
+        "actually visible in the supplied images. Compare the ACTIVE Blender renders against the reference "
+        "images and exact user request. Do not reward object names, filenames or plausible colors. "
+        "recognizable=true means an unfamiliar viewer could identify the requested subject from the geometry "
+        "and silhouette without being told the answer. Generic slabs, blobs, wedges, primitive stacks, or "
+        "models missing identity-critical masses must be false. Give a calibrated subject_match_score from "
+        "0.0 to 1.0 and list major missing visual parts. Recommend hybrid/base_mesh when a continuous mesh is "
+        "needed. Return JSON only."
+    )
+    prompt = (
+        f"Exact user request: {job_request.get('prompt', '')}\n"
+        f"Intended use: {job_request.get('intended_use', '')}\n"
+        f"Subject inventory: {json.dumps(inventory.model_dump() if inventory else {}, ensure_ascii=False)}\n"
+        f"Images in order: {labels}\n"
+        "Reference images are target evidence; model-vN images are the candidate. Be strict about visual "
+        "identity, primary silhouette, proportions and repeated structural parts."
+    )
+
+    verdicts: list[dict] = []
+    errors: list[str] = []
+    client = OllamaProxyClient()
+    for candidate_model in VISION_MODELS:
+        try:
+            result = await client.chat_json(
+                model=candidate_model,
+                system=system,
+                prompt=prompt,
+                images=images,
+                schema=GenericQualityVerdict.model_json_schema(),
+                temperature=0.0,
+                num_predict=2048,
+            )
+            normalized = _normalize_generic_quality_payload(result.data)
+            verdict = GenericQualityVerdict.model_validate(normalized)
+        except (OllamaProxyError, httpx.HTTPError, ValidationError, ValueError, TypeError) as exc:
+            errors.append(f"{candidate_model}: {exc}")
+            continue
+        verdicts.append(
+            {
+                **verdict.model_dump(),
+                "model": candidate_model,
+                "endpoint": result.endpoint,
+                "usage": result.usage,
+            }
+        )
+
+    if not verdicts:
+        detail = " | ".join(errors[-4:])
+        raise HTTPException(
+            status_code=502,
+            detail=f"Strict visual quality ensemble failed across configured vision models: {detail}",
+        )
+
+    aggregate = _aggregate_generic_quality_verdicts(verdicts)
+    payload = {
+        **aggregate,
+        "stage": stage,
+        "models": verdicts,
+        "errors": errors,
+        "images": labels,
+        "created_at": datetime.now(UTC).isoformat(),
+    }
+    _write_llm_log(root, "generic-quality-ensemble", payload)
     append_history(
         root,
         "generic_recognizability_gate",
         stage=stage,
-        recognizable=recognizable,
-        subject_match_score=report.get("subject_match_score"),
-        recommended_strategy=report.get("recommended_modeling_strategy"),
-        summary=report.get("summary"),
+        recognizable=aggregate["recognizable"],
+        subject_match_score=aggregate["subject_match_score"],
+        recommended_strategy=aggregate["recommended_strategy"],
+        positive_votes=aggregate["positive_votes"],
+        negative_votes=aggregate["negative_votes"],
+        models=[item["model"] for item in verdicts],
+        summary=aggregate["summary"],
     )
-    return {
-        "recognizable": recognizable,
-        "subject_match_score": report.get("subject_match_score"),
-        "recommended_strategy": report.get("recommended_modeling_strategy"),
-        "summary": report.get("summary"),
-        "vision": vision,
-    }
-
+    return payload
 
 async def generate_generic_scene(job_id: str, request: GenericGenerateRequest) -> dict:
     root = _require_job(job_id)
@@ -3088,7 +3364,7 @@ async def refine_generic_scene(job_id: str, request: GenericRefineRequest) -> di
                 stage="generic_visual_refinement",
                 include_references=True,
                 include_renders=True,
-                max_images=10,
+                max_images=16,
                 instruction=(
                     "Critique the newest generic model renders against the references and prompt. "
                     "Prioritize silhouette, proportions, missing major parts, relative placement, and colors. "

@@ -491,7 +491,7 @@ function renderDetail(job){
   const autoRunning=auto&&["scheduled","running","retrying"].includes(auto.state);
   els.improve.disabled=busy||!scene.length||autoRunning;
   if(!busy){
-    els.improve.textContent=autoRunning?("Auto improving "+(auto.current_round||0)+"/"+(auto.max_rounds||30)):(retryingQuality?"Ask AI director again":(needsMesh?"AI rebuild as mesh":(improvingMesh?"AI improve mesh":"AI improve model")));
+    els.improve.textContent=autoRunning?("Auto improving "+(auto.current_round||0)+"/"+(auto.max_rounds||30)):"Auto improve ×30";
   }
   els.improve.title=retryingQuality?"Let the multimodal modeling director inspect the references and current renders and choose the next action.":(needsMesh?"Let the AI rebuild the current result using the mesh strategy.":"");
   els.deleteBtn.disabled=busy||job.state==="running";
@@ -527,13 +527,13 @@ async function createModel(){
 }
 async function improve(){
   if(!currentJob||busy)return;
-  busy=true;els.improve.disabled=true;els.improve.textContent="Improving...";
+  busy=true;els.improve.disabled=true;els.improve.textContent="Starting auto improve...";
   try{
-    const response=await fetch("/dashboard/jobs/"+encodeURIComponent(currentJob.job_id)+"/improve",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({iterations:1})});
+    const response=await fetch("/dashboard/jobs/"+encodeURIComponent(currentJob.job_id)+"/auto-improve",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({rounds:30})});
     if(!response.ok)throw new Error(await response.text());
     await refresh();
-  }catch(error){alert("Improve failed: "+error.message)}
-  finally{busy=false;els.improve.textContent="Improve model";render()}
+  }catch(error){alert("Auto improve failed: "+error.message)}
+  finally{busy=false;render()}
 }
 async function deleteCurrentJob(){
   if(!currentJob||busy)return;

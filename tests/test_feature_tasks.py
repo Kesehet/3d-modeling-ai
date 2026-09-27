@@ -331,3 +331,33 @@ def test_frozen_component_is_scheduled_for_installation_without_spending_new_bui
     assert install.id == "wheel"
     assert install.status == "running"
     assert install.attempts == 1
+
+
+
+def test_in_place_parent_work_is_scheduled_before_component_installation():
+    payload = normalize_feature_plan_payload(
+        {
+            "subject": "car",
+            "features": [
+                {
+                    "id": "wheel",
+                    "name": "Wheel assembly",
+                    "build_mode": "component_job",
+                    "priority": 10,
+                },
+                {
+                    "id": "windows",
+                    "name": "Window surfaces",
+                    "build_mode": "in_place",
+                    "priority": 5,
+                },
+            ],
+        },
+        subject="car",
+    )
+    plan = FeaturePlan.model_validate(payload)
+
+    task = active_or_next_feature(plan)
+
+    assert task is not None
+    assert task.id == "windows"

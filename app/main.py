@@ -3,7 +3,6 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
-import math
 import shutil
 import uuid
 from datetime import UTC, datetime
@@ -842,6 +841,29 @@ def _normalize_scene_spec_payload(data: object, fallback_title: str) -> dict:
     return normalized
 
 
+class ModelingStage(BaseModel):
+    name: str
+    objective: str
+    success_criteria: list[str] = Field(default_factory=list)
+
+
+class ModelingPlan(BaseModel):
+    workflow: Literal["procedural", "base_mesh", "hybrid"]
+    units: Literal["mm", "cm", "m"] = "mm"
+    assumptions: list[str] = Field(default_factory=list)
+    stages: list[ModelingStage]
+    final_checks: list[str] = Field(default_factory=list)
+
+
+def _job_dir(job_id: str) -> Path:
+    if not job_id or any(ch not in "0123456789abcdef-" for ch in job_id.lower()):
+        raise HTTPException(status_code=400, detail="Invalid job id")
+    path = (JOBS_ROOT / job_id).resolve()
+    if JOBS_ROOT not in path.parents:
+        raise HTTPException(status_code=400, detail="Invalid job path")
+    return path
+
+
 def _require_job(job_id: str) -> Path:
     root = _job_dir(job_id)
     if not root.exists():
@@ -1675,15 +1697,13 @@ async def build_plan(job_id: str, request: PlanRequest) -> dict:
 
 
 def _generic_spatial_guidance(_: str) -> str:
-    return "\n".join(
-        (
-            "- Coordinate convention: X is left/right, Y is depth, Z is up.",
-            "- The front camera sits on negative Y and looks toward positive Y.",
-            "- Visible details should sit on the intended surface instead of being buried inside another part.",
-            "- Connected parts should touch or overlap when the real object is physically connected.",
-            "- Use rod/beam only when start and end are explicitly defined; otherwise use a solid primitive.",
-            "- Use the reference images, not object-name heuristics, to decide proportions, silhouette and part placement.",
-        )
+    return (
+        "- Coordinate convention: X is left/right, Y is depth, Z is up.\n"
+        "- The front camera sits on negative Y and looks toward positive Y.\n"
+        "- Visible details should sit on the intended surface instead of being buried inside another part.\n"
+        "- Connected parts should touch or overlap when the real object is physically connected.\n"
+        "- Use rod/beam only when start and end are explicitly defined; otherwise use a solid primitive.\n"
+        "- Use the reference images, not object-name heuristics, to decide proportions, silhouette and part placement."
     )
 
 

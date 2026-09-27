@@ -179,8 +179,27 @@ def _reference_rows(root: Path) -> list[dict]:
         except (OSError, json.JSONDecodeError):
             metadata_by_name = {}
 
+    visible_rows: list[dict] = []
     for row in rows:
-        metadata = metadata_by_name.get(row["name"], {})
+        metadata = metadata_by_name.get(row["name"])
+        if not isinstance(metadata, dict):
+            # Candidate downloads are never shown until research has explicitly
+            # admitted them into references.json.
+            continue
+        provider = str(metadata.get("provider") or "").lower()
+        automatic = provider in {"wikipedia", "wikimedia_commons", "wikimedia"}
+        if automatic:
+            try:
+                match_score = float(metadata.get("match_score") or 0.0)
+            except (TypeError, ValueError):
+                match_score = 0.0
+            if not (
+                metadata.get("verified") is True
+                and metadata.get("exact_identity_match") is True
+                and metadata.get("useful_for_geometry") is True
+                and match_score >= 0.70
+            ):
+                continue
         row.update(
             {
                 "original_name": metadata.get("original_name"),
@@ -190,9 +209,13 @@ def _reference_rows(root: Path) -> list[dict]:
                 "width": metadata.get("width"),
                 "height": metadata.get("height"),
                 "uploaded_at": metadata.get("uploaded_at") or metadata.get("researched_at"),
+                "verified": metadata.get("verified"),
+                "match_score": metadata.get("match_score"),
+                "verification_reason": metadata.get("verification_reason"),
             }
         )
-    return rows
+        visible_rows.append(row)
+    return visible_rows
 
 
 def _latest_vision_images(root: Path) -> list[str]:

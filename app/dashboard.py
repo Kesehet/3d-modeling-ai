@@ -493,7 +493,8 @@ function renderDetail(job){
       const criteria=(feature.acceptance_criteria||[]).slice(0,2).join(" · ");
       const scope=(feature.owner_scope||[]).slice(0,2).join(", ");
       const ownership=scope?'<div class="feature-criteria"><b>Owns:</b> '+esc(scope)+'</div>':'';
-      return '<div class="feature-card '+esc(feature.status)+'"><div style="display:flex;justify-content:space-between;gap:8px"><div class="feature-name">'+esc(feature.name)+'</div><div class="feature-state">'+esc(feature.status)+'</div></div><div class="feature-meta">P'+esc(feature.priority)+' · '+esc(feature.strategy)+deps+' · attempts '+esc(feature.attempts||0)+'</div>'+ownership+(criteria?'<div class="feature-criteria"><b>Pass when:</b> '+esc(criteria)+'</div>':'')+'</div>';
+      const verified=feature.acceptance_verified?('<div class="feature-criteria"><b>Verified:</b> reference match '+Math.round((feature.acceptance_score||0)*100)+'%'+(feature.acceptance_model?' · '+esc(feature.acceptance_model):'')+'</div>'):'';
+      return '<div class="feature-card '+esc(feature.status)+'"><div style="display:flex;justify-content:space-between;gap:8px"><div class="feature-name">'+esc(feature.name)+'</div><div class="feature-state">'+esc(feature.status)+'</div></div><div class="feature-meta">P'+esc(feature.priority)+' · '+esc(feature.strategy)+deps+' · attempts '+esc(feature.attempts||0)+'</div>'+ownership+(criteria?'<div class="feature-criteria"><b>Pass when:</b> '+esc(criteria)+'</div>':'')+verified+'</div>';
     }).join("");
   }else{
     els.featureProgress.textContent="Feature plan not created yet";

@@ -787,20 +787,22 @@ def _enforce_character_visibility(data: dict, prompt: str) -> dict:
         if isinstance(item, dict) and "tail" in clean_name(item)
     ]
     if len(tail_parts) >= 2:
-        y = body_loc[1] + body_scale[1] * 0.20
-        x0 = body_loc[0] + body_scale[0] * 0.82
+        y = body_loc[1] + body_scale[1] * 0.10
+        x0 = body_loc[0] + body_scale[0] * 0.70
         z0 = body_loc[2] + body_scale[2] * 0.02
         points = [
             [x0, y, z0],
-            [body_loc[0] + body_scale[0] * 1.45, y, body_loc[2] + body_scale[2] * 0.38],
-            [body_loc[0] + body_scale[0] * 1.08, y, body_loc[2] + body_scale[2] * 0.72],
-            [body_loc[0] + body_scale[0] * 1.68, y, body_loc[2] + body_scale[2] * 1.06],
+            [body_loc[0] + body_scale[0] * 1.38, y, body_loc[2] + body_scale[2] * 0.30],
+            [body_loc[0] + body_scale[0] * 1.02, y, body_loc[2] + body_scale[2] * 0.62],
+            [body_loc[0] + body_scale[0] * 1.62, y, body_loc[2] + body_scale[2] * 0.92],
+            [body_loc[0] + body_scale[0] * 1.28, y, body_loc[2] + body_scale[2] * 1.30],
         ]
-        for index, item in enumerate(tail_parts[:3]):
+        usable_segments = min(len(tail_parts), len(points) - 1)
+        for index, item in enumerate(tail_parts[:usable_segments]):
             item["shape"] = "beam"
             item["start"] = points[index]
             item["end"] = points[index + 1]
-            item["radius"] = max(0.08, body_scale[0] * 0.14)
+            item["radius"] = max(0.11, body_scale[0] * 0.18)
             item["location"] = points[index]
             item["scale"] = [1.0, 1.0, 1.0]
             item["rotation_deg"] = [0.0, 0.0, 0.0]
@@ -888,25 +890,52 @@ def _enforce_subject_geometry(data: dict, prompt: str) -> dict:
 
     if "sneaker" in text or "shoe" in text:
         soles = matching("outsole", "midsole", "sole")
+        while len(soles) < 2 and len(objects) < 40:
+            item = {
+                "name": "midsole layer" if soles else "outsole layer",
+                "shape": "cube", "location": [0.0, 0.0, 0.0],
+                "scale": [1.0, 1.0, 1.0], "rotation_deg": [0.0, 0.0, 0.0],
+                "start": None, "end": None, "radius": None,
+                "color": "#F4F4F2", "bevel": True, "smooth": True,
+            }
+            objects.append(item)
+            soles.append(item)
+        sole_levels = (
+            ([0.0, 0.0, 0.22], [2.42, 0.80, 0.18], "#3B3F46"),
+            ([0.0, 0.0, 0.50], [2.32, 0.76, 0.13], "#F4F4F2"),
+            ([0.0, 0.0, 0.68], [2.20, 0.72, 0.10], "#C9CDD3"),
+        )
         for index, item in enumerate(soles[:3]):
-            place(
-                item,
-                "cube",
-                [0.0, 0.0, 0.26 + index * 0.12],
-                [2.35 - index * 0.08, 0.76 - index * 0.03, 0.15],
-                "#F4F4F2" if index == 0 else "#C9CDD3",
-            )
-        place(first("upper", "shoe body"), "wedge", [-0.15, 0.0, 0.88], [1.85, 0.68, 0.62], "#2563EB")
-        place(first("toe"), "sphere", [1.62, -0.02, 0.75], [0.78, 0.67, 0.42], "#2563EB")
-        place(first("heel"), "cube", [-1.62, 0.0, 1.00], [0.42, 0.66, 0.72], "#2563EB")
+            location, scale, color = sole_levels[index]
+            place(item, "cube", location, scale, color)
+
+        place(first("upper", "shoe body"), "wedge", [-0.12, 0.0, 1.08], [1.86, 0.70, 0.62], "#2563EB")
+        place(first("toe"), "sphere", [1.62, -0.02, 0.94], [0.80, 0.70, 0.44], "#2563EB")
+        place(first("heel"), "cube", [-1.62, 0.0, 1.20], [0.44, 0.68, 0.74], "#2563EB")
+
         tongue = first("tongue")
-        place(tongue, "cube", [-0.15, -0.10, 1.38], [0.72, 0.46, 0.14], "#3B3F46")
+        place(tongue, "cube", [-0.35, -0.72, 1.42], [0.58, 0.10, 0.55], "#3B3F46")
         if tongue is not None:
-            tongue["rotation_deg"] = [14.0, 0.0, 0.0]
-        place(first("opening", "collar"), "torus", [-0.85, 0.0, 1.34], [0.68, 0.52, 0.16], "#111111")
-        for index, item in enumerate(matching("lace", "cord", "string")[:6]):
-            x = -0.45 + index * 0.22
-            link(item, [x, -0.62, 1.42], [x, 0.62, 1.42], 0.045, "#F4F4F2")
+            tongue["rotation_deg"] = [0.0, -12.0, 0.0]
+
+        opening = first("opening", "collar")
+        if opening is None and len(objects) < 40:
+            opening = {
+                "name": "foot opening collar", "shape": "torus",
+                "location": [0.0, 0.0, 0.0], "scale": [1.0, 1.0, 1.0],
+                "rotation_deg": [0.0, 0.0, 0.0], "start": None, "end": None,
+                "radius": None, "color": "#111111", "bevel": True, "smooth": True,
+            }
+            objects.append(opening)
+        place(opening, "torus", [-1.02, -0.66, 1.48], [0.62, 0.18, 0.46], "#111111")
+        if opening is not None:
+            opening["rotation_deg"] = [90.0, 0.0, 0.0]
+
+        lace_parts = matching("lace", "cord", "string")
+        for index, item in enumerate(lace_parts[:6]):
+            z = 1.15 + index * 0.14
+            x_span = max(0.28, 0.72 - index * 0.06)
+            link(item, [-x_span, -0.80, z], [x_span, -0.80, z], 0.045, "#F4F4F2")
 
     if "chair" in text:
         place(first("seat"), "cube", [0.0, 0.0, 2.65], [1.45, 1.30, 0.25], "#3B3F46")
@@ -959,7 +988,7 @@ def _enforce_subject_geometry(data: dict, prompt: str) -> dict:
                 if isinstance(item, dict)
                 and front_rear in clean(item)
                 and side in clean(item)
-                and "leg" in clean(item)
+                and any(token in clean(item) for token in ("leg", "joint", "knee", "foot"))
             ]
             upper = next((item for item in relevant if "upper" in clean(item)), None)
             joint = next((item for item in relevant if "joint" in clean(item) or "knee" in clean(item)), None)
@@ -973,11 +1002,12 @@ def _enforce_subject_geometry(data: dict, prompt: str) -> dict:
             link(lower, knee, ankle, 0.18, "#737A84")
             place(foot, "cube", [ankle[0], ankle[1] - 0.10, 0.36], [0.42, 0.58, 0.20], "#3B3F46")
 
-        place(first("head"), "cube", [0.0, -1.68, 3.92], [0.82, 0.42, 0.52], "#3B3F46")
-        camera = first("camera", "lens", "optic")
-        place(camera, "cylinder", [-0.20, -2.13, 3.95], [0.28, 0.28, 0.16], "#111111")
-        if camera is not None:
-            camera["rotation_deg"] = [90.0, 0.0, 0.0]
+        camera_head = first("camera head", "head")
+        place(camera_head, "cube", [0.0, -1.68, 3.92], [0.82, 0.42, 0.52], "#3B3F46")
+        camera_lens = first("camera lens", "lens", "optic")
+        place(camera_lens, "cylinder", [-0.20, -2.13, 3.95], [0.28, 0.28, 0.16], "#111111")
+        if camera_lens is not None:
+            camera_lens["rotation_deg"] = [90.0, 0.0, 0.0]
         for index, item in enumerate(matching("sensor pod", "sensor")[:2]):
             side = -1.0 if index == 0 else 1.0
             place(item, "cube", [side * 2.40, -0.10, 3.28], [0.34, 0.54, 0.42], "#F97316")

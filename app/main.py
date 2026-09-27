@@ -2667,6 +2667,14 @@ async def research_job(job_id: str, request: ResearchRequest) -> dict:
 
     _write_status(root, state="running", stage="researching_references")
     plan = await _plan_reference_search(job_request, requested_query)
+    normalized_primary = re.sub(
+        r"^(?:a|an|the)\\s+",
+        "",
+        str(plan.primary_query or requested_query).strip(),
+        flags=re.IGNORECASE,
+    ).strip()
+    if normalized_primary and normalized_primary != plan.primary_query:
+        plan = plan.model_copy(update={"primary_query": normalized_primary})
 
     # Keep user-uploaded references, but remove old automatic references that were
     # never verified or previously failed identity matching.
@@ -2678,6 +2686,18 @@ async def research_job(job_id: str, request: ResearchRequest) -> dict:
         value = str(value or "").strip()
         if value and value.casefold() not in {item.casefold() for item in queries}:
             queries.append(value)
+
+    # Some reasoning models legitimately return no alternate searches. Do not then
+    # spend the entire reference budget on one broad Wikimedia query: add deterministic
+    # orthographic-ish views that work for vehicles, furniture, products and characters.
+    if len(queries) < 4:
+        base_query = str(plan.primary_query or requested_query).strip()
+        for suffix in ("front view", "side view", "rear view"):
+            value = f"{base_query} {suffix}".strip()
+            if value.casefold() not in {item.casefold() for item in queries}:
+                queries.append(value)
+            if len(queries) >= 4:
+                break
     queries = queries[:4]
 
     accepted_new: list[dict] = []

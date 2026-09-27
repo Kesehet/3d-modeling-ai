@@ -75,6 +75,139 @@ def test_replan_never_overwrites_or_accepts_a_regressing_candidate(tmp_path, mon
     assert (root / "scene/model-v7.blend").read_bytes() == b"baseline"
 
 
+def test_visual_replan_switches_out_of_the_failed_cage_representation(tmp_path, monkeypatch):
+    root = job(tmp_path, monkeypatch)
+    spec = main.HardSurfaceCageSpec(title="Test", stations=[
+        {"position": p, "profile": [[0, 0], [1, 0], [1, 1], [0, 1]]}
+        for p in (-3, -1, 1, 3)
+    ])
+    (root / "cage-spec-v1.json").write_text(json.dumps({"spec": spec.model_dump()}))
+    main._write_status(
+        root,
+        modeling_strategy="hard_surface_cage",
+        working_cage_version=1,
+        cage_edit_stall_count=0,
+    )
+    feature = FeatureTask(id="body", name="body", strategy="base_mesh_region")
+    calls = []
+
+    async def decide(*a, **kw):
+        return main.CageEditAction(
+            operation="replan_representation",
+            reason="The current representation cannot express the visible shape.",
+            expected_visual_effect="Use a different topology.",
+        )
+
+    async def adaptive(*a, **kw):
+        calls.append(kw)
+        return {"strategy": "adaptive_loft", "switched": True}
+
+    async def cage(*a, **kw):
+        raise AssertionError("replan_representation must not regenerate the same cage")
+
+    monkeypatch.setattr(main, "_decide_hard_surface_cage_edit", decide)
+    monkeypatch.setattr(main, "_generate_adaptive_mesh_fallback", adaptive)
+    monkeypatch.setattr(main, "_generate_hard_surface_cage", cage)
+
+    result = asyncio.run(
+        main._refine_hard_surface_cage_incrementally("abc123", feature_task=feature)
+    )
+
+    assert result["switched"] is True
+    assert calls and calls[0]["feature_task"] is feature
+    assert "Do not generate another cage" in calls[0]["reason"]
+
+
+def test_adaptive_representation_keeps_clear_partial_progress(tmp_path, monkeypatch):
+    root = job(tmp_path, monkeypatch)
+    (root / "scene/model-v7.blend").write_bytes(b"preserved cage")
+    main._write_status(
+        root,
+        state="ready",
+        stage="hard_surface_cage_needs_refinement",
+        modeling_strategy="hard_surface_cage",
+        generic_model=None,
+        working_cage_version=7,
+        cage_edit_stall_count=2,
+        quality_gate={"recognizable": False, "subject_match_score": 0.2},
+    )
+    feature = FeatureTask(id="body", name="body", strategy="base_mesh_region")
+    progress = []
+
+    async def plan(*a, **kw):
+        return object()
+
+    async def build(*a, version, **kw):
+        assert version == 8
+        return {
+            "status": {
+                "generic_model": {
+                    "version": version,
+                    "strategy": "adaptive_loft",
+                    "blend": f"model-v{version}.blend",
+                    "renders": [],
+                }
+            }
+        }
+
+    async def compare(*a, baseline_version, candidate_version):
+        assert baseline_version == 7
+        assert candidate_version == 8
+        return {
+            "candidate_is_better": True,
+            "summary": "The new representation has a much closer silhouette.",
+        }
+
+    async def evaluate(*a, baseline_version, candidate_version, **kw):
+        assert baseline_version == 7
+        assert candidate_version == 8
+        return {
+            "feature_id": "body",
+            "passed": False,
+            "visible": True,
+            "criteria_satisfied": False,
+            "subject_recognizable": False,
+            "confidence": 0.99,
+            "reference_match_score": 0.58,
+            "regression_detected": False,
+            "summary": "Clearly improved, but not finished.",
+            "problems": ["needs another refinement"],
+            "protected_geometry_notes": [],
+            "model": "vision-test",
+        }
+
+    def record(_root, feature_id, *, version, summary):
+        progress.append((feature_id, version, summary))
+
+    def finish(*a, **kw):
+        raise AssertionError("partial visual progress must not finish or fail the active feature")
+
+    monkeypatch.setattr(main, "_build_adaptive_loft_spec", plan)
+    monkeypatch.setattr(main, "_execute_adaptive_loft", build)
+    monkeypatch.setattr(main, "_compare_generic_versions", compare)
+    monkeypatch.setattr(main, "_evaluate_feature_candidate", evaluate)
+    monkeypatch.setattr(main, "record_feature_progress", record)
+    monkeypatch.setattr(main, "finish_feature", finish)
+    monkeypatch.setattr(main, "feature_plan_summary", lambda _root: {})
+
+    result = asyncio.run(
+        main._generate_adaptive_mesh_fallback(
+            "abc123",
+            reason="The cage representation stalled.",
+            feature_task=feature,
+        )
+    )
+
+    status = main._read_status(root)
+    assert result["comparison"]["candidate_is_better"] is True
+    assert status["modeling_strategy"] == "adaptive_loft"
+    assert status["generic_model"]["version"] == 8
+    assert status["working_cage_version"] is None
+    assert status["quality_gate"]["active_feature_passed"] is False
+    assert progress and progress[0][0:2] == ("body", 8)
+    assert (root / "scene/model-v7.blend").read_bytes() == b"preserved cage"
+
+
 def test_every_visual_stage_uses_one_explicit_model_version(tmp_path, monkeypatch):
     root = job(tmp_path, monkeypatch)
     for version in (1, 2, 3):

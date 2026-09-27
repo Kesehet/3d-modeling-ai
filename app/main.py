@@ -1677,14 +1677,31 @@ async def _build_and_install_component_feature(
                 else str(comparison.get("model") or "") or None
             ),
         )
+        previous_model_meta = (
+            previous_status.get("generic_model")
+            if isinstance(previous_status.get("generic_model"), dict)
+            else {}
+        )
+        assembled_components = list(previous_model_meta.get("assembled_components") or [])
+        assembled_components.append(
+            {
+                "feature_id": refreshed_task.id,
+                "name": refreshed_task.name,
+                "child_job_id": child_job_id,
+                "child_version": child.get("version"),
+                "parent_version": candidate_version,
+                "instances": len(assembly.instances),
+            }
+        )
         candidate_model = {
             "version": candidate_version,
-            "title": (previous_status.get("generic_model") or {}).get("title") or refreshed_task.name,
+            "title": previous_model_meta.get("title") or refreshed_task.name,
             "blend": str(candidate["blend"]),
             "renders": list(candidate["renders"]),
             "qa": str(candidate["qa"]),
             "assembled_component": refreshed_task.name,
             "component_child_job_id": child_job_id,
+            "assembled_components": assembled_components,
         }
         previous_quality = (
             previous_status.get("quality_gate")
@@ -2083,6 +2100,21 @@ def _auto_improve_progress_signature(root: Path, status: dict) -> tuple[object, 
     )
 
 
+def _assembled_parent_requires_safe_stop(root: Path, status: dict) -> bool:
+    """Do not let generic refinement discard already-frozen component geometry."""
+    model = status.get("generic_model")
+    if not isinstance(model, dict):
+        return False
+    assembled = model.get("assembled_components")
+    if not isinstance(assembled, list) or not assembled:
+        return False
+    quality = status.get("quality_gate")
+    if isinstance(quality, dict) and quality.get("recognizable") is True:
+        return False
+    summary = feature_plan_summary(root) or {}
+    return bool(summary.get("required_complete") and not summary.get("next_feature_id"))
+
+
 def _remaining_feature_attempt_budget(root: Path) -> int:
     plan = load_feature_plan(root)
     if plan is None or plan.plan_version < 2:
@@ -2187,6 +2219,29 @@ async def _run_auto_improve(job_id: str, max_rounds: int) -> None:
             return
 
         before = _read_status(root)
+        if _assembled_parent_requires_safe_stop(root, before):
+            _write_status(
+                root,
+                state="ready",
+                stage="assembled_parent_needs_coordinated_replan",
+                auto_improve=_auto_improve_payload(
+                    state="assembled_needs_review",
+                    current_round=round_number,
+                    max_rounds=round_limit,
+                    reason=(
+                        "All frozen required components are installed, but whole-object QA still needs work. "
+                        "Generic SceneSpec rebuilding is paused because it could erase accepted component geometry."
+                    ),
+                ),
+            )
+            append_history(
+                root,
+                "auto_improve_stopped",
+                round=round_number,
+                reason="preserved frozen component assembly before destructive global rebuild",
+            )
+            return
+
         if _auto_improve_goal_reached(root, before):
             _write_status(
                 root,

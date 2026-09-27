@@ -2196,6 +2196,7 @@ def _persisted_auto_improve_no_progress_rounds(root: Path) -> int:
             return 0
     return streak
 
+
 def _remaining_feature_attempt_budget(root: Path) -> int:
     plan = load_feature_plan(root)
     if plan is None or plan.plan_version < 2:

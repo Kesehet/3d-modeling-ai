@@ -99,3 +99,32 @@ def test_refinement_comparison_defaults_to_reject_when_unclear():
     )
     assert normalized["candidate_is_better"] is False
     assert normalized["regressions"] == ["Lost the tail"]
+
+
+
+def test_generic_visual_refinement_prefers_accepted_status_version(tmp_path):
+    (tmp_path / "references").mkdir()
+    (tmp_path / "renders").mkdir()
+    for name in (
+        "model-v1-front.png",
+        "model-v1-back.png",
+        "model-v2-front.png",
+        "model-v2-back.png",
+    ):
+        (tmp_path / "renders" / name).write_bytes(name.encode("utf-8"))
+    (tmp_path / "status.json").write_text(
+        '{"generic_model":{"version":1}}',
+        encoding="utf-8",
+    )
+
+    _, labels = _collect_images(
+        tmp_path,
+        VisionAnalyzeRequest(
+            stage="generic_visual_refinement",
+            include_references=False,
+            include_renders=True,
+            max_images=16,
+        ),
+    )
+    assert labels
+    assert all("model-v1-" in label for label in labels)

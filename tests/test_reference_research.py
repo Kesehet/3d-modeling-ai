@@ -201,3 +201,58 @@ def test_reference_verifier_recovers_missing_accept_flag():
     pack = ReferencePackDecision.model_validate(normalized)
 
     assert pack.decisions[0].accept is True
+
+
+
+def test_whole_subject_title_outranks_incidental_part_mention():
+    whole = {
+        "provider": "wikimedia_commons",
+        "title": "File:Toyota Prius XW30 front three-quarter.jpg",
+        "description": "Toyota Prius passenger car",
+        "search_rank": 8,
+    }
+    part = {
+        "provider": "wikimedia_commons",
+        "title": "File:Prius 12v Battery Location.jpg",
+        "description": "Shows the 12 volt battery in the back of a Toyota Prius.",
+        "search_rank": 1,
+    }
+
+    assert _candidate_relevance_score("Toyota Prius", whole) > _candidate_relevance_score(
+        "Toyota Prius",
+        part,
+    )
+
+
+def test_dashboard_and_wheel_are_penalized_unless_requested():
+    dashboard = {
+        "provider": "wikimedia_commons",
+        "title": "File:Toyota Prius Dashboard.jpg",
+        "description": "Toyota Prius dashboard",
+        "search_rank": 1,
+    }
+    exterior = {
+        "provider": "wikimedia_commons",
+        "title": "File:Toyota Prius side view.jpg",
+        "description": "Toyota Prius",
+        "search_rank": 4,
+    }
+    wheel = {
+        "provider": "wikimedia_commons",
+        "title": "File:Toyota Prius Wheel.jpg",
+        "description": "Wheel on a Toyota Prius",
+        "search_rank": 1,
+    }
+
+    assert _candidate_relevance_score("Toyota Prius", exterior) > _candidate_relevance_score(
+        "Toyota Prius",
+        dashboard,
+    )
+    assert _candidate_relevance_score("Toyota Prius", exterior) > _candidate_relevance_score(
+        "Toyota Prius",
+        wheel,
+    )
+    assert _candidate_relevance_score("Toyota Prius wheel", wheel) > _candidate_relevance_score(
+        "Toyota Prius wheel",
+        exterior,
+    )

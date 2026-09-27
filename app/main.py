@@ -2141,6 +2141,7 @@ def _auto_improve_progress_signature(root: Path, status: dict) -> tuple[object, 
     counts = plan.get("counts") or {}
     return (
         version,
+        status.get("working_cage_version"),
         status.get("stage"),
         score,
         counts.get("accepted", 0),

@@ -9,6 +9,7 @@ from app.main import (
     _is_usable_reference_record,
     _metadata_supports_reference_identity,
     _metadata_title_supports_reference_identity,
+    _normalize_reference_coherence_payload,
     _normalize_reference_pack_payload,
     _prune_unverified_auto_references,
 )
@@ -322,3 +323,37 @@ def test_title_identity_support_rejects_incidental_caption_match():
 
     assert _metadata_title_supports_reference_identity(plan, full_vehicle) is True
     assert _metadata_title_supports_reference_identity(plan, battery) is False
+
+
+
+def test_reference_coherence_normalizer_keeps_anchor():
+    records = [
+        {"stored_name": "current-prius.jpg"},
+        {"stored_name": "old-prius.jpg"},
+    ]
+    payload = {
+        "anchor": "current-prius.jpg",
+        "keep": ["current-prius.jpg"],
+        "canonical_identity": "Toyota Prius fifth generation",
+        "reason": "The second image is a visibly older body generation.",
+    }
+
+    normalized = _normalize_reference_coherence_payload(payload, records)
+
+    assert normalized["anchor_stored_name"] == "current-prius.jpg"
+    assert normalized["keep_stored_names"] == ["current-prius.jpg"]
+    assert normalized["search_hint"] == "Toyota Prius fifth generation"
+
+
+def test_reference_coherence_normalizer_never_drops_first_anchor():
+    records = [
+        {"stored_name": "anchor.jpg"},
+        {"stored_name": "other.jpg"},
+    ]
+    payload = {"keep": ["other.jpg"]}
+
+    normalized = _normalize_reference_coherence_payload(payload, records)
+
+    assert normalized["anchor_stored_name"] == "anchor.jpg"
+    assert normalized["keep_stored_names"][0] == "anchor.jpg"
+    assert "other.jpg" in normalized["keep_stored_names"]

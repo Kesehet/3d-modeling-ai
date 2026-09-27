@@ -751,6 +751,13 @@ class ReferencePackDecision(BaseModel):
     decisions: list[ReferenceCandidateDecision] = Field(default_factory=list, max_length=8)
 
 
+class ReferenceCoherenceDecision(BaseModel):
+    anchor_stored_name: str = Field(default="", max_length=220)
+    keep_stored_names: list[str] = Field(default_factory=list, max_length=8)
+    search_hint: str = Field(default="", max_length=180)
+    summary: str = Field(default="", max_length=1200)
+
+
 class PikachuRefineRequest(BaseModel):
     iterations: int = Field(default=2, ge=1, le=3)
     auto_research: bool = True
@@ -2483,6 +2490,217 @@ def _metadata_title_supports_reference_identity(
     return all(term in title_tokens for term in identity_terms)
 
 
+def _normalize_reference_coherence_payload(
+    data: object,
+    records: list[dict],
+) -> dict:
+    expected = [
+        str(record.get("stored_name") or "")
+        for record in records
+        if record.get("stored_name")
+    ]
+    anchor = expected[0] if expected else ""
+    keep: list[str] = []
+    search_hint = ""
+    summary = ""
+
+    if isinstance(data, list):
+        keep = [str(item).strip() for item in data if str(item).strip() in expected]
+    elif isinstance(data, dict):
+        anchor_candidate = str(
+            data.get("anchor_stored_name")
+            or data.get("anchor")
+            or data.get("canonical_reference")
+            or anchor
+        ).strip()
+        if anchor_candidate in expected:
+            anchor = anchor_candidate
+
+        raw_keep = (
+            data.get("keep_stored_names")
+            or data.get("keep")
+            or data.get("selected")
+            or data.get("references")
+            or []
+        )
+        if isinstance(raw_keep, str):
+            raw_keep = [raw_keep]
+        if isinstance(raw_keep, list):
+            for item in raw_keep:
+                if isinstance(item, dict):
+                    value = str(
+                        item.get("stored_name")
+                        or item.get("filename")
+                        or item.get("name")
+                        or ""
+                    ).strip()
+                else:
+                    value = str(item).strip()
+                if value in expected and value not in keep:
+                    keep.append(value)
+
+        search_hint = str(
+            data.get("search_hint")
+            or data.get("canonical_identity")
+            or data.get("design_identity")
+            or ""
+        ).strip()[:180]
+        summary = str(
+            data.get("summary")
+            or data.get("reason")
+            or data.get("explanation")
+            or ""
+        ).strip()[:1200]
+
+    if anchor and anchor not in keep:
+        keep.insert(0, anchor)
+    return {
+        "anchor_stored_name": anchor,
+        "keep_stored_names": keep[:8],
+        "search_hint": search_hint,
+        "summary": summary,
+    }
+
+
+async def _cohere_reference_pack(
+    root: Path,
+    *,
+    plan: ReferenceSearchPlan,
+    records: list[dict],
+) -> tuple[list[dict], list[dict], ReferenceCoherenceDecision | None]:
+    """Keep one visually coherent design/generation in an automatic reference pack."""
+    if len(records) <= 1:
+        return records, [], None
+
+    usable_records: list[dict] = []
+    image_paths: list[Path] = []
+    for record in records[:8]:
+        stored_name = str(record.get("stored_name") or "")
+        path = root / "references" / Path(stored_name).name
+        if stored_name and path.is_file():
+            usable_records.append(record)
+            image_paths.append(path)
+    if len(usable_records) <= 1:
+        return usable_records, [], None
+
+    metadata = [
+        {
+            "stored_name": record.get("stored_name"),
+            "title": record.get("title"),
+            "source_title": record.get("source_title"),
+            "description": str(record.get("description") or "")[:500],
+            "image_url": record.get("image_url"),
+        }
+        for record in usable_records
+    ]
+    labels = [path.name for path in image_paths]
+    images = _encode_vision_images(image_paths)
+    anchor_name = labels[0]
+    system = (
+        "You curate a coherent multi-view reference pack for 3D reconstruction. The FIRST image is the preferred "
+        "canonical anchor because it ranked highest after identity verification. For a named vehicle, product, "
+        "character, landmark, or other specific design, keep only images that depict the SAME visible design "
+        "generation/body/form as that anchor. Reject older/newer generations and family variants when their geometry "
+        "differs, even if they share the requested name. For a generic category such as 'office chair', keep images "
+        "that are visually compatible enough to describe one plausible object rather than contradictory designs. "
+        "Do not reject the anchor unless it plainly does not depict the requested subject. Return JSON with "
+        "anchor_stored_name, keep_stored_names, search_hint, and summary. search_hint should name the canonical "
+        "design/generation more specifically when the pixels/metadata support it, otherwise repeat the requested "
+        "identity. Never invent a generation/year that is not supported by the supplied images or metadata."
+    )
+    prompt = (
+        f"Requested identity: {plan.primary_query}\n"
+        f"Subject description: {plan.subject_description}\n"
+        f"Candidate metadata in image order: {json.dumps(metadata, ensure_ascii=False)}\n"
+        f"Image labels in order: {labels}\n"
+        f"Preferred anchor: {anchor_name}\n"
+        "Choose the largest useful subset that can all describe ONE coherent 3D design."
+    )
+
+    client = OllamaProxyClient()
+    errors: list[str] = []
+    decision: ReferenceCoherenceDecision | None = None
+    selected_model: str | None = None
+    for candidate_model in VISION_MODELS:
+        try:
+            result = await client.chat_json(
+                model=candidate_model,
+                system=system,
+                prompt=prompt,
+                images=images,
+                schema=None,
+                temperature=0.0,
+                num_predict=2048,
+            )
+            decision = ReferenceCoherenceDecision.model_validate(
+                _normalize_reference_coherence_payload(result.data, usable_records)
+            )
+        except (OllamaProxyError, httpx.HTTPError, ValidationError, ValueError, TypeError) as exc:
+            errors.append(f"{candidate_model}: {exc}")
+            continue
+        selected_model = candidate_model
+        break
+
+    if decision is None:
+        # Safe fallback: one verified anchor is preferable to a contradictory pack.
+        decision = ReferenceCoherenceDecision(
+            anchor_stored_name=anchor_name,
+            keep_stored_names=[anchor_name],
+            search_hint=plan.primary_query,
+            summary="Coherence verification failed; retained only the highest-ranked verified anchor.",
+        )
+
+    keep_names = set(decision.keep_stored_names)
+    if decision.anchor_stored_name:
+        keep_names.add(decision.anchor_stored_name)
+    if not keep_names:
+        keep_names.add(anchor_name)
+
+    kept: list[dict] = []
+    rejected: list[dict] = []
+    for record in usable_records:
+        stored_name = str(record.get("stored_name") or "")
+        if stored_name in keep_names:
+            kept.append(
+                {
+                    **record,
+                    "coherence_verified": True,
+                    "coherence_anchor": decision.anchor_stored_name or anchor_name,
+                    "coherence_model": selected_model,
+                    "coherence_summary": decision.summary,
+                }
+            )
+        else:
+            archived_name = _archive_reference_candidate(root, stored_name)
+            rejected.append(
+                {
+                    **record,
+                    "coherence_verified": False,
+                    "coherence_anchor": decision.anchor_stored_name or anchor_name,
+                    "coherence_model": selected_model,
+                    "coherence_summary": decision.summary,
+                    "candidate_artifact": archived_name,
+                    "verification_reason": (
+                        str(record.get("verification_reason") or "")
+                        + " Excluded because it conflicts with the canonical reference design."
+                    ).strip(),
+                }
+            )
+
+    append_history(
+        root,
+        "reference_pack_coherence",
+        model=selected_model,
+        anchor=decision.anchor_stored_name or anchor_name,
+        kept=[record.get("stored_name") for record in kept],
+        excluded=[record.get("stored_name") for record in rejected],
+        search_hint=decision.search_hint,
+        summary=decision.summary,
+        errors=errors[-2:],
+    )
+    return kept, rejected, decision
+
+
 def _archive_reference_candidate(root: Path, stored_name: str) -> str | None:
     """Keep rejected web candidates available for production diagnostics."""
     safe_name = Path(stored_name).name
@@ -2782,6 +3000,46 @@ async def research_job(job_id: str, request: ResearchRequest) -> dict:
                 known_hashes.add(digest)
 
     index.extend(accepted_new)
+
+    # Re-cohere the entire automatic pack, including references accepted by older
+    # versions of the verifier. User uploads remain authoritative and untouched.
+    coherence_decision: ReferenceCoherenceDecision | None = None
+    uploaded_records = [
+        record for record in index
+        if isinstance(record, dict) and record.get("uploaded_at")
+    ]
+    automatic_records = [
+        record for record in index
+        if isinstance(record, dict)
+        and not record.get("uploaded_at")
+        and _is_auto_reference_record(record)
+        and _is_usable_reference_record(record)
+    ]
+    other_records = [
+        record for record in index
+        if isinstance(record, dict)
+        and not record.get("uploaded_at")
+        and not _is_auto_reference_record(record)
+    ]
+
+    if len(automatic_records) > 1:
+        coherent_auto, coherence_rejected, coherence_decision = await _cohere_reference_pack(
+            root,
+            plan=plan,
+            records=automatic_records,
+        )
+        rejected.extend(coherence_rejected)
+        index = [*uploaded_records, *other_records, *coherent_auto]
+        kept_names = {
+            str(record.get("stored_name") or "")
+            for record in coherent_auto
+        }
+        accepted_new = [
+            record
+            for record in accepted_new
+            if str(record.get("stored_name") or "") in kept_names
+        ]
+
     index = _prune_unverified_auto_references(root, index)
     (root / "references.json").write_text(
         json.dumps(index, indent=2, ensure_ascii=False),
@@ -2796,6 +3054,7 @@ async def research_job(job_id: str, request: ResearchRequest) -> dict:
         "created_at": datetime.now(UTC).isoformat(),
         "pages": pages,
         "accepted": accepted_new,
+        "coherence": coherence_decision.model_dump() if coherence_decision else None,
         "rejected": rejected,
         "research_errors": research_errors,
         "runs": research_runs,
@@ -2822,6 +3081,12 @@ async def research_job(job_id: str, request: ResearchRequest) -> dict:
         reference_count=len(usable),
         reference_search_query=plan.primary_query,
         rejected_reference_count=len(rejected),
+        reference_gate={
+            "required": True,
+            "state": "ready" if usable else "blocked",
+            "usable_reference_count": len(usable),
+            "reason": "" if usable else "Reference research returned no usable verified images.",
+        },
     )
     return {
         "job_id": job_id,
@@ -2845,6 +3110,16 @@ async def _ensure_reference_pack(
     root = _require_job(job_id)
     usable = _usable_reference_index(root)
     if usable:
+        _write_status(
+            root,
+            reference_count=len(usable),
+            reference_gate={
+                "required": True,
+                "state": "ready",
+                "usable_reference_count": len(usable),
+                "reason": "",
+            },
+        )
         return usable
 
     job_request = json.loads((root / "request.json").read_text(encoding="utf-8"))

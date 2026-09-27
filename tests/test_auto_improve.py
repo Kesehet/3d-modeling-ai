@@ -6,6 +6,9 @@ from app.main import (
     _auto_improve_goal_reached,
     _auto_improve_progress_signature,
     _feature_queue_is_blocked,
+    _persisted_auto_improve_no_progress_rounds,
+    _quality_snapshot,
+    _compact_quality_gate,
     _remaining_feature_attempt_budget,
 )
 
@@ -289,3 +292,67 @@ def test_assembled_parent_stops_before_destructive_global_rebuild(tmp_path):
 
     status["quality_gate"]["recognizable"] = True
     assert _assembled_parent_requires_safe_stop(tmp_path, status) is False
+
+
+
+def test_progress_signature_ignores_stage_only_churn(tmp_path):
+    status = {
+        "stage": "hard_surface_cage_needs_refinement",
+        "generic_model": {"version": 4},
+        "working_cage_version": 7,
+    }
+    before = _auto_improve_progress_signature(tmp_path, status)
+    status["stage"] = "hard_surface_cage_needs_replan"
+    after = _auto_improve_progress_signature(tmp_path, status)
+
+    assert before == after
+
+
+def test_persisted_no_progress_streak_survives_new_auto_runs(tmp_path):
+    (tmp_path / "history.json").write_text(
+        json.dumps(
+            [
+                {"event": "auto_improve_round_completed", "progress_changed": False},
+                {"event": "auto_improve_stopped", "reason": "short run ended"},
+                {"event": "auto_improve_started", "requested_rounds": 1},
+                {"event": "auto_improve_round_completed", "progress_changed": False},
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    assert _persisted_auto_improve_no_progress_rounds(tmp_path) == 2
+
+
+def test_persisted_no_progress_streak_resets_after_accepted_geometry(tmp_path):
+    (tmp_path / "history.json").write_text(
+        json.dumps(
+            [
+                {"event": "auto_improve_round_completed", "progress_changed": False},
+                {"event": "hard_surface_cage_progress", "candidate_version": 8},
+                {"event": "auto_improve_round_completed", "progress_changed": True},
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    assert _persisted_auto_improve_no_progress_rounds(tmp_path) == 0
+
+
+def test_quality_gate_compaction_never_recurses_candidate_history():
+    nested = {
+        "summary": "current",
+        "last_candidate_evaluation": {
+            "summary": "latest rejected",
+            "last_candidate_evaluation": {
+                "summary": "older rejected",
+            },
+        },
+    }
+
+    compact = _compact_quality_gate(nested)
+    assert compact["last_candidate_evaluation"]["summary"] == "latest rejected"
+    assert "last_candidate_evaluation" not in compact["last_candidate_evaluation"]
+
+    snapshot = _quality_snapshot(compact)
+    assert "last_candidate_evaluation" not in snapshot

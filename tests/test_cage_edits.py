@@ -85,12 +85,20 @@ def test_remove_station_refuses_to_destroy_minimum_cage():
 
 
 def test_position_edit_rejects_collapsed_sections():
+    spec = _spec()
+    for station, position in zip(
+        spec["stations"],
+        [-1.5, -0.3, 0.3, 1.5],
+        strict=True,
+    ):
+        station["position"] = position
+
     action = CageEditAction(
         operation="reshape_station",
         target_index=1,
-        position_offset_fraction=0.33,
+        position_offset_fraction=0.2,
         reason="Move a station too close to the next one.",
     )
 
     with pytest.raises(ValueError, match="collapsed adjacent"):
-        apply_cage_edit_action(_spec(), action)
+        apply_cage_edit_action(spec, action)

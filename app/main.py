@@ -894,7 +894,7 @@ class HardSurfaceCageSpec(BaseModel):
     bevel_width: float = Field(default=0.04, ge=0.0, le=0.3)
     bevel_segments: int = Field(default=2, ge=1, le=4)
     smooth: bool = True
-    presentation_base: bool = True
+    presentation_base: bool = False
     stations: list[CageStation] = Field(min_length=4, max_length=16)
     cutters: list[BooleanCutterSpec] = Field(default_factory=list, max_length=16)
     attachments: list[SceneObjectSpec] = Field(default_factory=list, max_length=24)
@@ -5121,7 +5121,7 @@ def _normalize_hard_surface_cage_payload(
     fallback_title: str,
     *,
     subject_family: str = "",
-    complexity: str = "moderate",
+    complexity: str = "simple",
 ) -> dict:
     if not isinstance(data, dict):
         raise TypeError("Hard-surface cage response is not a JSON object.")
@@ -5171,21 +5171,10 @@ def _normalize_hard_surface_cage_payload(
             str(fallback_title or ""),
         ]
     ).lower()
-    vehicle_like = any(
-        token in family_text
-        for token in (
-            "vehicle",
-            "automobile",
-            "car",
-            "sedan",
-            "hatchback",
-            "coupe",
-            "suv",
-            "truck",
-            "van",
-            "roadster",
-            "wagon",
-            "prius",
+    vehicle_like = bool(
+        re.search(
+            r"\b(?:vehicle|automobile|car|sedan|hatchback|coupe|suv|truck|van|roadster|wagon|prius)\b",
+            family_text,
         )
     )
     complexity = str(complexity or "moderate").lower()
@@ -5618,9 +5607,11 @@ async def _build_hard_surface_cage_spec(
     subject_family = inventory.subject_family if inventory is not None else ""
     subject_complexity = inventory.complexity if inventory is not None else "moderate"
     family_text = f"{subject_family} {job_request.get('prompt', '')}".lower()
-    vehicle_like = any(
-        token in family_text
-        for token in ("vehicle", "automobile", "car", "sedan", "hatchback", "coupe", "suv", "truck", "van", "prius")
+    vehicle_like = bool(
+        re.search(
+            r"\b(?:vehicle|automobile|car|sedan|hatchback|coupe|suv|truck|van|prius)\b",
+            family_text,
+        )
     )
     if vehicle_like:
         min_cage_stations, min_profile_points = 9, 6

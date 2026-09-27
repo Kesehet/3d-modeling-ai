@@ -305,6 +305,64 @@ jobs:
           echo "$DASHBOARD" | jq -e --arg id "$JOB_ID" '.jobs[] | select(.job_id == $id) | .renders | length >= 9' >/dev/null
           echo "Live generic prompt -> research -> SceneSpec -> Blender -> files -> improve regression passed for job $JOB_ID."
 
+      - name: Run live P0 quality benchmark suite
+        if: ${{ contains(github.event.head_commit.message || '', '[live-quality]') }}
+        env:
+          THREED_HOSTNAME: ${{ vars.THREED_HOSTNAME || '3d-modeling-ai.srv1058562.hstgr.cloud' }}
+        run: |
+          set -euo pipefail
+          BASE_URL="https://$THREED_HOSTNAME"
+
+          run_benchmark() {
+            key="$1"
+            prompt="$2"
+            echo "=== Quality benchmark: $key ==="
+
+            payload=$(jq -nc --arg prompt "$prompt" '{prompt:$prompt,intended_use:"rendering"}')
+            JOB_JSON=$(curl --fail --silent --show-error \
+              -H "Content-Type: application/json" \
+              -d "$payload" \
+              "$BASE_URL/dashboard/jobs")
+            JOB_ID=$(echo "$JOB_JSON" | jq -r '.job_id')
+            test -n "$JOB_ID"
+            test "$JOB_ID" != "null"
+            echo "Benchmark job: $JOB_ID"
+
+            HTTP_CODE=$(curl --silent --show-error --max-time 900 \
+              -o "/tmp/quality-$key-generate.json" -w '%{http_code}' \
+              -H "Content-Type: application/json" \
+              -d '{"auto_research":false}' \
+              -X POST "$BASE_URL/dashboard/jobs/$JOB_ID/generate")
+            test "$HTTP_CODE" -ge 200
+            test "$HTTP_CODE" -lt 300
+            jq -e '.status.stage == "generic_rendered_v1"' "/tmp/quality-$key-generate.json" >/dev/null
+            jq -e '.renders | length == 9' "/tmp/quality-$key-generate.json" >/dev/null
+
+            QUALITY_CODE=$(curl --silent --show-error --max-time 600 \
+              -o "/tmp/quality-$key-report.json" -w '%{http_code}' \
+              -H "Content-Type: application/json" \
+              -d "{\"key\":\"$key\"}" \
+              -X POST "$BASE_URL/dashboard/jobs/$JOB_ID/quality-benchmark")
+            cat "/tmp/quality-$key-report.json" | jq . || cat "/tmp/quality-$key-report.json"
+            test "$QUALITY_CODE" -ge 200
+            test "$QUALITY_CODE" -lt 300
+            jq -e '.structural.passed == true' "/tmp/quality-$key-report.json" >/dev/null
+            jq -e '.visual.pass_benchmark == true' "/tmp/quality-$key-report.json" >/dev/null
+            jq -e '.passed == true' "/tmp/quality-$key-report.json" >/dev/null
+
+            curl --fail --silent --show-error \
+              -X DELETE "$BASE_URL/dashboard/jobs/$JOB_ID" >/dev/null
+            echo "PASS: $key"
+          }
+
+          run_benchmark "pikachu" "Create a stylized Pikachu test model with a large head, yellow rounded body, two long pointed ears with black tips, two black eyes, two red cheek circles, two short arms, two feet, and a large lightning-bolt tail."
+          run_benchmark "desk-lamp" "Create a compact retro desk lamp with a round weighted base, a connected vertical stem, a clearly angled neck with a visible pivot joint, and a dome-shaped shade physically attached to the neck. The lamp must read as one connected articulated object."
+          run_benchmark "sneaker" "Create a stylized low-top sneaker with a layered sole, rounded toe box, shaped upper, heel counter, tongue, foot opening, and several visible laces crossing the tongue."
+          run_benchmark "office-chair" "Create a modern ergonomic office chair with a padded seat, upright backrest, two armrests, central gas-lift column, five-spoke wheeled base, and five caster wheels."
+          run_benchmark "quadruped-robot" "Create a complex retro-futuristic quadruped exploration robot with an armored rectangular torso, four articulated two-segment legs with round joints and feet, an offset camera head, twin side sensor pods, top antenna mast, rear battery pack, and one asymmetric tool arm. Use a white, dark gray and safety-orange color scheme."
+
+          echo "All P0 structural + visual quality benchmarks passed."
+
       - name: Remove disposable bootstrap
         if: always()
         env:

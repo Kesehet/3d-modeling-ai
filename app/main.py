@@ -2969,21 +2969,45 @@ async def generate_generic_scene(job_id: str, request: GenericGenerateRequest) -
         recognizable = quality_gate.get("recognizable")
         if recognizable is True:
             next_stage = "generic_initial_recognizable"
+            status = _write_status(
+                root,
+                state="ready",
+                stage=next_stage,
+                quality_gate={
+                    "recognizable": recognizable,
+                    "subject_match_score": quality_gate.get("subject_match_score"),
+                    "recommended_strategy": quality_gate.get("recommended_strategy"),
+                    "summary": quality_gate.get("summary"),
+                },
+            )
         elif quality_gate.get("recommended_strategy") in {"base_mesh", "hybrid"}:
-            next_stage = "generic_needs_strategy_switch"
+            append_history(
+                root,
+                "automatic_strategy_switch",
+                from_strategy="procedural",
+                to_strategy="adaptive_loft",
+                reason=quality_gate.get("summary"),
+            )
+            return await _generate_adaptive_mesh_fallback(
+                job_id,
+                reason=(
+                    quality_gate.get("summary")
+                    or "Primitive blockout failed recognizability and vision requested a mesh/hybrid strategy."
+                ),
+            )
         else:
             next_stage = "generic_needs_refinement"
-        status = _write_status(
-            root,
-            state="ready",
-            stage=next_stage,
-            quality_gate={
-                "recognizable": recognizable,
-                "subject_match_score": quality_gate.get("subject_match_score"),
-                "recommended_strategy": quality_gate.get("recommended_strategy"),
-                "summary": quality_gate.get("summary"),
-            },
-        )
+            status = _write_status(
+                root,
+                state="ready",
+                stage=next_stage,
+                quality_gate={
+                    "recognizable": recognizable,
+                    "subject_match_score": quality_gate.get("subject_match_score"),
+                    "recommended_strategy": quality_gate.get("recommended_strategy"),
+                    "summary": quality_gate.get("summary"),
+                },
+            )
 
     build["status"] = status
     build["quality_gate"] = quality_gate
@@ -3003,12 +3027,15 @@ async def refine_generic_scene(job_id: str, request: GenericRefineRequest) -> di
             existing_status = json.loads(status_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             existing_status = {}
-        if existing_status.get("stage") == "generic_needs_strategy_switch":
-            raise HTTPException(
-                status_code=409,
-                detail=(
-                    "The active primitive SceneSpec failed the recognizability gate. "
-                    "Further primitive refinement is disabled; this job needs a mesh/hybrid strategy."
+        if existing_status.get("stage") in {
+            "generic_needs_strategy_switch",
+            "adaptive_mesh_needs_refinement",
+        }:
+            return await _generate_adaptive_mesh_fallback(
+                job_id,
+                reason=(
+                    str((existing_status.get("quality_gate") or {}).get("summary") or "")
+                    or "The current model is not recognizable enough; continue with adaptive mesh reconstruction."
                 ),
             )
         if existing_status.get("stage") == "generic_quality_unverified":

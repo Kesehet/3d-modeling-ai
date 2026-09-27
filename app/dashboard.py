@@ -13,7 +13,7 @@ from .history import append_history
 
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
 PUBLIC_ARTIFACT_CATEGORIES = {"references", "renders", "scene", "exports"}
-DASHBOARD_UI_VERSION = "live-model-viewer-v1"
+DASHBOARD_UI_VERSION = "live-model-viewer-v2"
 
 # A single AI/Blender stage should never sit untouched this long. Long-running
 # requests refresh status as they move between stages; anything older is an
@@ -404,7 +404,7 @@ def dashboard_page() -> HTMLResponse:
 <script type="module" src="https://ajax.googleapis.com/ajax/libs/model-viewer/4.3.1/model-viewer.min.js"></script>
 <style>
 :root{--bg:#f6f7f9;--card:#fff;--line:#e5e7eb;--text:#172033;--muted:#687386;--blue:#2563eb;--green:#15803d;--red:#b42318;--shadow:0 8px 24px rgba(15,23,42,.08)}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 Inter,system-ui,-apple-system,"Segoe UI",sans-serif}
+*{box-sizing:border-box}[hidden]{display:none!important}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 Inter,system-ui,-apple-system,"Segoe UI",sans-serif}
 button,input,select,textarea{font:inherit}button{cursor:pointer}.wrap{max-width:1280px;margin:auto;padding:24px}
 header{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:24px}.brand h1{margin:0;font-size:24px}.brand p{margin:3px 0 0;color:var(--muted)}
 .btn{border:1px solid var(--line);background:#fff;color:var(--text);border-radius:9px;padding:9px 13px;font-weight:650}.btn:hover{background:#f8fafc}.btn.primary{background:var(--blue);color:#fff;border-color:var(--blue)}.btn.danger{border-color:#fecaca;color:#b42318;background:#fff5f5}.btn.danger:hover{background:#fee2e2}
@@ -466,7 +466,7 @@ header{display:flex;align-items:center;justify-content:space-between;gap:16px;ma
 </div>
 
 <script>
-const CLIENT_UI_VERSION="live-model-viewer-v1";
+const CLIENT_UI_VERSION="live-model-viewer-v2";
 const byId=id=>document.getElementById(id);
 const esc=value=>String(value??"").replace(/[&<>"']/g,ch=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[ch]));
 const els={

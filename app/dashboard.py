@@ -309,7 +309,7 @@ function renderDetail(job){
   const quality=job.quality_gate||null;
   const needsMesh=job.stage==="generic_needs_strategy_switch";
   const improvingMesh=job.stage==="adaptive_mesh_needs_refinement";
-  const blocksRefinement=job.stage==="generic_quality_unverified";
+  const retryingQuality=job.stage==="generic_quality_unverified";
   if(quality?.recognizable===false){
     if(needsMesh){
       els.quality.innerHTML='<strong>Primitive model is not recognizable enough.</strong>'+esc(quality.summary||"The primitive blockout does not sufficiently match the requested subject.")+' The next improvement will switch to the adaptive mesh builder.';
@@ -321,8 +321,8 @@ function renderDetail(job){
     }
     els.quality.classList.add("show");
   }else if(job.stage==="generic_quality_unverified"){
-    els.quality.classList.remove("show");
-    els.quality.textContent="";
+    els.quality.innerHTML='<strong>Visual QA needs another pass.</strong>Improve will retry the Qwen/Gemma vision ensemble. If the model is rejected, the job will continue through adaptive mesh reconstruction instead of stopping.';
+    els.quality.classList.add("show");
   }
   els.renders.innerHTML=(job.renders||[]).length
     ? job.renders.map(image=>'<div class="render"><a target="_blank" href="'+renderUrl(job.job_id,image.name,image.mtime)+'"><img loading="lazy" src="'+renderUrl(job.job_id,image.name,image.mtime)+'"></a><div class="render-name">'+esc(image.name)+'</div></div>').join("")
@@ -343,11 +343,11 @@ function renderDetail(job){
     ? files.map(([category,file])=>'<a class="file" download href="'+fileUrl(job.job_id,category,file.name)+'"><b>↓</b>'+esc(file.name)+'</a>').join("")
     : '<span style="color:var(--muted)">No downloadable model files yet.</span>';
   els.json.textContent=JSON.stringify({status:{state:job.state,stage:job.stage,modeling_strategy:job.modeling_strategy,quality_gate:job.quality_gate},references:job.references,latest_vision_images:job.latest_vision_images,qa:job.qa,history:job.history},null,2);
-  els.improve.disabled=busy||!scene.length||blocksRefinement;
+  els.improve.disabled=busy||!scene.length;
   if(!busy){
-    els.improve.textContent=needsMesh?"Build mesh fallback":(improvingMesh?"Improve mesh":"Improve model");
+    els.improve.textContent=retryingQuality?"Retry vision + improve":(needsMesh?"Build mesh fallback":(improvingMesh?"Improve mesh":"Improve model"));
   }
-  els.improve.title=blocksRefinement?"Visual QA is unavailable, so the system cannot safely judge another iteration.":(needsMesh?"Switch from primitive blockout to a reference-driven continuous mesh.":"");
+  els.improve.title=retryingQuality?"Retry strict visual QA; if rejected, switch automatically to reference-driven adaptive mesh reconstruction.":(needsMesh?"Switch from primitive blockout to a reference-driven continuous mesh.":"");
   els.deleteBtn.disabled=busy||job.state==="running";
 }
 async function refresh(){

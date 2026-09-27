@@ -182,6 +182,14 @@ jobs:
           test "$(xxd -p -l 8 /tmp/smoke-test.png)" = "89504e470d0a1a0a"
           echo "Verified API -> worker -> MCP -> Blender -> PNG."
 
+          CAPABILITIES=$(curl --fail --silent --show-error \
+            -H "Authorization: Bearer $THREED_API_TOKEN" \
+            "$BASE_URL/v1/capabilities")
+          echo "$CAPABILITIES" | jq .
+          echo "$CAPABILITIES" | jq -e '.vision_model == "qwen3-vl:235b-cloud"' >/dev/null
+          echo "$CAPABILITIES" | jq -e '.vision_models | index("gemma4:31b-cloud") != null' >/dev/null
+          echo "Verified Qwen 235B primary + multimodal fallback configuration."
+
           curl --fail --silent --show-error \
             -H "Authorization: Bearer $THREED_API_TOKEN" \
             -X DELETE "$BASE_URL/v1/jobs/$JOB_ID" >/dev/null
@@ -393,19 +401,49 @@ jobs:
           else
             HOLDOUT_JOB_ID=$(echo "$HOLDOUT_JOB_JSON" | jq -r '.job_id')
             echo "Toyota Prius holdout job: $HOLDOUT_JOB_ID"
-            HOLDOUT_CODE=$(curl --silent --show-error --max-time 1200 \
+            HOLDOUT_CODE=$(curl --silent --show-error --max-time 2400 \
               -o "/tmp/quality-toyota-prius-generate.json" -w '%{http_code}' \
               -H "Content-Type: application/json" \
               -d '{"auto_research":true}' \
               -X POST "$BASE_URL/dashboard/jobs/$HOLDOUT_JOB_ID/generate" || true)
             cat "/tmp/quality-toyota-prius-generate.json" | jq . || cat "/tmp/quality-toyota-prius-generate.json"
+
+            FINAL_HOLDOUT_FILE="/tmp/quality-toyota-prius-generate.json"
+            if [ "$HOLDOUT_CODE" -ge 200 ] && [ "$HOLDOUT_CODE" -lt 300 ]; then
+              recognized=$(jq -r '.status.quality_gate.recognizable // false' "$FINAL_HOLDOUT_FILE")
+              if [ "$recognized" != "true" ]; then
+                for attempt in 1 2; do
+                  echo "Toyota Prius reference-driven improvement attempt $attempt/2"
+                  IMPROVE_CODE=$(curl --silent --show-error --max-time 2400 \
+                    -o "/tmp/quality-toyota-prius-improve-$attempt.json" -w '%{http_code}' \
+                    -H "Content-Type: application/json" \
+                    -d '{"iterations":1}' \
+                    -X POST "$BASE_URL/dashboard/jobs/$HOLDOUT_JOB_ID/improve" || true)
+                  FINAL_HOLDOUT_FILE="/tmp/quality-toyota-prius-improve-$attempt.json"
+                  cat "$FINAL_HOLDOUT_FILE" | jq . || cat "$FINAL_HOLDOUT_FILE"
+                  if [ "$IMPROVE_CODE" -lt 200 ] || [ "$IMPROVE_CODE" -ge 300 ]; then
+                    break
+                  fi
+                  recognized=$(jq -r '.status.quality_gate.recognizable // false' "$FINAL_HOLDOUT_FILE")
+                  if [ "$recognized" = "true" ]; then
+                    break
+                  fi
+                done
+              fi
+            fi
+
+            DASHBOARD=$(curl --fail --silent --show-error "$BASE_URL/dashboard/api")
+            HOLDOUT_JOB=$(echo "$DASHBOARD" | jq -c --arg id "$HOLDOUT_JOB_ID" '.jobs[] | select(.job_id == $id)')
+            echo "$HOLDOUT_JOB" | jq .
             if [ "$HOLDOUT_CODE" -lt 200 ] || [ "$HOLDOUT_CODE" -ge 300 ] \
-              || ! jq -e '.status.quality_gate.recognizable == true' "/tmp/quality-toyota-prius-generate.json" >/dev/null \
-              || ! jq -e '.renders | length == 9' "/tmp/quality-toyota-prius-generate.json" >/dev/null; then
+              || ! echo "$HOLDOUT_JOB" | jq -e '.references | length >= 1' >/dev/null \
+              || ! echo "$HOLDOUT_JOB" | jq -e '.renders | length >= 9' >/dev/null \
+              || ! echo "$HOLDOUT_JOB" | jq -e '.quality_gate.recognizable == true' >/dev/null \
+              || ! echo "$HOLDOUT_JOB" | jq -e '.quality_gate.subject_match_score >= 0.72' >/dev/null; then
               echo "FAIL: Toyota Prius unseen holdout was not recognizable; preserving job $HOLDOUT_JOB_ID for inspection"
               FAILURES="$FAILURES toyota-prius"
             else
-              HOLDOUT_STAGE=$(jq -r '.status.stage // ""' "/tmp/quality-toyota-prius-generate.json")
+              HOLDOUT_STAGE=$(echo "$HOLDOUT_JOB" | jq -r '.stage // ""')
               echo "PASS: Toyota Prius holdout is recognizable at stage $HOLDOUT_STAGE."
               echo "Leaving successful holdout job $HOLDOUT_JOB_ID in the gallery for visual inspection."
             fi

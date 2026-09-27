@@ -37,6 +37,9 @@ class FeatureTask(BaseModel):
     status: FeatureState = "pending"
     attempts: int = Field(default=0, ge=0, le=20)
     accepted_version: int | None = Field(default=None, ge=1)
+    acceptance_verified: bool = False
+    acceptance_score: float = Field(default=0.0, ge=0.0, le=1.0)
+    acceptance_model: str | None = Field(default=None, max_length=120)
     last_summary: str = Field(default="", max_length=1000)
     last_error: str = Field(default="", max_length=1000)
 
@@ -45,7 +48,9 @@ class FeatureEvaluation(BaseModel):
     feature_id: str = Field(min_length=1, max_length=80)
     passed: bool = False
     visible: bool = False
+    criteria_satisfied: bool = False
     confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    reference_match_score: float = Field(default=0.0, ge=0.0, le=1.0)
     regression_detected: bool = False
     summary: str = Field(default="", max_length=1600)
     problems: list[str] = Field(default_factory=list, max_length=12)
@@ -354,6 +359,9 @@ def finish_feature(
     summary: str = "",
     error: str = "",
     max_attempts: int = 3,
+    verified: bool = False,
+    acceptance_score: float = 0.0,
+    acceptance_model: str | None = None,
 ) -> FeaturePlan | None:
     plan = load_feature_plan(root)
     if plan is None:
@@ -364,19 +372,54 @@ def finish_feature(
 
     task.last_summary = summary[:1000]
     task.last_error = error[:1000]
-    if accepted:
+    if accepted and verified:
         task.status = "accepted"
         task.accepted_version = version
+        task.acceptance_verified = True
+        task.acceptance_score = max(0.0, min(1.0, float(acceptance_score)))
+        task.acceptance_model = acceptance_model
     elif task.attempts >= max_attempts:
         task.status = "blocked"
     else:
         task.status = "retry"
+
+    if not (accepted and verified):
+        task.accepted_version = None
+        task.acceptance_verified = False
+        task.acceptance_score = 0.0
+        task.acceptance_model = None
 
     if plan.active_feature_id == feature_id:
         plan.active_feature_id = None
     refresh_feature_states(plan)
     save_feature_plan(root, plan)
     return plan
+
+
+def invalidate_unverified_acceptances(root: Path) -> int:
+    """Requeue acceptances created before strict reference-based feature QA."""
+    plan = load_feature_plan(root)
+    if plan is None:
+        return 0
+
+    reset = 0
+    for feature in plan.features:
+        if feature.status == "accepted" and not feature.acceptance_verified:
+            feature.status = "retry"
+            feature.accepted_version = None
+            feature.acceptance_score = 0.0
+            feature.acceptance_model = None
+            feature.last_error = (
+                "Requeued because this feature was accepted before strict "
+                "reference-based acceptance verification was enabled."
+            )
+            reset += 1
+
+    if reset:
+        plan.active_feature_id = None
+        refresh_feature_states(plan)
+        save_feature_plan(root, plan)
+    return reset
 
 
 def feature_plan_summary(root: Path) -> dict | None:
@@ -395,17 +438,29 @@ def feature_plan_summary(root: Path) -> dict | None:
         "next_feature_id": next_task.id if next_task else None,
         "counts": counts,
         "complete": all(
-            feature.status in {"accepted", "blocked", "failed"}
+            (
+                feature.status == "accepted"
+                and feature.acceptance_verified
+            )
+            or feature.status in {"blocked", "failed"}
             for feature in plan.features
         ),
         "required_complete": all(
-            (not feature.required) or feature.status == "accepted"
+            (not feature.required)
+            or (
+                feature.status == "accepted"
+                and feature.acceptance_verified
+            )
             for feature in plan.features
         ),
         "required_unresolved": [
             feature.id
             for feature in plan.features
-            if feature.required and feature.status != "accepted"
+            if feature.required
+            and not (
+                feature.status == "accepted"
+                and feature.acceptance_verified
+            )
         ],
         "features": [feature.model_dump() for feature in plan.features],
         "updated_at": plan.updated_at,

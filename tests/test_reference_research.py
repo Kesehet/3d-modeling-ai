@@ -180,3 +180,24 @@ def test_metadata_identity_supports_named_model_without_invented_generation():
 
     assert _metadata_supports_reference_identity(plan, matching) is True
     assert _metadata_supports_reference_identity(plan, sibling) is False
+
+
+
+def test_reference_verifier_recovers_missing_accept_flag():
+    records = [{"stored_name": "candidate-a.jpg"}]
+    payload = {
+        "decisions": [
+            {
+                "stored_name": "candidate-a.jpg",
+                "match_score": 0.91,
+                "exact_identity_match": True,
+                "useful_for_geometry": True,
+                "reason": "Exact requested subject and useful three-quarter view.",
+            }
+        ]
+    }
+
+    normalized = _normalize_reference_pack_payload(payload, records)
+    pack = ReferencePackDecision.model_validate(normalized)
+
+    assert pack.decisions[0].accept is True

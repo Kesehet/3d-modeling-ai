@@ -59,9 +59,12 @@ def reconcile_running_status(
         else None
     )
 
-    if not force:
-        if age_seconds is not None and age_seconds <= RUNNING_JOB_STALE_AFTER.total_seconds():
-            return status
+    if (
+        not force
+        and age_seconds is not None
+        and age_seconds <= RUNNING_JOB_STALE_AFTER.total_seconds()
+    ):
+        return status
 
     previous_stage = str(status.get("stage") or "unknown")
     if force:

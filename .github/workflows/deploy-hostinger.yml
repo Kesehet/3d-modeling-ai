@@ -286,7 +286,7 @@ jobs:
           jq -e '(.status.stage == "generic_refinement_complete") or (.status.stage == "generic_refinement_preserved_previous")' /tmp/generic-improve.json >/dev/null
           jq -e '((.iterations | length) >= 1) or (.rejected != null)' /tmp/generic-improve.json >/dev/null
 
-          if jq -e '(.iterations | length) >= 1' /tmp/generic-improve.json >/dev/null; then
+          if jq -e '((.iterations | length) >= 1) and (.iterations[-1].accepted == true)' /tmp/generic-improve.json >/dev/null; then
             curl --fail --silent --show-error --max-time 30 \
               "$BASE_URL/dashboard/renders/$JOB_ID/model-v2-front.png" \
               -o /tmp/model-v2-front.png

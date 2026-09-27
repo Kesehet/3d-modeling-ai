@@ -4667,7 +4667,11 @@ async def _build_generic_scene_spec(job_id: str, auto_research: bool) -> Generic
         f"Coordinated visible-feature plan: {json.dumps(feature_plan_context, ensure_ascii=False)}\n"
         f"Spatial/modeling guidance:\n{_generic_spatial_guidance(str(job_request.get('prompt') or ''))}\n"
         "Create the complete SceneSpec. Favor visual recognizability and the reference evidence over a "
-        "small object count. You may use as much of the available object budget as the subject genuinely needs."
+        "small object count. You may use as much of the available object budget as the subject genuinely needs. "
+        "IMPORTANT OWNERSHIP RULE: any FeaturePlan entry with build_mode=component_job is owned by its isolated "
+        "child job. Do NOT author that component's final geometry in this parent SceneSpec and do not leave a crude "
+        "placeholder that would survive into the final model. Shape the supporting parent/mounting region so the "
+        "frozen child component can be installed later, but reserve the component geometry itself for the child."
     )
     reference_images, reference_labels = _collect_images(
         root,
@@ -5048,9 +5052,12 @@ async def _build_adaptive_loft_spec(
         "clockwise order when viewed along the positive axis; use the same semantic perimeter order in every "
         "section. Use 5-10 sections to capture major silhouette changes. Coordinates are Blender units and "
         "must remain roughly within -8..8. The loft is the main continuous body mass. Put visually separate "
-        "identity-critical parts that should not be fused into the main silhouette into attachments using the "
-        "safe primitive schema (for example wheels, handles, lenses, windows, feet, knobs, antennas). "
-        "Do not approximate the whole subject with attachments; the loft must carry the primary silhouette. "
+        "identity-critical parts that are explicitly IN-PLACE features and should not be fused into the main silhouette "
+        "into attachments using the safe primitive schema (for example handles, lenses, windows, feet, knobs, antennas). "
+        "FeaturePlan entries with build_mode=component_job are owned by isolated child jobs: do NOT create those parts "
+        "as attachments or placeholders here. Leave the supporting/mounting region suitable for later installation of "
+        "the frozen child artifact. Do not approximate the whole subject with attachments; the loft must carry the "
+        "primary silhouette. "
         "Front-facing subject direction is negative Y and Z is up. Favor reference geometry and recognizability "
         "over cosmetic detail."
     )
@@ -5284,7 +5291,9 @@ async def _revise_adaptive_loft_spec(
         "per section. The loft must remain the main continuous body. Use attachments for visually separate parts. "
         "Front is negative Y and Z is up. A feature sub-job may be supplied. When present, treat it as the primary "
         "owner for this pass: make the requested feature visibly better while preserving unrelated accepted geometry. "
-        "Respect its target_regions, owner_scope, dependencies and acceptance_criteria. Return JSON only matching the schema."
+        "Respect its target_regions, owner_scope, dependencies and acceptance_criteria. Never add, recreate or reshape "
+        "geometry owned by any FeaturePlan entry whose build_mode=component_job; those parts are frozen/installed by the "
+        "component assembler, not by this mesh revision worker. Return JSON only matching the schema."
     )
     prompt = (
         f"Exact user request: {job_request.get('prompt', '')}\n"

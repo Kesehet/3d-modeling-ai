@@ -20,6 +20,7 @@ from PIL import Image, UnidentifiedImageError
 from pydantic import BaseModel, Field, ValidationError
 
 from .builders import pikachu_script
+from .cage_edits import CageEditAction, apply_cage_edit_action
 from .component_assembly import component_assembly_script
 from .config import (
     JOBS_ROOT,
@@ -49,6 +50,7 @@ from .feature_tasks import (
     load_feature_plan,
     mark_component_ready,
     normalize_feature_plan_payload,
+    record_feature_progress,
     save_feature_plan,
 )
 from .generic_builder import generic_scene_script

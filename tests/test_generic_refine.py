@@ -1,6 +1,9 @@
 from app.main import (
     GenericRefineRequest,
     GenericSceneSpec,
+    VisionAnalyzeRequest,
+    _collect_images,
+    _normalize_refinement_comparison_payload,
     _scene_spec_regression_reasons,
 )
 
@@ -62,3 +65,37 @@ def test_regression_guard_allows_surgical_changes():
         "dome shade", "bulb housing", "shade rim",
     ], rods=2)
     assert _scene_spec_regression_reasons(current, revised) == []
+
+
+
+def test_generic_visual_refinement_collects_only_latest_model_version(tmp_path):
+    (tmp_path / "references").mkdir()
+    (tmp_path / "renders").mkdir()
+    for name in (
+        "model-v1-front.png",
+        "model-v1-back.png",
+        "model-v2-front.png",
+        "model-v2-back.png",
+        "pikachu-front.png",
+    ):
+        (tmp_path / "renders" / name).write_bytes(name.encode("utf-8"))
+
+    _, labels = _collect_images(
+        tmp_path,
+        VisionAnalyzeRequest(
+            stage="generic_visual_refinement",
+            include_references=False,
+            include_renders=True,
+            max_images=16,
+        ),
+    )
+    assert labels
+    assert all("model-v2-" in label for label in labels)
+
+
+def test_refinement_comparison_defaults_to_reject_when_unclear():
+    normalized = _normalize_refinement_comparison_payload(
+        {"summary": "Unclear result", "regressions": "Lost the tail"}
+    )
+    assert normalized["candidate_is_better"] is False
+    assert normalized["regressions"] == ["Lost the tail"]

@@ -5121,6 +5121,16 @@ def _normalize_hard_surface_cage_payload(data: object, fallback_title: str) -> d
         raise TypeError("Hard-surface cage response is not a JSON object.")
 
     normalized = dict(data)
+    station_keys = (
+        "stations",
+        "sections",
+        "profiles",
+        "slices",
+        "cross_sections",
+        "cage_stations",
+        "longitudinal_stations",
+        "control_sections",
+    )
     for wrapper in (
         "hard_surface_cage_spec",
         "hard_surface_cage",
@@ -5130,11 +5140,11 @@ def _normalize_hard_surface_cage_payload(data: object, fallback_title: str) -> d
         "mesh",
         "spec",
         "result",
+        "output",
+        "data",
     ):
         candidate = normalized.get(wrapper)
-        if isinstance(candidate, dict) and any(
-            key in candidate for key in ("stations", "sections", "profiles", "slices")
-        ):
+        if isinstance(candidate, dict) and any(key in candidate for key in station_keys):
             normalized = dict(candidate)
             break
 
@@ -5175,14 +5185,14 @@ def _normalize_hard_surface_cage_payload(data: object, fallback_title: str) -> d
     normalized["smooth"] = bool(normalized.get("smooth", True))
     normalized["presentation_base"] = bool(normalized.get("presentation_base", True))
 
-    raw_stations = (
-        normalized.get("stations")
-        or normalized.get("sections")
-        or normalized.get("profiles")
-        or normalized.get("slices")
-    )
+    raw_stations = None
+    for key in station_keys:
+        candidate = normalized.get(key)
+        if candidate:
+            raw_stations = candidate
+            break
     if isinstance(raw_stations, dict):
-        for key in ("items", "stations", "sections", "profiles", "slices"):
+        for key in ("items", *station_keys):
             value = raw_stations.get(key)
             if isinstance(value, list):
                 raw_stations = value
@@ -5193,26 +5203,74 @@ def _normalize_hard_surface_cage_payload(data: object, fallback_title: str) -> d
     if not isinstance(raw_stations, list):
         raise TypeError("Hard-surface cage stations could not be normalized to a list.")
 
+    def resample_profile(profile: list[list[float]], target: int) -> list[list[float]]:
+        if len(profile) == target:
+            return [list(point) for point in profile]
+        if len(profile) < 2:
+            return profile
+        result: list[list[float]] = []
+        for index in range(target):
+            t = index * (len(profile) - 1) / (target - 1)
+            left = int(t)
+            right = min(len(profile) - 1, left + 1)
+            mix = t - left
+            result.append(
+                [
+                    profile[left][0] * (1.0 - mix) + profile[right][0] * mix,
+                    profile[left][1] * (1.0 - mix) + profile[right][1] * mix,
+                ]
+            )
+        return result
+
     stations: list[dict] = []
-    for raw in raw_stations[:16]:
+    for raw in raw_stations[:20]:
         if not isinstance(raw, dict):
             continue
         raw_position = raw.get("position")
         if raw_position is None:
-            raw_position = raw.get("axis_position", raw.get("offset", raw.get(normalized["axis"])))
+            for key in ("axis_position", "offset", "distance", "station", normalized["axis"]):
+                if raw.get(key) is not None:
+                    raw_position = raw.get(key)
+                    break
         try:
             position = max(-10.0, min(10.0, float(raw_position)))
         except (TypeError, ValueError):
             continue
 
-        raw_profile = raw.get("profile") or raw.get("points") or raw.get("contour")
+        raw_profile = None
+        for key in (
+            "profile",
+            "half_profile",
+            "points",
+            "contour",
+            "vertices",
+            "control_points",
+            "cross_section",
+        ):
+            candidate = raw.get(key)
+            if candidate is not None:
+                raw_profile = candidate
+                break
+
+        if raw_profile is None:
+            widths = raw.get("half_widths") or raw.get("widths")
+            heights = raw.get("heights") or raw.get("z_values")
+            if isinstance(widths, list) and isinstance(heights, list):
+                raw_profile = list(zip(widths, heights))
+
         if isinstance(raw_profile, dict):
-            raw_profile = raw_profile.get("points") or raw_profile.get("profile")
+            raw_profile = (
+                raw_profile.get("points")
+                or raw_profile.get("profile")
+                or raw_profile.get("vertices")
+                or raw_profile.get("control_points")
+            )
         if not isinstance(raw_profile, list):
             continue
 
         profile: list[list[float]] = []
-        for point in raw_profile[:8]:
+        saw_negative_width = False
+        for point in raw_profile[:12]:
             if isinstance(point, dict):
                 width = (
                     point.get("half_width")
@@ -5223,21 +5281,37 @@ def _normalize_hard_surface_cage_payload(data: object, fallback_title: str) -> d
                     if normalized["axis"] == "y"
                     else point.get("y")
                 )
-                height = point.get("height") if point.get("height") is not None else point.get("z")
+                height = (
+                    point.get("height")
+                    if point.get("height") is not None
+                    else point.get("z")
+                    if point.get("z") is not None
+                    else point.get("v")
+                )
             elif isinstance(point, (list, tuple)) and len(point) >= 2:
                 width, height = point[0], point[1]
             else:
                 continue
             try:
-                w = max(0.0, min(10.0, float(width)))
+                raw_width = float(width)
                 z = max(-10.0, min(10.0, float(height)))
             except (TypeError, ValueError):
                 continue
-            profile.append([w, z])
+            saw_negative_width = saw_negative_width or raw_width < 0
+            profile.append([max(-10.0, min(10.0, raw_width)), z])
 
-        if len(profile) < 4:
+        if saw_negative_width:
+            # Some models still emit a full symmetric contour. Convert it into
+            # the positive half a human would actually model before Mirror.
+            positive = [[abs(width), height] for width, height in profile if width >= -0.001]
+            if len(positive) < 3:
+                positive = [[abs(width), height] for width, height in profile]
+            positive.sort(key=lambda point: point[1])
+            profile = positive
+
+        if len(profile) < 3:
             continue
-        # A human half-cage closes at the centerline before mirroring.
+        profile = [[max(0.0, point[0]), point[1]] for point in profile]
         profile[0][0] = 0.0
         profile[-1][0] = 0.0
         stations.append({"position": position, "profile": profile})
@@ -5249,20 +5323,48 @@ def _normalize_hard_surface_cage_payload(data: object, fallback_title: str) -> d
             continue
         deduped.append(station)
 
-    if len(deduped) < 4:
-        raise ValueError("Hard-surface cage needs at least four distinct stations.")
+    # Three sections are common in terse model output. A human would add loop
+    # cuts between them, so synthesize midpoint stations instead of throwing
+    # away the whole plan.
+    if 2 <= len(deduped) < 4:
+        expanded: list[dict] = []
+        for index, station in enumerate(deduped[:-1]):
+            nxt = deduped[index + 1]
+            expanded.append(station)
+            target_size = max(4, min(8, max(len(station["profile"]), len(nxt["profile"]))))
+            a = resample_profile(station["profile"], target_size)
+            b = resample_profile(nxt["profile"], target_size)
+            expanded.append(
+                {
+                    "position": (station["position"] + nxt["position"]) / 2.0,
+                    "profile": [
+                        [(pa[0] + pb[0]) / 2.0, (pa[1] + pb[1]) / 2.0]
+                        for pa, pb in zip(a, b)
+                    ],
+                }
+            )
+        expanded.append(deduped[-1])
+        deduped = expanded
 
-    # Blender topology needs consistent rows. Keep the dominant profile size.
-    sizes: dict[int, int] = {}
+    if len(deduped) < 4:
+        raise ValueError("Hard-surface cage needs at least two usable reference stations.")
+
+    # Resample every profile to one stable row count instead of dropping valid
+    # stations just because a model used five points in one section and six in another.
+    target_size = max(4, min(8, round(sum(len(s["profile"]) for s in deduped) / len(deduped))))
     for station in deduped:
-        sizes[len(station["profile"])] = sizes.get(len(station["profile"]), 0) + 1
-    profile_size = max(sizes, key=lambda size: (sizes[size], size))
-    deduped = [station for station in deduped if len(station["profile"]) == profile_size]
-    if len(deduped) < 4:
-        raise ValueError("Hard-surface cage needs four stations with a consistent profile size.")
-    normalized["stations"] = deduped
+        station["profile"] = resample_profile(station["profile"], target_size)
+        station["profile"][0][0] = 0.0
+        station["profile"][-1][0] = 0.0
+    normalized["stations"] = deduped[:16]
 
-    raw_cutters = normalized.get("cutters") or normalized.get("boolean_cutters") or normalized.get("cutouts") or []
+    raw_cutters = (
+        normalized.get("cutters")
+        or normalized.get("boolean_cutters")
+        or normalized.get("cutouts")
+        or normalized.get("openings")
+        or []
+    )
     if isinstance(raw_cutters, dict):
         raw_cutters = list(raw_cutters.values())
     cutters: list[dict] = []
@@ -5296,7 +5398,12 @@ def _normalize_hard_surface_cage_payload(data: object, fallback_title: str) -> d
                 continue
     normalized["cutters"] = cutters
 
-    attachments = normalized.get("attachments") or normalized.get("separate_parts") or normalized.get("details") or []
+    attachments = (
+        normalized.get("attachments")
+        or normalized.get("separate_parts")
+        or normalized.get("details")
+        or []
+    )
     if isinstance(attachments, dict):
         attachments = list(attachments.values())
     if not isinstance(attachments, list):
@@ -5307,7 +5414,6 @@ def _normalize_hard_surface_cage_payload(data: object, fallback_title: str) -> d
     )
     normalized["attachments"] = normalized_attachments["objects"]
     return normalized
-
 
 def _active_hard_surface_cage_spec(
     root: Path,
@@ -5378,7 +5484,14 @@ async def _build_hard_surface_cage_spec(
         "Use attachments only for separate IN-PLACE parts. Any feature whose build_mode=component_job belongs to an "
         "isolated child job and must NOT be faked as an attachment. Preserve accepted/best geometry. If a current cage "
         "is supplied, revise it rather than starting over unless its topology is fundamentally unsuitable. Front is "
-        "negative Y and Z is up. Favor proportion, silhouette and major construction lines over surface decoration."
+        "negative Y and Z is up. Favor proportion, silhouette and major construction lines over surface decoration. "
+        "Emit AT LEAST 5 stations. Example SHAPE ONLY (not object-specific): "
+        "{\"stations\":[{\"position\":-3,\"profile\":[[0,-0.5],[1,-0.4],[1,0.4],[0.6,1.0],[0,1.2]]},"
+        "{\"position\":-1,\"profile\":[[0,-0.5],[1.1,-0.4],[1.0,0.5],[0.7,1.1],[0,1.3]]},"
+        "{\"position\":0,\"profile\":[[0,-0.5],[1.1,-0.4],[1.0,0.5],[0.7,1.1],[0,1.3]]},"
+        "{\"position\":1,\"profile\":[[0,-0.5],[1.1,-0.4],[1.0,0.5],[0.7,1.1],[0,1.3]]},"
+        "{\"position\":3,\"profile\":[[0,-0.5],[1,-0.4],[1,0.4],[0.6,1.0],[0,1.2]]}]}. "
+        "Use that structure, but choose all coordinates from the actual references."
     )
     prompt = (
         f"Exact user request: {job_request.get('prompt', '')}\n"
@@ -5406,6 +5519,20 @@ async def _build_hard_surface_cage_spec(
                 schema=HardSurfaceCageSpec.model_json_schema(),
                 temperature=0.0,
                 num_predict=8192,
+            )
+            _write_llm_log(
+                root,
+                "hard-surface-cage-raw",
+                {
+                    "job_id": job_id,
+                    "model": candidate_model,
+                    "endpoint": result.endpoint,
+                    "usage": result.usage,
+                    "images": labels,
+                    "reason": reason,
+                    "raw": result.data,
+                    "created_at": datetime.now(UTC).isoformat(),
+                },
             )
             normalized = _normalize_hard_surface_cage_payload(
                 result.data,
@@ -5593,13 +5720,33 @@ async def _generate_hard_surface_cage(
             via="hard_surface_cage",
         )
 
-    spec = await _build_hard_surface_cage_spec(
-        job_id,
-        reason=reason,
-        feature_task=feature_task,
-    )
-    version = 1 + len(list((root / "scene").glob("model-v*.blend")))
-    build = await _execute_hard_surface_cage(job_id, spec, version=version)
+    try:
+        spec = await _build_hard_surface_cage_spec(
+            job_id,
+            reason=reason,
+            feature_task=feature_task,
+        )
+        version = 1 + len(list((root / "scene").glob("model-v*.blend")))
+        build = await _execute_hard_surface_cage(job_id, spec, version=version)
+    except Exception as exc:
+        if feature_task is not None:
+            detail = str(exc.detail) if isinstance(exc, HTTPException) else str(exc)
+            finish_feature(
+                root,
+                feature_task.id,
+                accepted=False,
+                version=None,
+                error=detail,
+            )
+            append_history(
+                root,
+                "feature_subjob_failed",
+                feature_id=feature_task.id,
+                feature_name=feature_task.name,
+                via="hard_surface_cage",
+                error=detail,
+            )
+        raise
 
     feature_evaluation: dict | None = None
     comparison: dict | None = None

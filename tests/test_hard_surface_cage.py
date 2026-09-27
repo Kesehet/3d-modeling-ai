@@ -53,7 +53,7 @@ def test_hard_surface_cage_normalizes_human_style_half_profiles():
     assert spec.cutters[0].shape == "cylinder"
 
 
-def test_hard_surface_cage_drops_inconsistent_profile_rows():
+def test_hard_surface_cage_resamples_inconsistent_profile_rows():
     payload = _normalize_hard_surface_cage_payload(
         {
             "stations": [
@@ -69,5 +69,35 @@ def test_hard_surface_cage_drops_inconsistent_profile_rows():
 
     spec = HardSurfaceCageSpec.model_validate(payload)
 
-    assert len(spec.stations) == 4
+    assert len(spec.stations) == 5
     assert all(len(station.profile) == 4 for station in spec.stations)
+
+
+def test_hard_surface_cage_expands_three_terse_cross_sections():
+    payload = _normalize_hard_surface_cage_payload(
+        {
+            "output": {
+                "length_axis": "y",
+                "cross_sections": [
+                    {
+                        "axis_position": -3,
+                        "half_profile": [[0, -0.5], [1.0, -0.3], [0.8, 0.7], [0, 1.1]],
+                    },
+                    {
+                        "axis_position": 0,
+                        "half_profile": [[0, -0.5], [1.2, -0.3], [0.9, 0.9], [0, 1.4]],
+                    },
+                    {
+                        "axis_position": 3,
+                        "half_profile": [[0, -0.5], [1.0, -0.3], [0.8, 0.7], [0, 1.1]],
+                    },
+                ],
+            }
+        },
+        "object",
+    )
+
+    spec = HardSurfaceCageSpec.model_validate(payload)
+
+    assert len(spec.stations) == 5
+    assert [station.position for station in spec.stations] == [-3.0, -1.5, 0.0, 1.5, 3.0]

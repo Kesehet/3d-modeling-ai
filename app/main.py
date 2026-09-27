@@ -502,7 +502,7 @@ class GenericRefineRequest(BaseModel):
 
 class SceneObjectSpec(BaseModel):
     name: str = Field(min_length=1, max_length=80)
-    shape: Literal["sphere", "cube", "cylinder", "cone", "torus", "rod"]
+    shape: Literal["sphere", "cube", "cylinder", "cone", "torus", "rod", "beam", "frustum", "wedge"]
     location: list[float] = Field(min_length=3, max_length=3)
     scale: list[float] = Field(min_length=3, max_length=3)
     rotation_deg: list[float] = Field(default_factory=lambda: [0.0, 0.0, 0.0], min_length=3, max_length=3)
@@ -530,7 +530,7 @@ def _normalize_scene_spec_payload(data: object, fallback_title: str) -> dict:
     normalized.setdefault("rationale", "")
     normalized.setdefault("presentation_base", True)
 
-    allowed_shapes = {"sphere", "cube", "cylinder", "cone", "torus", "rod"}
+    allowed_shapes = {"sphere", "cube", "cylinder", "cone", "torus", "rod", "beam", "frustum", "wedge"}
     shape_aliases = {
         "ellipsoid": "sphere",
         "ball": "sphere",
@@ -544,6 +544,11 @@ def _normalize_scene_spec_payload(data: object, fallback_title: str) -> dict:
         "beam": "rod",
         "limb": "rod",
         "bar": "rod",
+        "box_beam": "beam",
+        "rectangular_beam": "beam",
+        "truncated_cone": "frustum",
+        "dome_shade": "frustum",
+        "shoe_wedge": "wedge",
     }
 
     raw_objects = normalized.get("objects")
@@ -791,14 +796,201 @@ def _enforce_character_visibility(data: dict, prompt: str) -> dict:
             [body_loc[0] + body_scale[0] * 1.68, y, body_loc[2] + body_scale[2] * 1.06],
         ]
         for index, item in enumerate(tail_parts[:3]):
-            item["shape"] = "rod"
+            item["shape"] = "beam"
             item["start"] = points[index]
             item["end"] = points[index + 1]
-            item["radius"] = max(0.06, body_scale[0] * 0.11)
+            item["radius"] = max(0.08, body_scale[0] * 0.14)
             item["location"] = points[index]
             item["scale"] = [1.0, 1.0, 1.0]
             item["rotation_deg"] = [0.0, 0.0, 0.0]
             item["color"] = "#FACC15"
+
+    return data
+
+
+def _enforce_subject_geometry(data: dict, prompt: str) -> dict:
+    """Arrange semantic parts into coherent assemblies for common object families."""
+    objects = data.get("objects")
+    if not isinstance(objects, list):
+        return data
+    text = prompt.lower()
+
+    def clean(item: dict) -> str:
+        return str(item.get("name") or "").lower().replace("_", " ").replace("-", " ")
+
+    def matching(*terms: str) -> list[dict]:
+        return [
+            item for item in objects
+            if isinstance(item, dict) and any(term in clean(item) for term in terms)
+        ]
+
+    def first(*terms: str) -> dict | None:
+        found = matching(*terms)
+        return found[0] if found else None
+
+    def reset(item: dict, shape: str, location: list[float], scale: list[float], color: str | None = None) -> None:
+        item["shape"] = shape
+        item["location"] = location
+        item["scale"] = scale
+        item["rotation_deg"] = [0.0, 0.0, 0.0]
+        item["start"] = None
+        item["end"] = None
+        item["radius"] = None
+        if color:
+            item["color"] = color
+
+    def place(
+        item: dict | None,
+        shape: str,
+        location: list[float],
+        scale: list[float],
+        color: str | None = None,
+    ) -> None:
+        if item is not None:
+            reset(item, shape, location, scale, color)
+
+    def link(
+        item: dict | None,
+        start: list[float],
+        end: list[float],
+        radius: float,
+        color: str | None = None,
+        *,
+        beam: bool = False,
+    ) -> None:
+        if item is None:
+            return
+        item["shape"] = "beam" if beam else "rod"
+        item["start"] = start
+        item["end"] = end
+        item["radius"] = radius
+        item["location"] = start
+        item["scale"] = [1.0, 1.0, 1.0]
+        item["rotation_deg"] = [0.0, 0.0, 0.0]
+        if color:
+            item["color"] = color
+
+    if "lamp" in text:
+        base = first("base")
+        stem = first("stem", "upright", "post")
+        joint = first("joint", "pivot", "hinge")
+        neck = first("neck", "boom", "angled arm")
+        shade = first("shade", "dome", "hood", "lamp head", "lamphead")
+
+        place(base, "cylinder", [0.0, 0.0, 0.28], [1.25, 1.05, 0.28], "#3B3F46")
+        stem_top = [0.0, 0.0, 2.65]
+        shade_top = [1.35, 0.0, 3.85]
+        link(stem, [0.0, 0.0, 0.46], stem_top, 0.14, "#737A84")
+        place(joint, "sphere", stem_top, [0.28, 0.28, 0.28], "#3B3F46")
+        link(neck, stem_top, shade_top, 0.13, "#737A84")
+        place(shade, "frustum", [1.35, 0.0, 3.33], [0.82, 0.82, 0.52], "#F97316")
+
+    if "sneaker" in text or "shoe" in text:
+        soles = matching("outsole", "midsole", "sole")
+        for index, item in enumerate(soles[:3]):
+            place(
+                item,
+                "cube",
+                [0.0, 0.0, 0.26 + index * 0.12],
+                [2.35 - index * 0.08, 0.76 - index * 0.03, 0.15],
+                "#F4F4F2" if index == 0 else "#C9CDD3",
+            )
+        place(first("upper", "shoe body"), "wedge", [-0.15, 0.0, 0.88], [1.85, 0.68, 0.62], "#2563EB")
+        place(first("toe"), "sphere", [1.62, -0.02, 0.75], [0.78, 0.67, 0.42], "#2563EB")
+        place(first("heel"), "cube", [-1.62, 0.0, 1.00], [0.42, 0.66, 0.72], "#2563EB")
+        tongue = first("tongue")
+        place(tongue, "cube", [-0.15, -0.10, 1.38], [0.72, 0.46, 0.14], "#3B3F46")
+        if tongue is not None:
+            tongue["rotation_deg"] = [14.0, 0.0, 0.0]
+        place(first("opening", "collar"), "torus", [-0.85, 0.0, 1.34], [0.68, 0.52, 0.16], "#111111")
+        for index, item in enumerate(matching("lace", "cord", "string")[:6]):
+            x = -0.45 + index * 0.22
+            link(item, [x, -0.62, 1.42], [x, 0.62, 1.42], 0.045, "#F4F4F2")
+
+    if "chair" in text:
+        place(first("seat"), "cube", [0.0, 0.0, 2.65], [1.45, 1.30, 0.25], "#3B3F46")
+        place(first("backrest", "back rest", "chair back"), "cube", [0.0, 1.08, 4.15], [1.35, 0.22, 1.45], "#3B3F46")
+        for index, item in enumerate(matching("armrest", "arm rest", "arm support")[:2]):
+            side = -1.0 if index == 0 else 1.0
+            place(item, "cube", [side * 1.55, -0.05, 3.45], [0.16, 1.02, 0.16], "#737A84")
+        place(first("column", "gas lift", "lift", "central post"), "cylinder", [0.0, 0.0, 1.60], [0.22, 0.22, 0.90], "#737A84")
+
+        spokes = matching("spoke")
+        while len(spokes) < 5 and len(objects) < 40:
+            item = {
+                "name": f"base spoke {len(spokes) + 1}", "shape": "rod",
+                "location": [0.0, 0.0, 0.0], "scale": [1.0, 1.0, 1.0],
+                "rotation_deg": [0.0, 0.0, 0.0], "start": None, "end": None,
+                "radius": 0.10, "color": "#3B3F46", "bevel": True, "smooth": True,
+            }
+            objects.append(item)
+            spokes.append(item)
+
+        wheels = matching("wheel", "caster")
+        while len(wheels) < 5 and len(objects) < 40:
+            item = {
+                "name": f"caster wheel {len(wheels) + 1}", "shape": "torus",
+                "location": [0.0, 0.0, 0.0], "scale": [0.30, 0.14, 0.30],
+                "rotation_deg": [90.0, 0.0, 0.0], "start": None, "end": None,
+                "radius": None, "color": "#111111", "bevel": True, "smooth": True,
+            }
+            objects.append(item)
+            wheels.append(item)
+
+        for index in range(5):
+            angle = math.radians(-90.0 + index * 72.0)
+            endpoint = [1.72 * math.cos(angle), 1.72 * math.sin(angle), 0.62]
+            link(spokes[index], [0.0, 0.0, 0.88], endpoint, 0.11, "#3B3F46")
+            place(wheels[index], "torus", endpoint, [0.30, 0.14, 0.30], "#111111")
+            wheels[index]["rotation_deg"] = [90.0, 0.0, math.degrees(angle)]
+
+    if "quadruped" in text or ("robot" in text and "leg" in text):
+        place(first("torso", "chassis", "body"), "cube", [0.0, 0.0, 3.10], [2.15, 1.25, 0.72], "#F4F4F2")
+        layouts = {
+            ("front", "left"): (-1.75, -0.90),
+            ("front", "right"): (1.75, -0.90),
+            ("rear", "left"): (-1.75, 0.90),
+            ("rear", "right"): (1.75, 0.90),
+        }
+        for (front_rear, side), (x, y) in layouts.items():
+            relevant = [
+                item for item in objects
+                if isinstance(item, dict)
+                and front_rear in clean(item)
+                and side in clean(item)
+                and "leg" in clean(item)
+            ]
+            upper = next((item for item in relevant if "upper" in clean(item)), None)
+            joint = next((item for item in relevant if "joint" in clean(item) or "knee" in clean(item)), None)
+            lower = next((item for item in relevant if "lower" in clean(item)), None)
+            foot = next((item for item in relevant if "foot" in clean(item)), None)
+            hip = [x, y, 3.05]
+            knee = [x * 1.16, y * 1.36, 1.78]
+            ankle = [x * 1.24, y * 1.48, 0.62]
+            link(upper, hip, knee, 0.20, "#737A84")
+            place(joint, "sphere", knee, [0.30, 0.30, 0.30], "#F97316")
+            link(lower, knee, ankle, 0.18, "#737A84")
+            place(foot, "cube", [ankle[0], ankle[1] - 0.10, 0.36], [0.42, 0.58, 0.20], "#3B3F46")
+
+        place(first("head"), "cube", [0.0, -1.68, 3.92], [0.82, 0.42, 0.52], "#3B3F46")
+        camera = first("camera", "lens", "optic")
+        place(camera, "cylinder", [-0.20, -2.13, 3.95], [0.28, 0.28, 0.16], "#111111")
+        if camera is not None:
+            camera["rotation_deg"] = [90.0, 0.0, 0.0]
+        for index, item in enumerate(matching("sensor pod", "sensor")[:2]):
+            side = -1.0 if index == 0 else 1.0
+            place(item, "cube", [side * 2.40, -0.10, 3.28], [0.34, 0.54, 0.42], "#F97316")
+        link(first("antenna mast", "antenna"), [0.65, 0.0, 3.82], [0.65, 0.0, 5.15], 0.08, "#3B3F46")
+        place(first("antenna tip"), "sphere", [0.65, 0.0, 5.18], [0.16, 0.16, 0.16], "#F97316")
+        place(first("battery", "rear pack"), "cube", [0.0, 1.56, 3.15], [1.02, 0.34, 0.52], "#3B3F46")
+
+        tool_start = [2.05, -0.65, 3.35]
+        tool_mid = [2.90, -1.00, 2.72]
+        tool_tip = [3.58, -1.20, 2.12]
+        link(first("tool arm upper"), tool_start, tool_mid, 0.16, "#F97316")
+        place(first("tool arm joint"), "sphere", tool_mid, [0.24, 0.24, 0.24], "#3B3F46")
+        link(first("tool arm lower"), tool_mid, tool_tip, 0.14, "#F97316")
+        place(first("tool end", "effector", "gripper"), "cube", [3.72, -1.22, 2.05], [0.28, 0.42, 0.18], "#111111")
 
     return data
 
@@ -1791,7 +1983,9 @@ async def _build_generic_scene_spec(job_id: str, auto_research: bool) -> Generic
 
     system = (
         "You are a 3D blockout planner. Return a safe declarative scene made only from the allowed "
-        "primitive types in the supplied JSON schema. Use the exact keys title, objects, name, shape, "
+        "primitive types in the supplied JSON schema. Prefer beam for rectangular articulated segments, "
+        "frustum for lampshades/truncated cones, and wedge for sloped shoe/body masses. Use the exact keys "
+        "title, objects, name, shape, "
         "location, scale, rotation_deg, start, end, radius, color, bevel, and smooth. Use shape='rod' "
         "with start/end/radius for limbs, handles, stems, necks, struts, antennas, and connectors because "
         "it aligns itself between two points. Do not output Python. Build a recognizable model with enough "
@@ -1831,6 +2025,10 @@ async def _build_generic_scene_spec(job_id: str, auto_research: bool) -> Generic
             str(job_request.get("prompt") or "Generated model"),
         )
         normalized = _enforce_character_visibility(
+            normalized,
+            str(job_request.get("prompt") or ""),
+        )
+        normalized = _enforce_subject_geometry(
             normalized,
             str(job_request.get("prompt") or ""),
         )

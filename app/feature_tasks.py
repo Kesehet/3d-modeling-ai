@@ -54,14 +54,14 @@ class FeatureTask(BaseModel):
 
 class FeatureEvaluation(BaseModel):
     feature_id: str = Field(min_length=1, max_length=80)
-    passed: bool = False
-    visible: bool = False
-    criteria_satisfied: bool = False
-    subject_recognizable: bool = False
-    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
-    reference_match_score: float = Field(default=0.0, ge=0.0, le=1.0)
-    regression_detected: bool = False
-    summary: str = Field(default="", max_length=1600)
+    passed: bool
+    visible: bool
+    criteria_satisfied: bool
+    subject_recognizable: bool
+    confidence: float = Field(ge=0.0, le=1.0)
+    reference_match_score: float = Field(ge=0.0, le=1.0)
+    regression_detected: bool
+    summary: str = Field(min_length=1, max_length=1600)
     problems: list[str] = Field(default_factory=list, max_length=12)
     protected_geometry_notes: list[str] = Field(default_factory=list, max_length=12)
 

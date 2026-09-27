@@ -19,6 +19,7 @@ from fastapi.responses import FileResponse, HTMLResponse
 from PIL import Image, UnidentifiedImageError
 from pydantic import BaseModel, Field, ValidationError
 
+from .artifacts import require_unused_version, reserve_model_version
 from .builders import pikachu_script
 from .cage_edits import CageEditAction, apply_cage_edit_action
 from .component_assembly import component_assembly_script
@@ -179,6 +180,7 @@ class VisionAnalyzeRequest(BaseModel):
     include_renders: bool = True
     max_images: int = Field(default=10, ge=1, le=16)
     instruction: str | None = Field(default=None, max_length=4000)
+    render_version: int | None = Field(default=None, ge=1)
 
 
 class VisionIssue(BaseModel):
@@ -732,6 +734,7 @@ def _normalize_vision_report_payload(data: object) -> dict:
 
 class PlanRequest(BaseModel):
     instruction: str | None = Field(default=None, max_length=4000)
+    render_version: int | None = Field(default=None, ge=1)
 
 
 class ResearchRequest(BaseModel):
@@ -1494,14 +1497,8 @@ async def _execute_component_assembly_candidate(
 
     baseline_version, parent_blend, _ = parent_active
     child_version, child_blend, _ = child_active
-    version = 1 + max(
-        [0]
-        + [
-            int(path.stem.split("model-v", 1)[1])
-            for path in (parent_root / "scene").glob("model-v*.blend")
-            if path.stem.split("model-v", 1)[1].isdigit()
-        ]
-    )
+    version = reserve_model_version(parent_root)
+    require_unused_version(parent_root, version)
     prefix = f"model-v{version}"
     blend_path = parent_root / "scene" / f"{prefix}.blend"
     qa_path = parent_root / "exports" / f"{prefix}-qa.json"
@@ -2049,7 +2046,9 @@ def _write_status(path: Path, **values: object) -> dict:
     previous_stage = current.get("stage")
     current.update(values)
     current["updated_at"] = datetime.now(UTC).isoformat()
-    status_file.write_text(json.dumps(current, indent=2), encoding="utf-8")
+    temporary = path / "status.json.tmp"
+    temporary.write_text(json.dumps(current, indent=2), encoding="utf-8")
+    temporary.replace(status_file)
     if current.get("state") != previous_state or current.get("stage") != previous_stage:
         append_history(
             path,
@@ -2463,7 +2462,8 @@ async def _run_auto_improve(job_id: str, max_rounds: int) -> None:
             )
             return
 
-        if no_progress_rounds >= FEATURE_MAX_ATTEMPTS:
+        no_progress_limit = 6 if after.get("modeling_strategy") == "hard_surface_cage" else FEATURE_MAX_ATTEMPTS
+        if no_progress_rounds >= no_progress_limit:
             _write_status(
                 root,
                 state="ready",
@@ -2472,7 +2472,7 @@ async def _run_auto_improve(job_id: str, max_rounds: int) -> None:
                     current_round=round_number,
                     max_rounds=round_limit,
                     reason=(
-                        "Stopped after three rounds with no accepted best-so-far "
+                        f"Stopped after {no_progress_limit} rounds with no accepted best-so-far "
                         "progress to avoid wasting vision/model tokens."
                     ),
                 ),
@@ -2481,7 +2481,7 @@ async def _run_auto_improve(job_id: str, max_rounds: int) -> None:
                 root,
                 "auto_improve_stopped",
                 round=round_number,
-                reason="three no-progress rounds",
+                reason=f"{no_progress_limit} no-progress rounds",
             )
             return
 
@@ -2515,9 +2515,11 @@ async def _recover_interrupted_reference_job(job_id: str) -> None:
         return
     append_history(root, "reference_gated_job_recovery_started")
     try:
-        await generate_generic_scene(
+        await _guard_job_action(
             job_id,
-            GenericGenerateRequest(auto_research=True, auto_improve_rounds=0),
+            lambda: generate_generic_scene(
+                job_id, GenericGenerateRequest(auto_research=True, auto_improve_rounds=0)
+            ),
         )
     except Exception as exc:  # noqa: BLE001 - recovery must persist failure state
         detail = str(exc.detail) if isinstance(exc, HTTPException) else str(exc)
@@ -2812,7 +2814,7 @@ def _collect_images(root: Path, request: VisionAnalyzeRequest) -> tuple[list[str
 
     # Generic refinement must critique one coherent model version. Mixing older model-vN
     # renders into the current set can make the vision model "fix" geometry that no longer exists.
-    if request.stage.startswith("generic_") and renders:
+    if renders:
         versioned: list[tuple[int, Path]] = []
         for path in renders:
             stem = path.stem
@@ -2833,8 +2835,10 @@ def _collect_images(root: Path, request: VisionAnalyzeRequest) -> tuple[list[str
                         accepted_version = generic_model["version"]
                 except (OSError, json.JSONDecodeError):
                     accepted_version = None
-            target_version = accepted_version
-            if target_version is None or not any(version == target_version for version, _ in versioned):
+            target_version = request.render_version or accepted_version
+            if target_version is None:
+                target_version = _read_status(root).get("working_cage_version")
+            if target_version is None:
                 target_version = max(version for version, _ in versioned)
             renders = [path for version, path in versioned if version == target_version]
 
@@ -3790,7 +3794,7 @@ async def research_job(job_id: str, request: ResearchRequest) -> dict:
     _write_status(root, state="running", stage="researching_references")
     plan = await _plan_reference_search(job_request, requested_query)
     normalized_primary = re.sub(
-        r"^(?:a|an|the)\\s+",
+        r"^(?:a|an|the)\s+",
         "",
         str(plan.primary_query or requested_query).strip(),
         flags=re.IGNORECASE,
@@ -3988,7 +3992,10 @@ async def _ensure_reference_pack(
         return usable
 
     job_request = json.loads((root / "request.json").read_text(encoding="utf-8"))
-    requested_query = str(job_request.get("prompt") or "").strip()
+    requested_query = " ".join(str(job_request.get("prompt") or "").split())
+    if job_request.get("component_job"):
+        requested_query = f"{job_request.get('component_name', '')} {job_request.get('parent_prompt', '')}"
+    requested_query = requested_query[:440].strip()
     errors: list[str] = []
 
     for attempt in range(1, max(1, attempts) + 1):
@@ -4584,8 +4591,18 @@ async def _evaluate_feature_candidate(
                 temperature=0.0,
                 num_predict=4096,
             )
+            _write_llm_log(root, "feature-qa-raw", {
+                "model": candidate_model, "candidate_version": candidate_version,
+                "raw": result.data, "images": labels,
+            })
             payload = dict(result.data) if isinstance(result.data, dict) else {}
+            for wrapper in ("evaluation", "feature_evaluation", "result"):
+                if isinstance(payload.get(wrapper), dict):
+                    payload = payload[wrapper]
+                    break
             payload.setdefault("feature_id", feature_task.id)
+            if payload["feature_id"] != feature_task.id:
+                raise ValueError("Vision evaluated a different feature.")
             evaluation = FeatureEvaluation.model_validate(payload)
         except (OllamaProxyError, httpx.HTTPError, ValidationError, ValueError, TypeError) as exc:
             errors.append(f"{candidate_model}: {exc}")
@@ -4859,6 +4876,7 @@ async def _execute_generic_spec(
     version: int,
 ) -> dict:
     root = _require_job(job_id)
+    require_unused_version(root, version)
     prefix = f"model-v{version}"
     blend_path = root / "scene" / f"{prefix}.blend"
     qa_path = root / "exports" / f"{prefix}-qa.json"
@@ -5556,6 +5574,7 @@ async def _build_hard_surface_cage_spec(
             include_references=True,
             include_renders=True,
             max_images=8 if feature_task is not None else 14,
+            render_version=active[0] if active is not None else None,
         ),
     )
     system = (
@@ -5572,17 +5591,14 @@ async def _build_hard_surface_cage_spec(
         "is supplied, revise it rather than starting over unless its topology is fundamentally unsuitable. Front is "
         "negative Y and Z is up. Favor proportion, silhouette and major construction lines over surface decoration. "
         f"Geometry budget for this subject: emit AT LEAST {min_cage_stations} stations and "
-        f"AT LEAST {min_profile_points} points per half-profile. Do not collapse distinct wheelbase, "
-        "cabin, nose and tail transitions into a five-section blob. "
-        "Every boolean cutter must have a deliberate non-placeholder location and orientation. Distinct cutters "
-        "must occupy distinct intended regions; do not collapse unrelated cuts onto a shared default coordinate. "
-        "Emit the requested geometry budget before cosmetic details. Example SHAPE ONLY (not object-specific): "
-        "{\"stations\":[{\"position\":-3,\"profile\":[[0,-0.5],[1,-0.4],[1,0.4],[0.6,1.0],[0,1.2]]},"
-        "{\"position\":-1,\"profile\":[[0,-0.5],[1.1,-0.4],[1.0,0.5],[0.7,1.1],[0,1.3]]},"
-        "{\"position\":0,\"profile\":[[0,-0.5],[1.1,-0.4],[1.0,0.5],[0.7,1.1],[0,1.3]]},"
-        "{\"position\":1,\"profile\":[[0,-0.5],[1.1,-0.4],[1.0,0.5],[0.7,1.1],[0,1.3]]},"
-        "{\"position\":3,\"profile\":[[0,-0.5],[1,-0.4],[1,0.4],[0.6,1.0],[0,1.2]]}]}. "
-        "Use that structure, but choose all coordinates from the actual references."
+        f"AT LEAST {min_profile_points} points per half-profile. "
+        "Place sections at the actual silhouette transitions visible in the references. "
+        "Start with subdivision_levels=0 when the outline has crisp corners; subdivision shrinks and rounds "
+        "the cage, so use it only when the visible form calls for it. Use bevel sparingly. "
+        "Every cutter must have a deliberate location, scale and orientation. "
+        "Do not include openings or details owned by later features in this first silhouette pass. "
+        "Do not copy a stock profile or invent a display pedestal. "
+        "Choose all section positions, widths and heights from the actual reference proportions."
     )
     prompt = (
         f"Exact user request: {job_request.get('prompt', '')}\n"
@@ -5678,6 +5694,7 @@ async def _execute_hard_surface_cage(
     activate_status: bool = True,
 ) -> dict:
     root = _require_job(job_id)
+    require_unused_version(root, version)
     prefix = f"model-v{version}"
     blend_path = root / "scene" / f"{prefix}.blend"
     qa_path = root / "exports" / f"{prefix}-qa.json"
@@ -5800,7 +5817,7 @@ def _working_hard_surface_cage_spec(
         candidates.append(active[0])
 
     for path in sorted(
-        root.glob("cage-spec-v*.json"),
+        [] if candidates else root.glob("cage-spec-v*.json"),
         key=lambda item: item.stat().st_mtime,
         reverse=True,
     ):
@@ -6120,14 +6137,7 @@ async def _refine_hard_surface_cage_incrementally(
             "status": status,
         }
 
-    version = 1 + max(
-        [
-            int(match.group(1))
-            for path in (root / "scene").glob("model-v*.blend")
-            if (match := re.search(r"model-v(\d+)\.blend$", path.name))
-        ]
-        or [0]
-    )
+    version = reserve_model_version(root)
     build = await _execute_hard_surface_cage(
         job_id,
         candidate_spec,
@@ -6157,6 +6167,7 @@ async def _refine_hard_surface_cage_incrementally(
             recognizability = await _generic_recognizability_check(
                 job_id,
                 stage="iterative_cage_quality",
+                render_version=version,
             )
         except HTTPException as exc:
             recognizability = {
@@ -6188,6 +6199,8 @@ async def _refine_hard_surface_cage_incrementally(
                 candidate_version=version,
             )
             better_than_active = active_comparison.get("candidate_is_better") is True
+
+    improved = improved and better_than_active
 
     if improved:
         candidate_model = build.get("candidate_model")
@@ -6377,17 +6390,12 @@ async def _generate_hard_surface_cage(
             reason=reason,
             feature_task=feature_task,
         )
-        existing_versions = [
-            int(match.group(1))
-            for path in (root / "scene").glob("model-v*.blend")
-            if (match := re.search(r"model-v(\\d+)\\.blend$", path.name))
-        ]
-        version = max(existing_versions or [0]) + 1
+        version = reserve_model_version(root)
         build = await _execute_hard_surface_cage(
             job_id,
             spec,
             version=version,
-            activate_status=feature_task is None,
+            activate_status=False,
         )
     except Exception as exc:
         if feature_task is not None:
@@ -6428,10 +6436,15 @@ async def _generate_hard_surface_cage(
         )
         feature_complete = _feature_evaluation_accepts(feature_task, feature_evaluation)
         candidate_improved = bool(
-            feature_complete
-            or baseline_version is None
+            baseline_version is None
             or (comparison and comparison.get("candidate_is_better") is True)
         )
+
+        if candidate_improved and active_version is not None and active_version != baseline_version:
+            active_comparison = await _compare_generic_versions(
+                root, baseline_version=active_version, candidate_version=version,
+            )
+            candidate_improved = active_comparison.get("candidate_is_better") is True
 
         quality = dict(
             previous_status.get("quality_gate")
@@ -6457,7 +6470,7 @@ async def _generate_hard_surface_cage(
         candidate_model = build.get("candidate_model")
         previous_stall_count = int(previous_status.get("cage_edit_stall_count") or 0)
 
-        if feature_complete:
+        if feature_complete and candidate_improved:
             status = _write_status(
                 root,
                 state="ready",
@@ -6507,7 +6520,7 @@ async def _generate_hard_surface_cage(
                 state="ready",
                 stage="hard_surface_cage_needs_refinement",
                 modeling_strategy="hard_surface_cage",
-                generic_model=previous_model,
+                generic_model=candidate_model,
                 working_cage_version=version,
                 cage_edit_stall_count=0,
                 quality_gate=quality,
@@ -6550,8 +6563,10 @@ async def _generate_hard_surface_cage(
                 working_cage_version=kept_working_version,
                 cage_edit_stall_count=previous_stall_count + 1,
                 quality_gate={
-                    **quality,
+                    **(previous_status.get("quality_gate") or {}),
                     "candidate_rejected": True,
+                    "last_rejected_candidate_version": version,
+                    "last_candidate_evaluation": quality,
                 },
             )
             append_history(
@@ -6579,7 +6594,7 @@ async def _generate_hard_surface_cage(
                 ),
             )
 
-        accepted = feature_complete
+        accepted = feature_complete and candidate_improved
 
     else:
         if baseline_version is not None and baseline_version != version:
@@ -6592,6 +6607,7 @@ async def _generate_hard_surface_cage(
             quality = await _generic_recognizability_check(
                 job_id,
                 stage="hard_surface_cage_quality",
+                render_version=version,
             )
         except HTTPException as exc:
             quality = {
@@ -6601,15 +6617,10 @@ async def _generate_hard_surface_cage(
                 "director_action": "refine_mesh",
             }
         accepted = bool(
-            quality.get("recognizable") is True
-            or baseline_version is None
+            baseline_version is None
             or (comparison and comparison.get("candidate_is_better"))
         )
-        candidate_model = (
-            build["status"].get("generic_model")
-            if isinstance(build.get("status"), dict)
-            else build.get("candidate_model")
-        )
+        candidate_model = build.get("candidate_model")
         if accepted:
             status = _write_status(
                 root,
@@ -6650,8 +6661,8 @@ async def _generate_hard_surface_cage(
                 working_cage_version=baseline_version,
                 cage_edit_stall_count=int(previous_status.get("cage_edit_stall_count") or 0) + 1,
                 quality_gate={
-                    **quality,
-                    "recognizable": False,
+                    **(previous_status.get("quality_gate") or {}),
+                    "last_candidate_evaluation": quality,
                     "representation": "hard_surface_cage",
                     "candidate_rejected": True,
                     "baseline_version": baseline_version,
@@ -6800,6 +6811,7 @@ async def _execute_adaptive_loft(
     version: int,
 ) -> dict:
     root = _require_job(job_id)
+    require_unused_version(root, version)
     prefix = f"model-v{version}"
     blend_path = root / "scene" / f"{prefix}.blend"
     qa_path = root / "exports" / f"{prefix}-qa.json"
@@ -7125,7 +7137,7 @@ async def _refine_adaptive_mesh(
             "unchanged": True,
         }
 
-    version = 1 + len(list((root / "scene").glob("model-v*.blend")))
+    version = reserve_model_version(root)
     build = await _execute_adaptive_loft(job_id, revised, version=version)
     if feature_task is not None:
         feature_evaluation = await _evaluate_feature_candidate(
@@ -7374,7 +7386,7 @@ async def _generate_adaptive_mesh_fallback(
         reason=reason,
         feature_task=feature_task,
     )
-    version = 1 + len(list((root / "scene").glob("model-v*.blend")))
+    version = reserve_model_version(root)
     build = await _execute_adaptive_loft(job_id, spec, version=version)
 
     comparison: dict | None = None
@@ -7568,6 +7580,7 @@ async def _ask_modeling_director(
     stage: str,
     current_strategy: str,
     include_renders: bool = True,
+    render_version: int | None = None,
 ) -> dict:
     root = _require_job(job_id)
     job_request = json.loads((root / "request.json").read_text(encoding="utf-8"))
@@ -7582,6 +7595,7 @@ async def _ask_modeling_director(
             include_references=True,
             include_renders=include_renders,
             max_images=10,
+            render_version=render_version,
         ),
     )
 
@@ -7689,7 +7703,9 @@ async def _ask_modeling_director(
     )
 
 
-async def _generic_recognizability_check(job_id: str, *, stage: str) -> dict:
+async def _generic_recognizability_check(
+    job_id: str, *, stage: str, render_version: int | None = None
+) -> dict:
     root = _require_job(job_id)
     current_strategy = "procedural"
     status_path = root / "status.json"
@@ -7705,6 +7721,7 @@ async def _generic_recognizability_check(job_id: str, *, stage: str) -> dict:
         stage=stage,
         current_strategy=current_strategy,
         include_renders=True,
+        render_version=render_version,
     )
     action = decision["action"]
     recognizable = action == "accept"
@@ -7776,7 +7793,7 @@ async def generate_generic_scene(job_id: str, request: GenericGenerateRequest) -
 
     _write_status(root, state="running", stage="agent_selected_procedural", modeling_strategy="procedural")
     spec = await _build_generic_scene_spec(job_id, auto_research=False)
-    version = 1 + len(list((root / "scene").glob("model-v*.blend")))
+    version = reserve_model_version(root)
     build = await _execute_generic_spec(job_id, spec, version=version)
 
     try:
@@ -8209,7 +8226,7 @@ async def refine_generic_scene(job_id: str, request: GenericRefineRequest) -> di
             break
 
         previous_iteration_status = _read_status(root)
-        version = 1 + len(list((root / "scene").glob("model-v*.blend")))
+        version = reserve_model_version(root)
         build = await _execute_generic_spec(job_id, revised, version=version)
         append_history(
             root,

@@ -2127,12 +2127,6 @@ async def _build_adaptive_loft_spec(job_id: str, *, reason: str) -> AdaptiveLoft
             max_images=14,
         ),
     )
-    if not images:
-        raise HTTPException(
-            status_code=400,
-            detail="Adaptive mesh fallback needs reference or current-render images.",
-        )
-
     system = (
         "You are the mesh-reconstruction stage of an autonomous Blender system. The primitive blockout "
         "was not recognizable enough, so create a SAFE DECLARATIVE LOFT MESH instead of more cubes/wedges. "
@@ -2168,7 +2162,7 @@ async def _build_adaptive_loft_spec(job_id: str, *, reason: str) -> AdaptiveLoft
                 model=candidate_model,
                 system=system,
                 prompt=prompt,
-                images=images,
+                images=images or None,
                 schema=AdaptiveLoftSpec.model_json_schema(),
                 temperature=0.0,
                 num_predict=8192,

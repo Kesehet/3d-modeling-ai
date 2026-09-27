@@ -19,7 +19,8 @@ def test_dashboard_job_detail_can_download_and_improve():
     html = dashboard_page().body.decode("utf-8")
     assert '/dashboard/artifacts/' in html
     assert 'id="improveBtn"' in html
-    assert '/improve' in html
+    assert '/auto-improve' in html
+    assert 'Auto improve ×30' in html
     assert '/generate' in html
 
 
@@ -36,15 +37,15 @@ def test_dashboard_surfaces_quality_gate_and_allows_vision_retry():
     assert 'generic_needs_strategy_switch' in html
     assert 'generic_quality_unverified' in html
     assert 'Quality gate: current model is not recognizable enough.' in html
-    assert 'Ask AI director again' in html
+    assert 'diagnosis has been queued for automatic repair' in html
     assert 'Visual QA needs another pass.' in html
 
 
 def test_dashboard_offers_mesh_fallback_instead_of_dead_end():
     html = dashboard_page().body.decode("utf-8")
-    assert 'AI rebuild as mesh' in html
+    assert 'Auto improve ×30' in html
     assert 'adaptive_mesh_needs_refinement' in html
-    assert 'AI improve mesh' in html
+    assert 'Auto improve ×30' in html
 
 
 

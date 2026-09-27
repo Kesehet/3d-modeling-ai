@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import json
@@ -55,7 +56,7 @@ from .research import research_web_references, write_research_manifest
 from .security import require_api_token
 
 app = FastAPI(title="3D Modeling AI", version="0.2.0")
-
+AUTO_IMPROVE_TASKS: dict[str, asyncio.Task[None]] = {}
 
 
 @app.on_event("startup")
@@ -63,6 +64,7 @@ async def reconcile_interrupted_jobs_after_restart() -> None:
     # Any persisted running state predates this process and therefore cannot
     # represent an operation still executing in this API process.
     reconcile_all_running_jobs(force=True)
+    _resume_auto_improve_jobs()
 
 
 Image.MAX_IMAGE_PIXELS = 40_000_000
@@ -688,6 +690,11 @@ class PikachuTuning(BaseModel):
 
 class GenericGenerateRequest(BaseModel):
     auto_research: bool = True
+    auto_improve_rounds: int = Field(default=0, ge=0, le=30)
+
+
+class AutoImproveRequest(BaseModel):
+    rounds: int = Field(default=30, ge=1, le=30)
 
 
 class GenericRefineRequest(BaseModel):
@@ -1162,6 +1169,308 @@ async def _guard_job_action(
         raise
 
 
+
+def _read_status(root: Path) -> dict:
+    status_path = root / "status.json"
+    if not status_path.is_file():
+        return {}
+    try:
+        payload = json.loads(status_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _auto_improve_goal_reached(root: Path, status: dict) -> bool:
+    quality = status.get("quality_gate")
+    recognizable = (
+        isinstance(quality, dict)
+        and quality.get("recognizable") is True
+    ) or str(status.get("stage") or "").endswith("_recognizable")
+    if not recognizable:
+        return False
+
+    plan = feature_plan_summary(root)
+    return plan is None or bool(plan.get("complete"))
+
+
+def _auto_improve_progress_signature(root: Path, status: dict) -> tuple[object, ...]:
+    model = status.get("generic_model")
+    version = model.get("version") if isinstance(model, dict) else None
+    quality = status.get("quality_gate")
+    score = quality.get("subject_match_score") if isinstance(quality, dict) else None
+    try:
+        score = round(float(score), 3) if score is not None else None
+    except (TypeError, ValueError):
+        score = None
+    plan = feature_plan_summary(root) or {}
+    counts = plan.get("counts") or {}
+    return (
+        version,
+        status.get("stage"),
+        score,
+        counts.get("accepted", 0),
+        counts.get("blocked", 0),
+        counts.get("failed", 0),
+        plan.get("next_feature_id"),
+    )
+
+
+def _auto_improve_payload(
+    *,
+    state: str,
+    current_round: int,
+    max_rounds: int,
+    reason: str = "",
+) -> dict:
+    return {
+        "enabled": True,
+        "state": state,
+        "current_round": current_round,
+        "max_rounds": max_rounds,
+        "reason": reason[:1200],
+        "updated_at": datetime.now(UTC).isoformat(),
+    }
+
+
+async def _run_auto_improve(job_id: str, max_rounds: int) -> None:
+    root = _job_dir(job_id)
+    if not root.is_dir():
+        return
+
+    no_progress_rounds = 0
+    consecutive_errors = 0
+    append_history(root, "auto_improve_started", max_rounds=max_rounds)
+
+    for round_number in range(1, max_rounds + 1):
+        if not root.is_dir():
+            return
+        before = _read_status(root)
+        if _auto_improve_goal_reached(root, before):
+            _write_status(
+                root,
+                state="ready",
+                auto_improve=_auto_improve_payload(
+                    state="completed",
+                    current_round=round_number - 1,
+                    max_rounds=max_rounds,
+                    reason="Quality gate and visible-feature backlog are satisfied.",
+                ),
+            )
+            append_history(
+                root,
+                "auto_improve_completed",
+                rounds=round_number - 1,
+                reason="quality gate satisfied",
+            )
+            return
+
+        before_signature = _auto_improve_progress_signature(root, before)
+        _write_status(
+            root,
+            state="running",
+            auto_improve=_auto_improve_payload(
+                state="running",
+                current_round=round_number,
+                max_rounds=max_rounds,
+                reason="Applying the AI director's latest visual diagnosis.",
+            ),
+        )
+        append_history(
+            root,
+            "auto_improve_round_started",
+            round=round_number,
+            max_rounds=max_rounds,
+            quality_summary=(
+                before.get("quality_gate", {}).get("summary")
+                if isinstance(before.get("quality_gate"), dict)
+                else None
+            ),
+        )
+
+        try:
+            await refine_generic_scene(job_id, GenericRefineRequest(iterations=1))
+        except Exception as exc:  # noqa: BLE001 - background loop must persist/report arbitrary worker failures
+            consecutive_errors += 1
+            detail = str(exc.detail) if isinstance(exc, HTTPException) else str(exc)
+            fallback_state = "ready" if isinstance(before.get("generic_model"), dict) else "failed"
+            _write_status(
+                root,
+                state=fallback_state,
+                stage=before.get("stage") or "auto_improve_failed",
+                generic_model=before.get("generic_model"),
+                quality_gate=before.get("quality_gate"),
+                auto_improve=_auto_improve_payload(
+                    state="retrying" if consecutive_errors < 2 else "stopped",
+                    current_round=round_number,
+                    max_rounds=max_rounds,
+                    reason=detail or exc.__class__.__name__,
+                ),
+            )
+            append_history(
+                root,
+                "auto_improve_round_failed",
+                round=round_number,
+                error=detail or exc.__class__.__name__,
+                consecutive_errors=consecutive_errors,
+            )
+            if consecutive_errors >= 2:
+                append_history(
+                    root,
+                    "auto_improve_stopped",
+                    round=round_number,
+                    reason="two consecutive refinement errors",
+                )
+                return
+            await asyncio.sleep(1)
+            continue
+
+        consecutive_errors = 0
+        after = _read_status(root)
+        after_signature = _auto_improve_progress_signature(root, after)
+        if _auto_improve_goal_reached(root, after):
+            _write_status(
+                root,
+                state="ready",
+                auto_improve=_auto_improve_payload(
+                    state="completed",
+                    current_round=round_number,
+                    max_rounds=max_rounds,
+                    reason="AI fixed the diagnosed issues enough to pass the quality gate.",
+                ),
+            )
+            append_history(
+                root,
+                "auto_improve_completed",
+                rounds=round_number,
+                reason="quality gate satisfied",
+            )
+            return
+
+        if after_signature == before_signature:
+            no_progress_rounds += 1
+        else:
+            no_progress_rounds = 0
+
+        _write_status(
+            root,
+            state="ready",
+            auto_improve=_auto_improve_payload(
+                state="running",
+                current_round=round_number,
+                max_rounds=max_rounds,
+                reason=(
+                    f"No measurable progress for {no_progress_rounds} consecutive round(s)."
+                    if no_progress_rounds
+                    else "The best-so-far model changed; continuing with the next diagnosed issue."
+                ),
+            ),
+        )
+        append_history(
+            root,
+            "auto_improve_round_completed",
+            round=round_number,
+            no_progress_rounds=no_progress_rounds,
+            progress_changed=after_signature != before_signature,
+        )
+
+        if no_progress_rounds >= 3:
+            _write_status(
+                root,
+                state="ready",
+                auto_improve=_auto_improve_payload(
+                    state="stalled",
+                    current_round=round_number,
+                    max_rounds=max_rounds,
+                    reason="Stopped after three rounds with no measurable progress to avoid destructive looping.",
+                ),
+            )
+            append_history(
+                root,
+                "auto_improve_stopped",
+                round=round_number,
+                reason="three no-progress rounds",
+            )
+            return
+
+        await asyncio.sleep(0)
+
+    final_status = _read_status(root)
+    _write_status(
+        root,
+        state="ready" if isinstance(final_status.get("generic_model"), dict) else final_status.get("state", "ready"),
+        auto_improve=_auto_improve_payload(
+            state="max_rounds_reached",
+            current_round=max_rounds,
+            max_rounds=max_rounds,
+            reason="Reached the autonomous refinement cap.",
+        ),
+    )
+    append_history(
+        root,
+        "auto_improve_stopped",
+        round=max_rounds,
+        reason="maximum rounds reached",
+    )
+
+
+def _schedule_auto_improve(job_id: str, max_rounds: int = 30) -> bool:
+    current = AUTO_IMPROVE_TASKS.get(job_id)
+    if current is not None and not current.done():
+        return False
+
+    root = _job_dir(job_id)
+    if not root.is_dir():
+        return False
+    max_rounds = max(1, min(30, int(max_rounds)))
+    _write_status(
+        root,
+        auto_improve=_auto_improve_payload(
+            state="scheduled",
+            current_round=0,
+            max_rounds=max_rounds,
+            reason="Waiting for autonomous refinement worker.",
+        ),
+    )
+
+    task = asyncio.create_task(_run_auto_improve(job_id, max_rounds))
+    AUTO_IMPROVE_TASKS[job_id] = task
+
+    def _cleanup(completed: asyncio.Task[None]) -> None:
+        if AUTO_IMPROVE_TASKS.get(job_id) is completed:
+            AUTO_IMPROVE_TASKS.pop(job_id, None)
+
+    task.add_done_callback(_cleanup)
+    return True
+
+
+def _resume_auto_improve_jobs() -> None:
+    if not JOBS_ROOT.exists():
+        return
+    for root in JOBS_ROOT.iterdir():
+        if not root.is_dir():
+            continue
+        status = _read_status(root)
+        auto = status.get("auto_improve")
+        if not isinstance(auto, dict) or auto.get("enabled") is not True:
+            continue
+        if auto.get("state") not in {"scheduled", "running", "retrying"}:
+            continue
+        try:
+            max_rounds = int(auto.get("max_rounds") or 30)
+            current_round = int(auto.get("current_round") or 0)
+        except (TypeError, ValueError):
+            max_rounds, current_round = 30, 0
+        remaining = max(1, min(30, max_rounds - current_round))
+        append_history(
+            root,
+            "auto_improve_resumed",
+            previous_round=current_round,
+            remaining_rounds=remaining,
+        )
+        _schedule_auto_improve(root.name, remaining)
+
+
 def _write_llm_log(root: Path, prefix: str, payload: dict) -> str:
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
     filename = f"{prefix}-{stamp}.json"
@@ -1344,7 +1653,24 @@ async def dashboard_research(job_id: str, request: ResearchRequest) -> dict:
 
 @app.post("/dashboard/jobs/{job_id}/generate", include_in_schema=False)
 async def dashboard_generate_generic(job_id: str, request: GenericGenerateRequest) -> dict:
-    return await _guard_job_action(job_id, lambda: generate_generic_scene(job_id, request))
+    result = await _guard_job_action(job_id, lambda: generate_generic_scene(job_id, request))
+    if request.auto_improve_rounds:
+        result["auto_improve_started"] = _schedule_auto_improve(
+            job_id,
+            request.auto_improve_rounds,
+        )
+    return result
+
+
+@app.post("/dashboard/jobs/{job_id}/auto-improve", include_in_schema=False)
+async def dashboard_auto_improve(job_id: str, request: AutoImproveRequest) -> dict:
+    root = _require_job(job_id)
+    started = _schedule_auto_improve(job_id, request.rounds)
+    return {
+        "job_id": job_id,
+        "started": started,
+        "auto_improve": _read_status(root).get("auto_improve"),
+    }
 
 
 @app.post("/dashboard/jobs/{job_id}/improve", include_in_schema=False)
@@ -3497,7 +3823,24 @@ async def generate_generic_scene(job_id: str, request: GenericGenerateRequest) -
 
 @app.post("/v1/jobs/{job_id}/generate", dependencies=[Depends(require_api_token)])
 async def generate_generic_scene_api(job_id: str, request: GenericGenerateRequest) -> dict:
-    return await _guard_job_action(job_id, lambda: generate_generic_scene(job_id, request))
+    result = await _guard_job_action(job_id, lambda: generate_generic_scene(job_id, request))
+    if request.auto_improve_rounds:
+        result["auto_improve_started"] = _schedule_auto_improve(
+            job_id,
+            request.auto_improve_rounds,
+        )
+    return result
+
+
+@app.post("/v1/jobs/{job_id}/auto-improve", dependencies=[Depends(require_api_token)])
+async def auto_improve_job_api(job_id: str, request: AutoImproveRequest) -> dict:
+    root = _require_job(job_id)
+    started = _schedule_auto_improve(job_id, request.rounds)
+    return {
+        "job_id": job_id,
+        "started": started,
+        "auto_improve": _read_status(root).get("auto_improve"),
+    }
 
 
 async def refine_generic_scene(job_id: str, request: GenericRefineRequest) -> dict:

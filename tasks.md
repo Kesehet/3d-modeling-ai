@@ -27,8 +27,8 @@ This file is the working definition of "done" for the project. A level is only c
 - [x] Strengthen generic planning so every requested major part is explicitly represented instead of optimizing for the fewest primitives.
 - [x] Require connected/contact-aware blockouts in planner/refinement instructions: necks, limbs, handles, stems, antennas and similar parts must touch/overlap their parent geometry instead of floating.
 - [x] Make refinement surgical: fix the 1–3 highest-priority defects while preserving unaffected geometry instead of rewriting the whole model.
-- [ ] Ensure visual QA evaluates the newest candidate render set with references and does not accidentally mix stale iterations as the "current" model.
-- [ ] Compare candidate `vN` against the previous accepted version and roll back/reject the candidate when quality regresses.
+- [x] Ensure generic visual QA evaluates only the newest `model-vN` render set with references instead of mixing stale iterations into the current model.
+- [x] Compare candidate `vN` against the previous accepted version with a dedicated multimodal regression gate; reject it and restore the previous accepted version when quality regresses.
 - [ ] Add quality regression subjects: stylized Pikachu, articulated retro desk lamp, sneaker, office chair, and a complex creature/robot.
 - [ ] Make deploy quality regression fail on structural/visual degradation, not merely successful HTTP responses and generated files.
 

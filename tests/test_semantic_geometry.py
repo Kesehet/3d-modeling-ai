@@ -105,7 +105,8 @@ def test_sneaker_assembly_uses_wedge_and_lace_rods():
     assert by_name["toe box"]["shape"] == "sphere"
     assert by_name["opening collar"]["shape"] == "torus"
     assert by_name["lace 1"]["shape"] == "rod"
-    assert by_name["lace 1"]["start"][1] < by_name["lace 1"]["end"][1]
+    assert by_name["lace 1"]["start"][0] < by_name["lace 1"]["end"][0]
+    assert by_name["lace 1"]["start"][1] == by_name["lace 1"]["end"][1]
 
 
 

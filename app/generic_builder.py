@@ -56,7 +56,7 @@ def material_for(hex_color):
 def add_object(item):
     shape = item.get("shape", "cube")
     location = tuple(item.get("location", [0, 0, 0]))
-    if shape == "rod":
+    if shape in {"rod", "beam"}:
         start = Vector(item.get("start") or location)
         end = Vector(item.get("end") or [location[0], location[1], location[2] + 1.0])
         delta = end - start
@@ -64,15 +64,45 @@ def add_object(item):
             delta = Vector((0, 0, 0.02))
             end = start + delta
         radius = max(0.02, min(5.0, float(item.get("radius") or 0.2)))
-        bpy.ops.mesh.primitive_cylinder_add(
-            vertices=48,
-            radius=radius,
-            depth=delta.length,
-            location=(start + end) / 2,
+        if shape == "beam":
+            bpy.ops.mesh.primitive_cube_add(size=2, location=(start + end) / 2)
+            obj = bpy.context.object
+            obj.scale = (radius * 1.35, radius * 0.72, delta.length / 2)
+            obj.rotation_euler = delta.to_track_quat("Z", "Y").to_euler()
+            bpy.ops.object.transform_apply(location=False, rotation=False, scale=True)
+        else:
+            bpy.ops.mesh.primitive_cylinder_add(
+                vertices=48,
+                radius=radius,
+                depth=delta.length,
+                location=(start + end) / 2,
+            )
+            obj = bpy.context.object
+            obj.rotation_euler = delta.to_track_quat("Z", "Y").to_euler()
+            bpy.ops.object.transform_apply(location=False, rotation=False, scale=True)
+    elif shape == "frustum":
+        bpy.ops.mesh.primitive_cone_add(
+            vertices=64,
+            radius1=1.0,
+            radius2=0.34,
+            depth=2.0,
+            location=location,
         )
-        obj = bpy.context.object
-        obj.rotation_euler = delta.to_track_quat("Z", "Y").to_euler()
-        bpy.ops.object.transform_apply(location=False, rotation=False, scale=True)
+    elif shape == "wedge":
+        verts = [
+            (-1, -1, -1), (1, -1, -1), (1, 1, -1), (-1, 1, -1),
+            (-1, -1, 1), (-0.25, -1, 0.32), (-0.25, 1, 0.32), (-1, 1, 1),
+        ]
+        faces = [
+            (0, 1, 2, 3), (4, 7, 6, 5), (0, 4, 5, 1),
+            (3, 2, 6, 7), (0, 3, 7, 4), (1, 5, 6, 2),
+        ]
+        mesh = bpy.data.meshes.new("WedgeMesh")
+        mesh.from_pydata(verts, [], faces)
+        mesh.update()
+        obj = bpy.data.objects.new("Wedge", mesh)
+        bpy.context.collection.objects.link(obj)
+        obj.location = location
     elif shape == "sphere":
         bpy.ops.mesh.primitive_uv_sphere_add(segments=40, ring_count=20, location=location)
     elif shape == "cylinder":
@@ -92,7 +122,7 @@ def add_object(item):
 
     obj = bpy.context.object
     obj.name = str(item.get("name") or shape)[:80]
-    if shape != "rod":
+    if shape not in {"rod", "beam"}:
         scale = item.get("scale", [1, 1, 1])
         obj.scale = tuple(max(0.03, min(20.0, float(value))) for value in scale)
         rotation = item.get("rotation_deg", [0, 0, 0])

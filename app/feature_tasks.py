@@ -250,13 +250,28 @@ def save_feature_plan(root: Path, plan: FeaturePlan) -> FeaturePlan:
 
 
 def refresh_feature_states(plan: FeaturePlan) -> FeaturePlan:
+    # Never trust a legacy/accidental accepted flag without strict visual proof.
+    for feature in plan.features:
+        if feature.status == "accepted" and not feature.acceptance_verified:
+            feature.status = "retry"
+            feature.accepted_version = None
+            feature.acceptance_score = 0.0
+            feature.acceptance_model = None
+            feature.last_error = (
+                "Accepted state lacked strict reference verification and was requeued."
+            )
+
     # A dependency that exhausted its own attempts should not freeze every
-    # downstream visible feature forever. "Resolved" means the coordinator has
-    # finished attempting that dependency, even if it could not be accepted.
+    # downstream visible feature forever. "Resolved" means either strictly
+    # accepted or terminally exhausted.
     resolved = {
         feature.id
         for feature in plan.features
-        if feature.status in {"accepted", "blocked", "failed"}
+        if (
+            feature.status == "accepted"
+            and feature.acceptance_verified
+        )
+        or feature.status in {"blocked", "failed"}
     }
     feature_ids = {feature.id for feature in plan.features}
 

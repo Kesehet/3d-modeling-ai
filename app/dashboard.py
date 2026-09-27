@@ -13,6 +13,7 @@ from .history import append_history
 
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
 PUBLIC_ARTIFACT_CATEGORIES = {"references", "renders", "scene", "exports"}
+DASHBOARD_UI_VERSION = "feature-workers-v3"
 
 # A single AI/Blender stage should never sit untouched this long. Long-running
 # requests refresh status as they move between stages; anything older is an

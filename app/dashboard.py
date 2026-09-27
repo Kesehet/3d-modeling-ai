@@ -284,6 +284,7 @@ def jobs_snapshot() -> dict:
                     "modeling_strategy": status.get("modeling_strategy"),
                     "quality_gate": status.get("quality_gate") if isinstance(status.get("quality_gate"), dict) else None,
                     "feature_plan": feature_plan_summary(root),
+                    "auto_improve": status.get("auto_improve") if isinstance(status.get("auto_improve"), dict) else None,
                     "updated_at": status.get("updated_at"),
                     "renders": renders,
                     "references": references,
@@ -430,7 +431,9 @@ function renderGallery(){
 }
 function renderDetail(job){
   els.title.textContent=job.prompt;
-  els.meta.textContent=(job.state||"")+" · "+(job.stage||"")+" · "+job.job_id;
+  const auto=job.auto_improve||null;
+  const autoText=auto?.enabled?(" · auto "+(auto.state||"")+" "+(auto.current_round||0)+"/"+(auto.max_rounds||30)):"";
+  els.meta.textContent=(job.state||"")+" · "+(job.stage||"")+autoText+" · "+job.job_id;
   const quality=job.quality_gate||null;
   const needsMesh=job.stage==="generic_needs_strategy_switch";
   const improvingMesh=job.stage==="adaptive_mesh_needs_refinement";
@@ -439,10 +442,10 @@ function renderDetail(job){
     if(needsMesh){
       els.quality.innerHTML='<strong>Primitive model is not recognizable enough.</strong>'+esc(quality.summary||"The primitive blockout does not sufficiently match the requested subject.")+' The next improvement will switch to the adaptive mesh builder.';
     }else if(improvingMesh){
-      els.quality.innerHTML='<strong>Mesh fallback is closer, but still needs work.</strong>'+esc(quality.summary||"The adaptive mesh has not passed recognizability yet.")+' Improve will generate another reference-driven mesh pass.';
+      els.quality.innerHTML='<strong>Mesh fallback is closer, but still needs work.</strong>'+esc(quality.summary||"The adaptive mesh has not passed recognizability yet.")+(auto?.state==="running"||auto?.state==="scheduled"?" The AI is already applying the next repair automatically.":"");
     }else{
       const strategy=quality.recommended_strategy?(" Recommended next strategy: "+quality.recommended_strategy+"."):"";
-      els.quality.innerHTML='<strong>Quality gate: current model is not recognizable enough.</strong>'+esc(quality.summary||"The generated geometry does not sufficiently match the requested subject.")+esc(strategy);
+      els.quality.innerHTML='<strong>Quality gate: current model is not recognizable enough.</strong>'+esc(quality.summary||"The generated geometry does not sufficiently match the requested subject.")+esc(strategy)+(auto?.state==="running"||auto?.state==="scheduled"?" The diagnosis has been queued for automatic repair.":"");
     }
     els.quality.classList.add("show");
   }else if(job.stage==="generic_quality_unverified"){
@@ -484,10 +487,11 @@ function renderDetail(job){
   els.files.innerHTML=files.length
     ? files.map(([category,file])=>'<a class="file" download href="'+fileUrl(job.job_id,category,file.name)+'"><b>↓</b>'+esc(file.name)+'</a>').join("")
     : '<span style="color:var(--muted)">No downloadable model files yet.</span>';
-  els.json.textContent=JSON.stringify({status:{state:job.state,stage:job.stage,modeling_strategy:job.modeling_strategy,quality_gate:job.quality_gate},feature_plan:job.feature_plan,references:job.references,latest_vision_images:job.latest_vision_images,qa:job.qa,history:job.history},null,2);
-  els.improve.disabled=busy||!scene.length;
+  els.json.textContent=JSON.stringify({status:{state:job.state,stage:job.stage,modeling_strategy:job.modeling_strategy,quality_gate:job.quality_gate,auto_improve:job.auto_improve},feature_plan:job.feature_plan,references:job.references,latest_vision_images:job.latest_vision_images,qa:job.qa,history:job.history},null,2);
+  const autoRunning=auto&&["scheduled","running","retrying"].includes(auto.state);
+  els.improve.disabled=busy||!scene.length||autoRunning;
   if(!busy){
-    els.improve.textContent=retryingQuality?"Ask AI director again":(needsMesh?"AI rebuild as mesh":(improvingMesh?"AI improve mesh":"AI improve model"));
+    els.improve.textContent=autoRunning?("Auto improving "+(auto.current_round||0)+"/"+(auto.max_rounds||30)):(retryingQuality?"Ask AI director again":(needsMesh?"AI rebuild as mesh":(improvingMesh?"AI improve mesh":"AI improve model")));
   }
   els.improve.title=retryingQuality?"Let the multimodal modeling director inspect the references and current renders and choose the next action.":(needsMesh?"Let the AI rebuild the current result using the mesh strategy.":"");
   els.deleteBtn.disabled=busy||job.state==="running";
@@ -515,7 +519,7 @@ async function createModel(){
     els.dialog.classList.remove("show");
     await refresh();
     openJob(created.job_id);
-    response=await fetch("/dashboard/jobs/"+encodeURIComponent(created.job_id)+"/generate",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({auto_research:true})});
+    response=await fetch("/dashboard/jobs/"+encodeURIComponent(created.job_id)+"/generate",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({auto_research:true,auto_improve_rounds:30})});
     if(!response.ok)throw new Error(await response.text());
     await refresh();
   }catch(error){els.notice.textContent="Error: "+error.message;els.dialog.classList.add("show")}

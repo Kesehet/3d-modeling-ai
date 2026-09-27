@@ -804,34 +804,11 @@ def _normalize_scene_spec_payload(data: object, fallback_title: str) -> dict:
         normalized_rotation = vec3(rotation, [0.0, 0.0, 0.0])
         has_connector_endpoints = item.get("start") is not None and item.get("end") is not None
 
-        # Rods/beams are endpoint-defined geometry in the Blender executor. An LLM
-        # occasionally emits a broad body panel or wheel as a rod with only location/scale;
-        # executing that literally discards its scale and creates a default vertical stick.
+        # Rods/beams are endpoint-defined geometry in the Blender executor.
+        # If the model omits endpoints, preserve its location/scale but fall back to a
+        # generic solid. Do not infer what the object "should" be from its semantic name.
         if shape in {"rod", "beam"} and not has_connector_endpoints:
-            semantic_name = " ".join(
-                "".join(
-                    character if character.isalnum() else " "
-                    for character in object_name.lower()
-                ).split()
-            )
-            if any(term in semantic_name for term in ("wheel", "caster", "tire", "tyre", "ring")):
-                shape = "torus"
-            elif shape == "beam":
-                shape = "cube"
-            else:
-                ordered_scale = sorted(abs(value) for value in normalized_scale)
-                is_panel_like = (
-                    ordered_scale[0] > 0
-                    and ordered_scale[1] / ordered_scale[0] >= 2.0
-                )
-                broad_terms = (
-                    "body", "torso", "chassis", "panel", "window", "windshield",
-                    "windscreen", "roof", "door", "bumper", "screen", "seat",
-                    "backrest", "hood", "bonnet", "trunk", "boot",
-                )
-                shape = "cube" if is_panel_like or any(
-                    term in semantic_name for term in broad_terms
-                ) else "cylinder"
+            shape = "cube" if shape == "beam" else "cylinder"
 
         objects.append(
             {

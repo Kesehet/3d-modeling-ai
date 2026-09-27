@@ -13,7 +13,7 @@ from .history import append_history
 
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
 PUBLIC_ARTIFACT_CATEGORIES = {"references", "renders", "scene", "exports"}
-DASHBOARD_UI_VERSION = "feature-workers-v3"
+DASHBOARD_UI_VERSION = "live-model-viewer-v1"
 
 # A single AI/Blender stage should never sit untouched this long. Long-running
 # requests refresh status as they move between stages; anything older is an
@@ -267,6 +267,40 @@ def jobs_snapshot() -> dict:
             else:
                 renders = all_renders[:64]
 
+            # The interactive viewer follows the model recorded as active in status.json.
+            # This means rejected refinement candidates automatically roll back in the UI
+            # while newly accepted/exported GLBs appear on the next dashboard poll.
+            glb_exports = [
+                item
+                for item in artifacts["exports"]
+                if Path(item["name"]).suffix.lower() == ".glb"
+            ]
+            latest_model: dict | None = None
+            if isinstance(active_version, int):
+                preferred_name = f"model-v{active_version}.glb"
+                preferred = next(
+                    (item for item in glb_exports if item["name"] == preferred_name),
+                    None,
+                )
+                if preferred is not None:
+                    latest_model = {
+                        **preferred,
+                        "version": active_version,
+                        "source": "active",
+                    }
+            if latest_model is None and glb_exports:
+                fallback = glb_exports[0]
+                model_version: int | None = None
+                stem = Path(fallback["name"]).stem
+                version_text = stem.removeprefix("model-v")
+                if stem.startswith("model-v") and version_text.isdigit():
+                    model_version = int(version_text)
+                latest_model = {
+                    **fallback,
+                    "version": model_version,
+                    "source": "latest_export",
+                }
+
             history: list[dict] = []
             history_path = root / "history.json"
             if history_path.exists():
@@ -312,6 +346,7 @@ def jobs_snapshot() -> dict:
                     "reference_gate": status.get("reference_gate") if isinstance(status.get("reference_gate"), dict) else None,
                     "updated_at": status.get("updated_at"),
                     "renders": renders,
+                    "latest_model": latest_model,
                     "references": references,
                     "latest_vision_images": latest_vision_images,
                     "artifacts": artifacts,
@@ -364,6 +399,7 @@ def dashboard_page() -> HTMLResponse:
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>3D Modeling AI</title>
+<script type="module" src="https://ajax.googleapis.com/ajax/libs/model-viewer/4.3.1/model-viewer.min.js"></script>
 <style>
 :root{--bg:#f6f7f9;--card:#fff;--line:#e5e7eb;--text:#172033;--muted:#687386;--blue:#2563eb;--green:#15803d;--red:#b42318;--shadow:0 8px 24px rgba(15,23,42,.08)}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 Inter,system-ui,-apple-system,"Segoe UI",sans-serif}
@@ -380,8 +416,12 @@ header{display:flex;align-items:center;justify-content:space-between;gap:16px;ma
 .reference-panel{margin-top:22px;background:#fff;border:1px solid var(--line);border-radius:12px;padding:16px}.reference-panel h3{margin:0 0 4px}.reference-help{color:var(--muted);font-size:12px;margin:0 0 12px}.reference-grid{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:12px}.reference-card{border:1px solid var(--line);border-radius:10px;overflow:hidden;background:#fafafa}.reference-card img{display:block;width:100%;aspect-ratio:1;object-fit:cover}.reference-info{padding:8px 9px;font-size:11px;color:var(--muted)}.reference-info strong{display:block;color:var(--text);font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.reference-used{display:inline-block;margin-top:5px;padding:2px 6px;border-radius:999px;background:#dcfce7;color:#166534;font-weight:700;font-size:10px}
 .downloads{margin-top:22px;background:#fff;border:1px solid var(--line);border-radius:12px;padding:16px}.downloads h3{margin:0 0 10px}.file-list{display:flex;gap:8px;flex-wrap:wrap}.file{display:inline-flex;text-decoration:none;color:var(--text);border:1px solid var(--line);border-radius:8px;padding:8px 10px;background:#fafafa}.file b{margin-right:6px}
 .details{margin-top:16px;background:#fff;border:1px solid var(--line);border-radius:12px;padding:14px}.details summary{cursor:pointer;font-weight:700}.details pre{white-space:pre-wrap;word-break:break-word;background:#f8fafc;padding:12px;border-radius:8px;max-height:320px;overflow:auto}
+.detail-actions{display:flex;gap:8px;flex-wrap:wrap}
+.viewer-panel{background:#fff;border:1px solid var(--line);border-radius:16px;overflow:hidden;box-shadow:var(--shadow);margin-bottom:18px}.viewer-head{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:13px 15px;border-bottom:1px solid var(--line)}.viewer-head h3{margin:0;font-size:15px}.viewer-head-right{display:flex;align-items:center;gap:10px;min-width:0}.viewer-label{font-size:12px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:430px}.live-pill{display:inline-flex;align-items:center;gap:6px;border-radius:999px;background:#ecfdf3;color:#027a48;padding:4px 8px;font-size:11px;font-weight:750;white-space:nowrap}.live-pill:before{content:"";width:7px;height:7px;border-radius:50%;background:#12b76a;box-shadow:0 0 0 3px #d1fadf}.viewer-stage{position:relative;background:radial-gradient(circle at 50% 42%,#f8fafc 0,#e8edf4 56%,#dde3eb 100%)}model-viewer.live-viewer{display:block;width:100%;height:min(68vh,720px);min-height:460px;--poster-color:transparent}.viewer-empty{height:420px;display:grid;place-items:center;text-align:center;color:var(--muted);padding:28px}.viewer-empty strong{display:block;color:var(--text);font-size:16px;margin-bottom:5px}.viewer-foot{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 15px;border-top:1px solid var(--line);color:var(--muted);font-size:12px}.viewer-foot .file{flex:0 0 auto}.render-details{margin-top:0;margin-bottom:18px}.render-details .render-grid{margin-top:12px}
 .dialog-backdrop{display:none;position:fixed;inset:0;background:#11182788;z-index:50;padding:20px;align-items:center;justify-content:center}.dialog-backdrop.show{display:flex}.dialog{width:min(620px,100%);background:#fff;border-radius:14px;padding:20px;box-shadow:0 25px 80px #0003}.dialog h2{margin:0 0 14px}.field{margin-bottom:12px}.field label{display:block;font-weight:650;margin-bottom:5px}.field textarea,.field input,.field select{width:100%;border:1px solid #cfd4dc;border-radius:8px;padding:10px}.field textarea{min-height:110px;resize:vertical}.actions{display:flex;justify-content:flex-end;gap:8px}.notice{margin-top:10px;color:var(--muted)}.empty-state{padding:50px;text-align:center;color:var(--muted)}
-@media(max-width:980px){.gallery{grid-template-columns:repeat(3,1fr)}.render-grid{grid-template-columns:repeat(2,1fr)}.reference-grid{grid-template-columns:repeat(3,1fr)}.feature-grid{grid-template-columns:repeat(2,1fr)}}@media(max-width:680px){.wrap{padding:14px}.gallery{grid-template-columns:repeat(2,1fr);gap:10px}.render-grid{grid-template-columns:1fr}.reference-grid{grid-template-columns:repeat(2,1fr)}.feature-grid{grid-template-columns:1fr}.brand h1{font-size:20px}.job-card{border-radius:10px}}
+@media(max-width:980px){.gallery{grid-template-columns:repeat(3,1fr)}.render-grid{grid-template-columns:repeat(2,1fr)}.reference-grid{grid-template-columns:repeat(3,1fr)}.feature-grid{grid-template-columns:repeat(2,1fr)}model-viewer.live-viewer{height:58vh;min-height:400px}}
+@media(max-width:680px){.wrap{padding:12px}header{align-items:flex-start;margin-bottom:16px}.brand h1{font-size:20px}.brand p{font-size:12px}.gallery{grid-template-columns:repeat(2,1fr);gap:10px}.render-grid{grid-template-columns:1fr}.reference-grid{grid-template-columns:repeat(2,1fr)}.feature-grid{grid-template-columns:1fr}.job-card{border-radius:10px}.detail-head{flex-direction:column;gap:12px}.detail-head>div{width:100%}.detail-actions{width:100%}.detail-actions .btn{flex:1;min-width:0}.viewer-head{align-items:flex-start;flex-direction:column}.viewer-head-right{width:100%;justify-content:space-between}.viewer-label{max-width:65vw}.viewer-foot{align-items:flex-start;flex-direction:column}.viewer-foot .file{width:100%;justify-content:center}model-viewer.live-viewer{height:54vh;min-height:330px}.viewer-empty{height:330px}.reference-panel,.downloads,.feature-panel{padding:12px}.dialog-backdrop{padding:0;align-items:flex-end}.dialog{border-radius:18px 18px 0 0;max-height:92vh;overflow:auto}}
+@media(max-width:520px){header{gap:10px}.gallery{grid-template-columns:1fr}.thumb{aspect-ratio:16/10}.reference-grid{grid-template-columns:1fr 1fr}.viewer-label{max-width:58vw}.meta{align-items:flex-start;flex-direction:column}.dialog{padding:16px}}
 </style>
 </head>
 <body>
@@ -393,11 +433,19 @@ header{display:flex;align-items:center;justify-content:space-between;gap:16px;ma
 <section class="detail" id="detailView">
   <div class="detail-head">
     <div><button class="btn" id="backBtn">← Gallery</button><h2 id="detailTitle">Job</h2><p id="detailMeta"></p></div>
-    <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn" id="improveBtn">Improve model</button><button class="btn danger" id="deleteBtn">Delete job</button></div>
+    <div class="detail-actions"><button class="btn" id="improveBtn">Improve model</button><button class="btn danger" id="deleteBtn">Delete job</button></div>
   </div>
   <div class="quality-banner" id="qualityBanner"></div>
+  <section class="viewer-panel" id="viewerPanel">
+    <div class="viewer-head"><h3>Live 3D model</h3><div class="viewer-head-right"><span class="live-pill">Auto-refreshing</span><span class="viewer-label" id="viewerLabel">Waiting for GLB export</span></div></div>
+    <div class="viewer-stage">
+      <model-viewer class="live-viewer" id="liveModelViewer" camera-controls touch-action="pan-y" interaction-prompt="auto" shadow-intensity="0.9" environment-image="neutral" exposure="1" loading="eager" alt="Interactive 3D model" hidden></model-viewer>
+      <div class="viewer-empty" id="viewerEmpty"><div><strong>No viewable model yet</strong>The viewer will switch on automatically as soon as this job exports its first GLB.</div></div>
+    </div>
+    <div class="viewer-foot"><span>Drag to rotate · pinch to zoom · the active model updates automatically with the job.</span><a class="file" id="modelDownload" href="#" download hidden><b>↓</b>Download active GLB</a></div>
+  </section>
   <section class="feature-panel show" id="featurePanel"><div class="feature-head"><div><h3>AI feature sub-jobs</h3><div class="feature-progress" id="featureProgress"></div></div></div><div class="feature-grid" id="featureGrid"></div></section>
-  <div class="render-grid" id="renderGrid"></div>
+  <details class="details render-details"><summary>QA renders & checkpoints</summary><div class="render-grid" id="renderGrid"></div></details>
   <section class="reference-panel"><h3>Reference images used</h3><p class="reference-help">These are the saved reference images attached to this job. Images included in the latest vision pass are marked below.</p><div class="reference-grid" id="referenceGrid"></div></section>
   <div class="downloads"><h3>Downloads</h3><div class="file-list" id="fileList"></div></div>
   <details class="details"><summary>More details</summary><pre id="detailJson"></pre></details>
@@ -416,12 +464,12 @@ header{display:flex;align-items:center;justify-content:space-between;gap:16px;ma
 </div>
 
 <script>
-const CLIENT_UI_VERSION="feature-workers-v3";
+const CLIENT_UI_VERSION="live-model-viewer-v1";
 const byId=id=>document.getElementById(id);
 const esc=value=>String(value??"").replace(/[&<>"']/g,ch=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[ch]));
 const els={
   home:byId("homeView"),detail:byId("detailView"),gallery:byId("jobGallery"),
-  title:byId("detailTitle"),meta:byId("detailMeta"),quality:byId("qualityBanner"),featurePanel:byId("featurePanel"),featureProgress:byId("featureProgress"),featureGrid:byId("featureGrid"),renders:byId("renderGrid"),references:byId("referenceGrid"),files:byId("fileList"),json:byId("detailJson"),
+  title:byId("detailTitle"),meta:byId("detailMeta"),quality:byId("qualityBanner"),viewer:byId("liveModelViewer"),viewerEmpty:byId("viewerEmpty"),viewerLabel:byId("viewerLabel"),modelDownload:byId("modelDownload"),featurePanel:byId("featurePanel"),featureProgress:byId("featureProgress"),featureGrid:byId("featureGrid"),renders:byId("renderGrid"),references:byId("referenceGrid"),files:byId("fileList"),json:byId("detailJson"),
   newBtn:byId("newJobBtn"),dialog:byId("newJobDialog"),cancel:byId("cancelNew"),create:byId("createModel"),
   prompt:byId("jobPrompt"),use:byId("jobUse"),width:byId("jobWidth"),notice:byId("newNotice"),
   back:byId("backBtn"),improve:byId("improveBtn"),deleteBtn:byId("deleteBtn")
@@ -432,6 +480,7 @@ let busy=false;
 
 function fileUrl(job,category,name){return "/dashboard/artifacts/"+encodeURIComponent(job)+"/"+encodeURIComponent(category)+"/"+encodeURIComponent(name)}
 function renderUrl(job,name,mtime){return "/dashboard/renders/"+encodeURIComponent(job)+"/"+encodeURIComponent(name)+"?v="+encodeURIComponent(mtime||"")}
+function modelUrl(job,model){return fileUrl(job,"exports",model.name)+"?v="+encodeURIComponent(model.mtime||"")}
 function latestImage(job){return (job.renders||[])[0]||null}
 function route(){
   const match=location.hash.match(/^#job\/([0-9a-f-]+)$/i);
@@ -461,6 +510,28 @@ function renderDetail(job){
   const auto=job.auto_improve||null;
   const autoText=auto?.enabled?(" · auto "+(auto.state||"")+" "+(auto.current_round||0)+"/"+(auto.max_rounds||30)):"";
   els.meta.textContent=(job.state||"")+" · "+(job.stage||"")+autoText+" · "+job.job_id;
+  const activeModel=job.latest_model||null;
+  if(activeModel?.name){
+    const src=modelUrl(job.job_id,activeModel);
+    els.viewerEmpty.hidden=true;
+    els.viewer.hidden=false;
+    els.viewer.setAttribute("alt","Interactive 3D model: "+job.prompt);
+    if(els.viewer.dataset.src!==src){
+      els.viewer.setAttribute("src",src);
+      els.viewer.dataset.src=src;
+    }
+    els.viewerLabel.textContent=(activeModel.version?("Active v"+activeModel.version):"Latest GLB")+" · "+activeModel.name;
+    els.modelDownload.href=src;
+    els.modelDownload.hidden=false;
+  }else{
+    els.viewer.hidden=true;
+    els.viewer.removeAttribute("src");
+    delete els.viewer.dataset.src;
+    els.viewerEmpty.hidden=false;
+    els.viewerLabel.textContent=job.state==="running"?"Building first viewable GLB…":"No GLB export yet";
+    els.modelDownload.hidden=true;
+    els.modelDownload.removeAttribute("href");
+  }
   const quality=job.quality_gate||null;
   const needsMesh=job.stage==="generic_needs_strategy_switch";
   const improvingMesh=job.stage==="adaptive_mesh_needs_refinement";
@@ -524,7 +595,7 @@ function renderDetail(job){
   els.files.innerHTML=files.length
     ? files.map(([category,file])=>'<a class="file" download href="'+fileUrl(job.job_id,category,file.name)+'"><b>↓</b>'+esc(file.name)+'</a>').join("")
     : '<span style="color:var(--muted)">No downloadable model files yet.</span>';
-  els.json.textContent=JSON.stringify({status:{state:job.state,stage:job.stage,modeling_strategy:job.modeling_strategy,quality_gate:job.quality_gate,auto_improve:job.auto_improve,reference_gate:job.reference_gate},feature_plan:job.feature_plan,references:job.references,latest_vision_images:job.latest_vision_images,qa:job.qa,history:job.history},null,2);
+  els.json.textContent=JSON.stringify({status:{state:job.state,stage:job.stage,modeling_strategy:job.modeling_strategy,quality_gate:job.quality_gate,auto_improve:job.auto_improve,reference_gate:job.reference_gate},latest_model:job.latest_model,feature_plan:job.feature_plan,references:job.references,latest_vision_images:job.latest_vision_images,qa:job.qa,history:job.history},null,2);
   const autoRunning=auto&&["scheduled","running","retrying"].includes(auto.state);
   els.improve.disabled=busy||!scene.length||autoRunning;
   if(!busy){

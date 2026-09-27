@@ -4,7 +4,11 @@ from PIL import Image
 
 from app.dashboard import _reference_rows
 from app.main import (
+    ReferencePackDecision,
+    ReferenceSearchPlan,
     _is_usable_reference_record,
+    _metadata_supports_reference_identity,
+    _normalize_reference_pack_payload,
     _prune_unverified_auto_references,
 )
 from app.research import _candidate_relevance_score
@@ -119,3 +123,81 @@ def test_dashboard_hides_unverified_search_candidates(tmp_path):
 
     assert [row["name"] for row in rows] == [visible.name]
     assert rows[0]["match_score"] == 0.92
+
+
+
+def test_reference_verifier_normalizes_common_model_output_variants():
+    records = [
+        {"stored_name": "candidate-a.jpg"},
+        {"stored_name": "candidate-b.jpg"},
+    ]
+    payload = {
+        "results": [
+            {
+                "filename": "candidate-a.jpg",
+                "accepted": "yes",
+                "score": 92,
+                "identity_match": "true",
+                "geometry_useful": True,
+                "explanation": "Clear view of the requested car.",
+            },
+            {
+                # Deliberately omit filename to exercise positional recovery.
+                "relevant": False,
+                "confidence": 0.2,
+                "reason": "Different model.",
+            },
+        ]
+    }
+
+    normalized = _normalize_reference_pack_payload(payload, records)
+    pack = ReferencePackDecision.model_validate(normalized)
+
+    assert len(pack.decisions) == 2
+    assert pack.decisions[0].stored_name == "candidate-a.jpg"
+    assert pack.decisions[0].accept is True
+    assert pack.decisions[0].match_score == 0.92
+    assert pack.decisions[0].exact_identity_match is True
+    assert pack.decisions[0].useful_for_geometry is True
+    assert pack.decisions[1].stored_name == "candidate-b.jpg"
+    assert pack.decisions[1].accept is False
+
+
+def test_metadata_identity_supports_named_model_without_invented_generation():
+    plan = ReferenceSearchPlan(
+        primary_query="Volkswagen Polo",
+        subject_description="A Volkswagen Polo car",
+        identity_constraints=[],
+    )
+    matching = {
+        "title": "File:Volkswagen Polo front three-quarter.jpg",
+        "description": "Volkswagen Polo hatchback",
+    }
+    sibling = {
+        "title": "File:Volkswagen Golf front.jpg",
+        "description": "Volkswagen Golf hatchback",
+    }
+
+    assert _metadata_supports_reference_identity(plan, matching) is True
+    assert _metadata_supports_reference_identity(plan, sibling) is False
+
+
+
+def test_reference_verifier_recovers_missing_accept_flag():
+    records = [{"stored_name": "candidate-a.jpg"}]
+    payload = {
+        "decisions": [
+            {
+                "stored_name": "candidate-a.jpg",
+                "match_score": 0.91,
+                "exact_identity_match": True,
+                "useful_for_geometry": True,
+                "reason": "Exact requested subject and useful three-quarter view.",
+            }
+        ]
+    }
+
+    normalized = _normalize_reference_pack_payload(payload, records)
+    pack = ReferencePackDecision.model_validate(normalized)
+
+    assert pack.decisions[0].accept is True

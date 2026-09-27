@@ -4,6 +4,7 @@ import asyncio
 import base64
 import hashlib
 import json
+import re
 import shutil
 import uuid
 from collections.abc import Awaitable, Callable
@@ -1357,6 +1358,17 @@ async def _run_auto_improve(job_id: str, max_rounds: int) -> None:
     if not root.is_dir():
         return
 
+    if not _usable_reference_index(root):
+        append_history(root, "reference_research_retry", reason="auto-improve had no usable references")
+        try:
+            await research_job(job_id, ResearchRequest(max_images=5))
+        except HTTPException as exc:
+            append_history(
+                root,
+                "reference_research_retry_failed",
+                error=str(exc.detail),
+            )
+
     requested_rounds = max(1, min(30, int(max_rounds)))
     round_limit = requested_rounds
     round_number = 0
@@ -2181,7 +2193,10 @@ async def _plan_reference_search(
         "keep that identity intact and remove instructions such as 'make', '3D model', print dimensions, materials, "
         "or workflow chatter. The primary query should be short and identity-focused. Alternate queries may add useful "
         "exterior/view words but must not broaden to sibling products or similar-looking subjects. identity_constraints "
-        "must state what an image has to visibly depict to count as the requested subject. Return JSON only."
+        "must state what an image has to visibly depict to count as the requested subject. NEVER invent a model year, "
+        "generation, trim, body style, color, or edition that the user did not request. If the user asks only for a "
+        "Volkswagen Polo, for example, a genuine Volkswagen Polo is an identity match regardless of generation; prefer "
+        "a coherent set, but do not reject all references for lack of an unspecified year. Return JSON only."
     )
     prompt = (
         f"Full modeling request: {job_request.get('prompt', '')}\n"
@@ -2213,6 +2228,153 @@ async def _plan_reference_search(
         subject_description=str(job_request.get("prompt") or requested_query)[:1200],
         identity_constraints=[],
     )
+
+
+
+def _reference_bool(value: object, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value or "").strip().lower()
+    if text in {"true", "yes", "y", "1", "accept", "accepted", "match", "matched"}:
+        return True
+    if text in {"false", "no", "n", "0", "reject", "rejected", "mismatch"}:
+        return False
+    return default
+
+
+def _normalize_reference_pack_payload(
+    data: object,
+    records: list[dict],
+) -> dict:
+    """Tolerate common structured-output variations from multimodal models."""
+    if isinstance(data, list):
+        raw_items = data
+    elif isinstance(data, dict):
+        raw_items = (
+            data.get("decisions")
+            or data.get("results")
+            or data.get("references")
+            or data.get("images")
+            or data.get("candidates")
+            or []
+        )
+        if isinstance(raw_items, dict):
+            raw_items = [
+                {"stored_name": key, **(value if isinstance(value, dict) else {"accept": value})}
+                for key, value in raw_items.items()
+            ]
+    else:
+        raw_items = []
+
+    if not isinstance(raw_items, list):
+        raw_items = []
+
+    expected_names = [
+        str(record.get("stored_name") or "")
+        for record in records
+        if record.get("stored_name")
+    ]
+    normalized: list[dict] = []
+    used_names: set[str] = set()
+
+    for position, raw in enumerate(raw_items[: len(expected_names)]):
+        if not isinstance(raw, dict):
+            raw = {"accept": raw}
+
+        stored_name = str(
+            raw.get("stored_name")
+            or raw.get("filename")
+            or raw.get("file")
+            or raw.get("image")
+            or raw.get("name")
+            or ""
+        ).strip()
+        if stored_name not in expected_names:
+            stored_name = expected_names[position] if position < len(expected_names) else ""
+        if not stored_name or stored_name in used_names:
+            continue
+        used_names.add(stored_name)
+
+        raw_score = (
+            raw.get("match_score")
+            if "match_score" in raw
+            else raw.get("score", raw.get("confidence", raw.get("similarity", 0.0)))
+        )
+        try:
+            score = float(raw_score or 0.0)
+            if 1.0 < score <= 100.0:
+                score /= 100.0
+        except (TypeError, ValueError):
+            score = 0.0
+        score = max(0.0, min(1.0, score))
+
+        exact_raw = raw.get(
+            "exact_identity_match",
+            raw.get("identity_match", raw.get("exact_match")),
+        )
+        useful_raw = raw.get(
+            "useful_for_geometry",
+            raw.get("geometry_useful", raw.get("useful")),
+        )
+        exact = _reference_bool(exact_raw, default=False)
+        useful = _reference_bool(useful_raw, default=False)
+        accept_raw = raw.get("accept", raw.get("accepted", raw.get("relevant")))
+        accepted = _reference_bool(
+            accept_raw,
+            default=bool(score >= 0.70 and exact and useful),
+        )
+        if exact_raw is None and accepted and score >= 0.85:
+            exact = True
+        if useful_raw is None and accepted:
+            useful = True
+        reason = str(
+            raw.get("reason")
+            or raw.get("explanation")
+            or raw.get("summary")
+            or ""
+        ).strip()[:1200]
+
+        normalized.append(
+            {
+                "stored_name": stored_name,
+                "accept": accepted,
+                "match_score": score,
+                "exact_identity_match": exact,
+                "useful_for_geometry": useful,
+                "reason": reason,
+            }
+        )
+
+    return {"decisions": normalized}
+
+
+def _metadata_supports_reference_identity(
+    plan: ReferenceSearchPlan,
+    record: dict,
+) -> bool:
+    """Strong metadata support can rescue a cautious visual identity flag, not a bad image."""
+    def tokens(value: object) -> list[str]:
+        ignored = {
+            "a", "an", "the", "car", "vehicle", "model", "image", "photo",
+            "front", "rear", "side", "exterior", "view", "of",
+        }
+        return [
+            token
+            for token in re.findall(r"[a-z0-9]+", str(value or "").lower())
+            if len(token) > 1 and token not in ignored
+        ]
+
+    identity_terms = tokens(plan.primary_query)
+    if not identity_terms:
+        return False
+    metadata_text = " ".join(
+        str(record.get(key) or "")
+        for key in ("title", "source_title", "description")
+    ).lower()
+    metadata_tokens = set(tokens(metadata_text))
+    return all(term in metadata_tokens for term in identity_terms)
 
 
 async def _verify_reference_batch(
@@ -2250,9 +2412,12 @@ async def _verify_reference_batch(
     system = (
         "You are a strict visual reference curator for 3D reconstruction. Inspect the ACTUAL PIXELS of every supplied "
         "candidate image. Accept an image only when it clearly depicts the exact requested subject and is useful for "
-        "modeling its visible geometry. For a named make/model/product/character, reject sibling models, different "
-        "generations when visibly inconsistent, unrelated objects, logos, maps, diagrams, screenshots, isolated parts, "
-        "or images where identity is uncertain. Do not trust filenames/titles over pixels. A useful geometry reference "
+        "modeling its visible geometry. For a named make/model/product/character, reject sibling models, unrelated "
+        "objects, logos, maps, diagrams, screenshots, isolated parts, "
+        "or images where identity is uncertain. Only enforce a particular year/generation/trim when it is explicitly "
+        "present in the user's requested identity/constraints; otherwise do not fail a genuine subject merely because "
+        "its generation was not specified. Use filenames/titles as supporting evidence, never as a substitute for pixels. "
+        "A useful geometry reference "
         "should show a substantial portion of the requested subject with readable silhouette/proportions. Return one "
         "decision for every supplied stored_name. exact_identity_match must be true for accepted images. "
         "useful_for_geometry must also be true for accepted images. Return JSON only."
@@ -2282,7 +2447,9 @@ async def _verify_reference_batch(
                 temperature=0.0,
                 num_predict=4096,
             )
-            pack = ReferencePackDecision.model_validate(result.data)
+            pack = ReferencePackDecision.model_validate(
+                _normalize_reference_pack_payload(result.data, usable_records)
+            )
         except (OllamaProxyError, httpx.HTTPError, ValidationError, ValueError, TypeError) as exc:
             errors.append(f"{candidate_model}: {exc}")
             continue
@@ -2318,13 +2485,18 @@ async def _verify_reference_batch(
             "verification_reason": decision.reason,
             "verification_model": selected_model,
             "verification_query": query,
+            "metadata_identity_support": _metadata_supports_reference_identity(plan, record),
             "verified_at": datetime.now(UTC).isoformat(),
         }
+        metadata_identity = _metadata_supports_reference_identity(plan, record)
         should_accept = (
             decision.accept
-            and decision.exact_identity_match
             and decision.useful_for_geometry
             and decision.match_score >= 0.70
+            and (
+                decision.exact_identity_match
+                or (metadata_identity and decision.match_score >= 0.78)
+            )
         )
         if should_accept:
             accepted.append(verified_record)
@@ -2358,8 +2530,8 @@ async def _verify_reference_candidates(
 ) -> tuple[list[dict], list[dict]]:
     accepted: list[dict] = []
     rejected: list[dict] = []
-    for start in range(0, len(records), 8):
-        batch = records[start : start + 8]
+    for start in range(0, len(records), 4):
+        batch = records[start : start + 4]
         batch_accepted, batch_rejected = await _verify_reference_batch(
             root,
             plan=plan,
@@ -2388,7 +2560,7 @@ async def _verify_reference_candidates(
         if len(accepted) >= max_images:
             # Candidates not evaluated because we already have enough should not remain
             # loose in the references directory.
-            for record in records[start + 8 :]:
+            for record in records[start + 4 :]:
                 stored_name = str(record.get("stored_name") or "")
                 if stored_name:
                     try:
@@ -4710,6 +4882,16 @@ async def auto_improve_job_api(job_id: str, request: AutoImproveRequest) -> dict
 
 async def refine_generic_scene(job_id: str, request: GenericRefineRequest) -> dict:
     root = _require_job(job_id)
+    if not _usable_reference_index(root):
+        append_history(root, "reference_research_retry", reason="refinement had no usable references")
+        try:
+            await research_job(job_id, ResearchRequest(max_images=5))
+        except HTTPException as exc:
+            append_history(
+                root,
+                "reference_research_retry_failed",
+                error=str(exc.detail),
+            )
     await _ensure_feature_plan(job_id, _load_subject_inventory(root))
     status_path = root / "status.json"
     status_payload: dict = {}

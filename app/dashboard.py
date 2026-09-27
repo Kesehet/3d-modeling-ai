@@ -10,7 +10,7 @@ from fastapi.responses import HTMLResponse
 from .config import JOBS_ROOT
 
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
-PUBLIC_ARTIFACT_CATEGORIES = {"renders", "scene", "exports"}
+PUBLIC_ARTIFACT_CATEGORIES = {"references", "renders", "scene", "exports"}
 
 
 def _safe_job_root(job_id: str) -> Path:
@@ -39,6 +39,54 @@ def _artifact_rows(root: Path, category: str) -> list[dict]:
     return rows
 
 
+def _reference_rows(root: Path) -> list[dict]:
+    rows = [
+        item
+        for item in _artifact_rows(root, "references")
+        if Path(item["name"]).suffix.lower() in IMAGE_SUFFIXES
+    ]
+    index_path = root / "references.json"
+    metadata_by_name: dict[str, dict] = {}
+    if index_path.exists():
+        try:
+            parsed = json.loads(index_path.read_text(encoding="utf-8"))
+            if isinstance(parsed, list):
+                metadata_by_name = {
+                    str(item.get("stored_name")): item
+                    for item in parsed
+                    if isinstance(item, dict) and item.get("stored_name")
+                }
+        except (OSError, json.JSONDecodeError):
+            metadata_by_name = {}
+
+    for row in rows:
+        metadata = metadata_by_name.get(row["name"], {})
+        row.update(
+            {
+                "original_name": metadata.get("original_name"),
+                "title": metadata.get("title"),
+                "provider": metadata.get("provider"),
+                "source_url": metadata.get("source_url"),
+                "width": metadata.get("width"),
+                "height": metadata.get("height"),
+                "uploaded_at": metadata.get("uploaded_at") or metadata.get("researched_at"),
+            }
+        )
+    return rows
+
+
+def _latest_vision_images(root: Path) -> list[str]:
+    path = root / "vision-latest.json"
+    if not path.exists():
+        return []
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    images = payload.get("images") if isinstance(payload, dict) else None
+    return [str(item) for item in images] if isinstance(images, list) else []
+
+
 def jobs_snapshot() -> dict:
     rows = []
     if JOBS_ROOT.exists():
@@ -57,6 +105,8 @@ def jobs_snapshot() -> dict:
                 continue
 
             artifacts = {category: _artifact_rows(root, category) for category in PUBLIC_ARTIFACT_CATEGORIES}
+            references = _reference_rows(root)
+            latest_vision_images = _latest_vision_images(root)
             all_renders = [
                 item
                 for item in artifacts["renders"]
@@ -111,6 +161,8 @@ def jobs_snapshot() -> dict:
                     "stage": status.get("stage", "unknown"),
                     "updated_at": status.get("updated_at"),
                     "renders": renders,
+                    "references": references,
+                    "latest_vision_images": latest_vision_images,
                     "artifacts": artifacts,
                     "history": history,
                     "iterations": [
@@ -171,10 +223,11 @@ header{display:flex;align-items:center;justify-content:space-between;gap:16px;ma
 .card-body{padding:13px}.prompt{font-weight:700;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;min-height:42px}.meta{display:flex;justify-content:space-between;gap:8px;color:var(--muted);font-size:12px;margin-top:8px}.status{font-weight:700}.ready{color:var(--green)}.failed{color:var(--red)}.running{color:#b54708}
 .detail{display:none}.detail.show{display:block}.home.hidden{display:none}.detail-head{display:flex;justify-content:space-between;align-items:flex-start;gap:16px;margin-bottom:18px}.detail-head h2{margin:8px 0 4px;font-size:24px}.detail-head p{margin:0;color:var(--muted)}
 .render-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}.render{background:#fff;border:1px solid var(--line);border-radius:12px;overflow:hidden}.render img{width:100%;aspect-ratio:1;object-fit:cover;display:block}.render-name{padding:9px 11px;color:var(--muted);font-size:12px}
+.reference-panel{margin-top:22px;background:#fff;border:1px solid var(--line);border-radius:12px;padding:16px}.reference-panel h3{margin:0 0 4px}.reference-help{color:var(--muted);font-size:12px;margin:0 0 12px}.reference-grid{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:12px}.reference-card{border:1px solid var(--line);border-radius:10px;overflow:hidden;background:#fafafa}.reference-card img{display:block;width:100%;aspect-ratio:1;object-fit:cover}.reference-info{padding:8px 9px;font-size:11px;color:var(--muted)}.reference-info strong{display:block;color:var(--text);font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.reference-used{display:inline-block;margin-top:5px;padding:2px 6px;border-radius:999px;background:#dcfce7;color:#166534;font-weight:700;font-size:10px}
 .downloads{margin-top:22px;background:#fff;border:1px solid var(--line);border-radius:12px;padding:16px}.downloads h3{margin:0 0 10px}.file-list{display:flex;gap:8px;flex-wrap:wrap}.file{display:inline-flex;text-decoration:none;color:var(--text);border:1px solid var(--line);border-radius:8px;padding:8px 10px;background:#fafafa}.file b{margin-right:6px}
 .details{margin-top:16px;background:#fff;border:1px solid var(--line);border-radius:12px;padding:14px}.details summary{cursor:pointer;font-weight:700}.details pre{white-space:pre-wrap;word-break:break-word;background:#f8fafc;padding:12px;border-radius:8px;max-height:320px;overflow:auto}
 .dialog-backdrop{display:none;position:fixed;inset:0;background:#11182788;z-index:50;padding:20px;align-items:center;justify-content:center}.dialog-backdrop.show{display:flex}.dialog{width:min(620px,100%);background:#fff;border-radius:14px;padding:20px;box-shadow:0 25px 80px #0003}.dialog h2{margin:0 0 14px}.field{margin-bottom:12px}.field label{display:block;font-weight:650;margin-bottom:5px}.field textarea,.field input,.field select{width:100%;border:1px solid #cfd4dc;border-radius:8px;padding:10px}.field textarea{min-height:110px;resize:vertical}.actions{display:flex;justify-content:flex-end;gap:8px}.notice{margin-top:10px;color:var(--muted)}.empty-state{padding:50px;text-align:center;color:var(--muted)}
-@media(max-width:980px){.gallery{grid-template-columns:repeat(3,1fr)}.render-grid{grid-template-columns:repeat(2,1fr)}}@media(max-width:680px){.wrap{padding:14px}.gallery{grid-template-columns:repeat(2,1fr);gap:10px}.render-grid{grid-template-columns:1fr}.brand h1{font-size:20px}.job-card{border-radius:10px}}
+@media(max-width:980px){.gallery{grid-template-columns:repeat(3,1fr)}.render-grid{grid-template-columns:repeat(2,1fr)}.reference-grid{grid-template-columns:repeat(3,1fr)}}@media(max-width:680px){.wrap{padding:14px}.gallery{grid-template-columns:repeat(2,1fr);gap:10px}.render-grid{grid-template-columns:1fr}.reference-grid{grid-template-columns:repeat(2,1fr)}.brand h1{font-size:20px}.job-card{border-radius:10px}}
 </style>
 </head>
 <body>
@@ -189,6 +242,7 @@ header{display:flex;align-items:center;justify-content:space-between;gap:16px;ma
     <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn" id="improveBtn">Improve model</button><button class="btn danger" id="deleteBtn">Delete job</button></div>
   </div>
   <div class="render-grid" id="renderGrid"></div>
+  <section class="reference-panel"><h3>Reference images used</h3><p class="reference-help">These are the saved reference images attached to this job. Images included in the latest vision pass are marked below.</p><div class="reference-grid" id="referenceGrid"></div></section>
   <div class="downloads"><h3>Downloads</h3><div class="file-list" id="fileList"></div></div>
   <details class="details"><summary>More details</summary><pre id="detailJson"></pre></details>
 </section>
@@ -210,7 +264,7 @@ const byId=id=>document.getElementById(id);
 const esc=value=>String(value??"").replace(/[&<>"']/g,ch=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[ch]));
 const els={
   home:byId("homeView"),detail:byId("detailView"),gallery:byId("jobGallery"),
-  title:byId("detailTitle"),meta:byId("detailMeta"),renders:byId("renderGrid"),files:byId("fileList"),json:byId("detailJson"),
+  title:byId("detailTitle"),meta:byId("detailMeta"),renders:byId("renderGrid"),references:byId("referenceGrid"),files:byId("fileList"),json:byId("detailJson"),
   newBtn:byId("newJobBtn"),dialog:byId("newJobDialog"),cancel:byId("cancelNew"),create:byId("createModel"),
   prompt:byId("jobPrompt"),use:byId("jobUse"),width:byId("jobWidth"),notice:byId("newNotice"),
   back:byId("backBtn"),improve:byId("improveBtn"),deleteBtn:byId("deleteBtn")
@@ -251,13 +305,22 @@ function renderDetail(job){
   els.renders.innerHTML=(job.renders||[]).length
     ? job.renders.map(image=>'<div class="render"><a target="_blank" href="'+renderUrl(job.job_id,image.name,image.mtime)+'"><img loading="lazy" src="'+renderUrl(job.job_id,image.name,image.mtime)+'"></a><div class="render-name">'+esc(image.name)+'</div></div>').join("")
     : '<div class="empty-state" style="grid-column:1/-1">No renders yet. This page refreshes automatically while the job runs.</div>';
+  const latestVision=new Set(job.latest_vision_images||[]);
+  els.references.innerHTML=(job.references||[]).length
+    ? job.references.map(ref=>{
+        const label=ref.original_name||ref.title||ref.name;
+        const meta=[ref.provider,ref.width&&ref.height?(ref.width+"×"+ref.height):null].filter(Boolean).join(" · ");
+        const used=latestVision.has("references/"+ref.name);
+        return '<div class="reference-card"><a target="_blank" href="'+fileUrl(job.job_id,"references",ref.name)+'"><img loading="lazy" src="'+fileUrl(job.job_id,"references",ref.name)+'"></a><div class="reference-info"><strong title="'+esc(label)+'">'+esc(label)+'</strong>'+(meta?'<div>'+esc(meta)+'</div>':'')+(used?'<span class="reference-used">Used in latest vision pass</span>':'')+'</div></div>';
+      }).join("")
+    : '<div class="empty-state" style="grid-column:1/-1">No reference images are saved for this job.</div>';
   const scene=(job.artifacts?.scene||[]).filter(file=>/\.(blend)$/i.test(file.name));
   const exports=(job.artifacts?.exports||[]).filter(file=>/\.(glb|obj|stl|3mf|json)$/i.test(file.name));
   const files=[...scene.map(file=>["scene",file]),...exports.map(file=>["exports",file])];
   els.files.innerHTML=files.length
     ? files.map(([category,file])=>'<a class="file" download href="'+fileUrl(job.job_id,category,file.name)+'"><b>↓</b>'+esc(file.name)+'</a>').join("")
     : '<span style="color:var(--muted)">No downloadable model files yet.</span>';
-  els.json.textContent=JSON.stringify({status:{state:job.state,stage:job.stage},qa:job.qa,history:job.history},null,2);
+  els.json.textContent=JSON.stringify({status:{state:job.state,stage:job.stage},references:job.references,latest_vision_images:job.latest_vision_images,qa:job.qa,history:job.history},null,2);
   els.improve.disabled=busy||!scene.length;
   els.deleteBtn.disabled=busy||job.state==="running";
 }

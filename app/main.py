@@ -1865,8 +1865,25 @@ async def _verify_reference_candidates(
             query=query,
             records=batch,
         )
-        accepted.extend(batch_accepted)
+        remaining_slots = max(0, max_images - len(accepted))
+        accepted.extend(batch_accepted[:remaining_slots])
         rejected.extend(batch_rejected)
+        for overflow in batch_accepted[remaining_slots:]:
+            rejected.append(
+                {
+                    **overflow,
+                    "verification_reason": (
+                        str(overflow.get("verification_reason") or "")
+                        + " Candidate was valid but exceeded the requested reference-pack size."
+                    ).strip(),
+                }
+            )
+            stored_name = str(overflow.get("stored_name") or "")
+            if stored_name:
+                try:
+                    (root / "references" / Path(stored_name).name).unlink(missing_ok=True)
+                except OSError:
+                    pass
         if len(accepted) >= max_images:
             # Candidates not evaluated because we already have enough should not remain
             # loose in the references directory.
@@ -1878,7 +1895,7 @@ async def _verify_reference_candidates(
                     except OSError:
                         pass
             break
-    return accepted[:max_images], rejected
+    return accepted, rejected
 
 
 async def research_job(job_id: str, request: ResearchRequest) -> dict:

@@ -664,6 +664,26 @@ class ResearchRequest(BaseModel):
     max_images: int = Field(default=6, ge=1, le=8)
 
 
+class ReferenceSearchPlan(BaseModel):
+    primary_query: str = Field(min_length=1, max_length=180)
+    alternate_queries: list[str] = Field(default_factory=list, max_length=3)
+    subject_description: str = Field(default="", max_length=1200)
+    identity_constraints: list[str] = Field(default_factory=list, max_length=12)
+
+
+class ReferenceCandidateDecision(BaseModel):
+    stored_name: str = Field(min_length=1, max_length=220)
+    accept: bool = False
+    match_score: float = Field(default=0.0, ge=0.0, le=1.0)
+    exact_identity_match: bool = False
+    useful_for_geometry: bool = False
+    reason: str = Field(default="", max_length=1200)
+
+
+class ReferencePackDecision(BaseModel):
+    decisions: list[ReferenceCandidateDecision] = Field(default_factory=list, max_length=8)
+
+
 class PikachuRefineRequest(BaseModel):
     iterations: int = Field(default=2, ge=1, le=3)
     auto_research: bool = True

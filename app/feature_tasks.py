@@ -58,6 +58,7 @@ class FeatureEvaluation(BaseModel):
 
 
 class FeaturePlan(BaseModel):
+    plan_version: int = Field(default=1, ge=1)
     subject: str = Field(default="", max_length=160)
     coordinator_notes: str = Field(default="", max_length=2000)
     features: list[FeatureTask] = Field(min_length=1, max_length=48)
@@ -206,6 +207,7 @@ def normalize_feature_plan_payload(data: object, *, subject: str) -> dict:
             item["parent"] = resolved_parent if resolved_parent in valid_ids else None
 
     return {
+        "plan_version": 2,
         "subject": str(data.get("subject") or subject)[:160],
         "coordinator_notes": str(
             data.get("coordinator_notes")
@@ -432,6 +434,7 @@ def feature_plan_summary(root: Path) -> dict | None:
         counts[feature.status] = counts.get(feature.status, 0) + 1
     next_task = active_or_next_feature(plan)
     return {
+        "plan_version": plan.plan_version,
         "subject": plan.subject,
         "coordinator_notes": plan.coordinator_notes,
         "active_feature_id": plan.active_feature_id,

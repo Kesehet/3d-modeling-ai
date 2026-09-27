@@ -5120,7 +5120,6 @@ def _normalize_hard_surface_cage_payload(
     data: object,
     fallback_title: str,
     *,
-    subject_family: str = "",
     complexity: str = "simple",
 ) -> dict:
     if not isinstance(data, dict):
@@ -5164,28 +5163,12 @@ def _normalize_hard_surface_cage_payload(
     axis = str(normalized.get("axis") or normalized.get("length_axis") or "y").lower()
     normalized["axis"] = axis if axis in {"x", "y"} else "y"
 
-    family_text = " ".join(
-        [
-            str(subject_family or ""),
-            str(normalized["title"]),
-            str(fallback_title or ""),
-        ]
-    ).lower()
-    vehicle_like = bool(
-        re.search(
-            r"\b(?:vehicle|automobile|car|sedan|hatchback|coupe|suv|truck|van|roadster|wagon|prius)\b",
-            family_text,
-        )
-    )
-    complexity = str(complexity or "moderate").lower()
-    if vehicle_like:
-        min_stations = 9
-        min_profile_points = 6
-    elif complexity == "complex":
-        min_stations = 7
+    complexity = str(complexity or "simple").lower()
+    if complexity == "complex":
+        min_stations = 8
         min_profile_points = 6
     elif complexity == "moderate":
-        min_stations = 5
+        min_stations = 6
         min_profile_points = 5
     else:
         min_stations = 4
@@ -5394,48 +5377,15 @@ def _normalize_hard_surface_cage_payload(
         station["profile"][0][0] = 0.0
         station["profile"][-1][0] = 0.0
 
-    # A five-section full vehicle cage is not a viable body model. Densify the
-    # longitudinal control cage deterministically rather than asking Blender to
-    # subdivide an already-wrong silhouette.
+    # Do not fabricate missing shape information by interpolating a sparse
+    # cage. If the planner did not provide enough independent control sections
+    # for the declared complexity, reject the plan and let another model/pass
+    # produce a genuinely richer cage.
     if len(deduped) < min_stations:
-        first_position = deduped[0]["position"]
-        last_position = deduped[-1]["position"]
-        if last_position - first_position < 0.5:
-            raise ValueError("Hard-surface cage longitudinal span is too small.")
-        dense: list[dict] = []
-        for index in range(min_stations):
-            position = first_position + (last_position - first_position) * index / (min_stations - 1)
-            right_index = 1
-            while (
-                right_index < len(deduped)
-                and deduped[right_index]["position"] < position
-            ):
-                right_index += 1
-            if right_index >= len(deduped):
-                dense.append(
-                    {
-                        "position": position,
-                        "profile": [list(point) for point in deduped[-1]["profile"]],
-                    }
-                )
-                continue
-            left = deduped[max(0, right_index - 1)]
-            right = deduped[right_index]
-            span = right["position"] - left["position"]
-            mix = 0.0 if abs(span) < 1e-6 else (position - left["position"]) / span
-            dense.append(
-                {
-                    "position": position,
-                    "profile": [
-                        [
-                            pa[0] * (1.0 - mix) + pb[0] * mix,
-                            pa[1] * (1.0 - mix) + pb[1] * mix,
-                        ]
-                        for pa, pb in zip(left["profile"], right["profile"])
-                    ],
-                }
-            )
-        deduped = dense
+        raise ValueError(
+            f"Hard-surface cage is under-specified for {complexity} geometry: "
+            f"{len(deduped)} stations supplied; at least {min_stations} required."
+        )
 
     axis_span = deduped[-1]["position"] - deduped[0]["position"]
     max_half_width = max(point[0] for station in deduped for point in station["profile"])
@@ -5486,66 +5436,36 @@ def _normalize_hard_surface_cage_payload(
             except (TypeError, ValueError):
                 continue
 
-    # Semantic vehicle cutters are common and materially affect recognition.
-    # Repair catastrophic LLM output (e.g. front arch, rear arch and grille all
-    # at [0,0,0]) from the cage bounds before Blender ever sees it.
-    if vehicle_like and cutters:
-        axis_index = 1 if normalized["axis"] == "y" else 0
-        width_index = 0 if normalized["axis"] == "y" else 1
-        front_axis = deduped[0]["position"] + axis_span * 0.24
-        rear_axis = deduped[-1]["position"] - axis_span * 0.24
-        wheel_radius = max(0.16 * axis_span, 0.34 * height_span)
-        wheel_radius = min(wheel_radius, 0.52 * height_span)
-        wheel_center_z = min_z + wheel_radius * 0.92
-        wheel_depth = max_half_width * 1.35
-
-        for item in cutters:
-            name = item["name"].lower().replace("-", "_").replace(" ", "_")
-            if "wheel" in name or "arch" in name:
-                item["shape"] = "cylinder"
-                item["location"][width_index] = 0.0
-                if "front" in name:
-                    item["location"][axis_index] = front_axis
-                elif "rear" in name or "back" in name:
-                    item["location"][axis_index] = rear_axis
-                elif abs(item["location"][axis_index]) < axis_span * 0.08:
-                    item["location"][axis_index] = front_axis
-                item["location"][2] = wheel_center_z
-                item["scale"] = [wheel_radius, wheel_radius, wheel_depth]
-                item["rotation_deg"] = (
-                    [0.0, 90.0, 0.0]
-                    if normalized["axis"] == "y"
-                    else [90.0, 0.0, 0.0]
+    # A planner that collapses several unrelated boolean operations onto the
+    # same point is emitting placeholder geometry. Reject it rather than
+    # silently guessing what the cutters were supposed to mean.
+    if len(cutters) >= 3:
+        cluster_tolerance = max(axis_span, max_half_width * 2.0, height_span) * 0.025
+        for index, first in enumerate(cutters):
+            collapsed = [first]
+            for second in cutters[index + 1:]:
+                distance = sum(
+                    (float(first["location"][axis]) - float(second["location"][axis])) ** 2
+                    for axis in range(3)
+                ) ** 0.5
+                if distance <= cluster_tolerance:
+                    collapsed.append(second)
+            if len(collapsed) >= 3:
+                names = ", ".join(item["name"] for item in collapsed[:4])
+                raise ValueError(
+                    "Hard-surface cage contains three or more cutters collapsed "
+                    f"onto one location ({names}); re-plan with deliberate cutter placement."
                 )
-            elif "grille" in name or "intake" in name:
-                item["shape"] = "cube"
-                item["location"] = [0.0, 0.0, min_z + height_span * 0.38]
-                item["location"][axis_index] = deduped[0]["position"] + axis_span * 0.035
-                item["location"][width_index] = 0.0
-                if normalized["axis"] == "y":
-                    item["scale"] = [
-                        max_half_width * 0.76,
-                        axis_span * 0.045,
-                        height_span * 0.14,
-                    ]
-                else:
-                    item["scale"] = [
-                        axis_span * 0.045,
-                        max_half_width * 0.76,
-                        height_span * 0.14,
-                    ]
-                item["rotation_deg"] = [0.0, 0.0, 0.0]
 
-    # Do not execute duplicated booleans at effectively the same point. They
-    # destroy topology and provide no useful visual information.
+    # Exact duplicate cutter transforms are redundant and can damage topology.
     deduped_cutters: list[dict] = []
-    seen_cutters: set[tuple[str, int, int, int]] = set()
+    seen_cutters: set[tuple] = set()
     for item in cutters:
         key = (
             item["shape"],
-            round(item["location"][0] * 20),
-            round(item["location"][1] * 20),
-            round(item["location"][2] * 20),
+            *(round(float(value), 4) for value in item["location"]),
+            *(round(float(value), 4) for value in item["scale"]),
+            *(round(float(value), 3) for value in item["rotation_deg"]),
         )
         if key in seen_cutters:
             continue
@@ -5604,21 +5524,11 @@ async def _build_hard_surface_cage_spec(
     feature_plan = await _ensure_feature_plan(job_id, inventory)
     feature_plan_context = feature_plan.model_dump() if feature_plan is not None else {}
     feature_context = feature_task.model_dump() if feature_task is not None else {}
-    subject_family = inventory.subject_family if inventory is not None else ""
     subject_complexity = inventory.complexity if inventory is not None else "moderate"
-    family_text = f"{subject_family} {job_request.get('prompt', '')}".lower()
-    vehicle_like = bool(
-        re.search(
-            r"\b(?:vehicle|automobile|car|sedan|hatchback|coupe|suv|truck|van|prius)\b",
-            family_text,
-        )
-    )
-    if vehicle_like:
-        min_cage_stations, min_profile_points = 9, 6
-    elif subject_complexity == "complex":
-        min_cage_stations, min_profile_points = 7, 6
+    if subject_complexity == "complex":
+        min_cage_stations, min_profile_points = 8, 6
     elif subject_complexity == "moderate":
-        min_cage_stations, min_profile_points = 5, 5
+        min_cage_stations, min_profile_points = 6, 5
     else:
         min_cage_stations, min_profile_points = 4, 4
 
@@ -5661,8 +5571,8 @@ async def _build_hard_surface_cage_spec(
         f"Geometry budget for this subject: emit AT LEAST {min_cage_stations} stations and "
         f"AT LEAST {min_profile_points} points per half-profile. Do not collapse distinct wheelbase, "
         "cabin, nose and tail transitions into a five-section blob. "
-        "Every boolean cutter must have a deliberate non-placeholder location and orientation; never place "
-        "multiple semantic cutters at [0,0,0]. "
+        "Every boolean cutter must have a deliberate non-placeholder location and orientation. Distinct cutters "
+        "must occupy distinct intended regions; do not collapse unrelated cuts onto a shared default coordinate. "
         "Emit the requested geometry budget before cosmetic details. Example SHAPE ONLY (not object-specific): "
         "{\"stations\":[{\"position\":-3,\"profile\":[[0,-0.5],[1,-0.4],[1,0.4],[0.6,1.0],[0,1.2]]},"
         "{\"position\":-1,\"profile\":[[0,-0.5],[1.1,-0.4],[1.0,0.5],[0.7,1.1],[0,1.3]]},"
@@ -5715,7 +5625,6 @@ async def _build_hard_surface_cage_spec(
             normalized = _normalize_hard_surface_cage_payload(
                 result.data,
                 str(job_request.get("prompt") or "Hard-surface cage"),
-                subject_family=subject_family,
                 complexity=subject_complexity,
             )
             spec = HardSurfaceCageSpec.model_validate(normalized)

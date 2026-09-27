@@ -5290,6 +5290,33 @@ async def _generic_recognizability_check(job_id: str, *, stage: str) -> dict:
     }
 
 
+def _resolve_initial_modeling_action(
+    action: str,
+    inventory: SubjectInventory | None,
+    feature_plan: FeaturePlan | None,
+) -> str:
+    """Prevent a smooth/continuous subject from wasting its first pass on primitives."""
+    if action not in {"build_procedural", "revise_procedural"}:
+        return action
+
+    if inventory is not None and inventory.recommended_strategy == "base_mesh":
+        return "build_mesh"
+
+    if feature_plan is not None:
+        primary = next(
+            (
+                feature
+                for feature in feature_plan.features
+                if feature.required
+            ),
+            feature_plan.features[0] if feature_plan.features else None,
+        )
+        if primary is not None and primary.strategy == "base_mesh_region":
+            return "build_mesh"
+
+    return action
+
+
 async def generate_generic_scene(job_id: str, request: GenericGenerateRequest) -> dict:
     root = _require_job(job_id)
 
@@ -5312,7 +5339,33 @@ async def generate_generic_scene(job_id: str, request: GenericGenerateRequest) -
             detail="Modeling requires at least one verified or user-uploaded reference image.",
         )
 
-    await _ensure_feature_plan(job_id, _load_subject_inventory(root))
+    job_request = json.loads((root / "request.json").read_text(encoding="utf-8"))
+    inventory = _load_subject_inventory(root)
+    if inventory is None:
+        research_context: dict = {}
+        research_path = root / "research.json"
+        if research_path.exists():
+            try:
+                research_payload = json.loads(research_path.read_text(encoding="utf-8"))
+                research_context = {
+                    "pages": [
+                        {
+                            "title": page.get("title"),
+                            "extract": (page.get("extract") or "")[:900],
+                        }
+                        for page in (research_payload.get("pages") or [])[:4]
+                    ]
+                }
+            except (OSError, json.JSONDecodeError):
+                research_context = {}
+        inventory = await _build_subject_inventory(
+            root,
+            job_request,
+            {},
+            research_context,
+        )
+
+    feature_plan = await _ensure_feature_plan(job_id, inventory)
 
     initial_decision = await _ask_modeling_director(
         job_id,
@@ -5320,7 +5373,21 @@ async def generate_generic_scene(job_id: str, request: GenericGenerateRequest) -
         current_strategy="none",
         include_renders=False,
     )
-    initial_action = initial_decision["action"]
+    requested_action = initial_decision["action"]
+    initial_action = _resolve_initial_modeling_action(
+        requested_action,
+        inventory,
+        feature_plan,
+    )
+    if initial_action != requested_action:
+        append_history(
+            root,
+            "initial_strategy_guard",
+            director_action=requested_action,
+            resolved_action=initial_action,
+            inventory_strategy=inventory.recommended_strategy if inventory else None,
+            reason="Continuous base geometry was required before the first build.",
+        )
     if initial_action in {"build_mesh", "rebuild_mesh"}:
         _write_status(root, state="running", stage="agent_selected_mesh", modeling_strategy="adaptive_loft")
         return await _generate_adaptive_mesh_fallback(

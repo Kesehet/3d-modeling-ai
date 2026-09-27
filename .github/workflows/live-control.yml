@@ -1,0 +1,246 @@
+name: Live Server Control
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: live-server-control
+  cancel-in-progress: false
+
+jobs:
+  control:
+    if: >-
+      github.actor == github.repository_owner &&
+      startsWith(github.event.comment.body, '/live-control')
+    runs-on: ubuntu-latest
+    environment: production
+    timeout-minutes: 55
+    env:
+      THREED_API_TOKEN: ${{ secrets.THREED_API_TOKEN }}
+      THREED_HOSTNAME: ${{ vars.THREED_HOSTNAME || '3d-modeling-ai.srv1058562.hstgr.cloud' }}
+      COMMENT_BODY: ${{ github.event.comment.body }}
+      ISSUE_NUMBER: ${{ github.event.issue.number }}
+    steps:
+      - name: Check production credentials
+        run: |
+          set -euo pipefail
+          test -n "$THREED_API_TOKEN"
+          test -n "$THREED_HOSTNAME"
+
+      - name: Execute live-control command
+        id: live
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          BASE_URL="https://$THREED_HOSTNAME"
+          mkdir -p diagnostics/references diagnostics/renders diagnostics/json
+
+          command_line=$(printf '%s\n' "$COMMENT_BODY" | head -n 1 | tr -d '\r')
+          read -r prefix action rest <<< "$command_line"
+          action="${action:-snapshot}"
+          rest="${rest:-}"
+
+          if [ "$prefix" != "/live-control" ]; then
+            echo "Unexpected command prefix: $prefix" >&2
+            exit 2
+          fi
+
+          echo "LIVE_ACTION=$action"
+          printf '%s\n' "$command_line" > diagnostics/command.txt
+
+          api_json() {
+            method="$1"
+            path="$2"
+            body="${3:-}"
+            output="$4"
+            if [ -n "$body" ]; then
+              curl --silent --show-error --max-time 2400                 -H "Authorization: Bearer $THREED_API_TOKEN"                 -H "Content-Type: application/json"                 -X "$method" -d "$body"                 -w '%{http_code}'                 -o "$output"                 "$BASE_URL$path"
+            else
+              curl --silent --show-error --max-time 2400                 -H "Authorization: Bearer $THREED_API_TOKEN"                 -X "$method"                 -w '%{http_code}'                 -o "$output"                 "$BASE_URL$path"
+            fi
+          }
+
+          refresh_dashboard() {
+            curl --fail --silent --show-error --max-time 30               "$BASE_URL/dashboard/api"               -o diagnostics/json/dashboard.json
+          }
+
+          resolve_latest_job() {
+            refresh_dashboard || return 1
+            jq -r '.jobs[0].job_id // empty' diagnostics/json/dashboard.json
+          }
+
+          capture_job() {
+            job_id="$1"
+            echo "LIVE_JOB_ID=$job_id"
+            echo "job_id=$job_id" >> "$GITHUB_OUTPUT"
+            refresh_dashboard || true
+
+            if [ -s diagnostics/json/dashboard.json ]; then
+              jq --arg id "$job_id"                 '.jobs[] | select(.job_id == $id)'                 diagnostics/json/dashboard.json                 > diagnostics/json/job.json || true
+            fi
+
+            api_json GET "/v1/jobs/$job_id/history" "" diagnostics/json/history.json               > diagnostics/history-http.txt || true
+
+            if [ -s diagnostics/json/job.json ]; then
+              echo "=== LIVE JOB SNAPSHOT ==="
+              jq '{
+                job_id,prompt,state,stage,modeling_strategy,
+                auto_improve,quality_gate,feature_plan,
+                reference_count:(.references|length),
+                render_count:(.renders|length),
+                latest_vision_images
+              }' diagnostics/json/job.json || true
+
+              while IFS= read -r name; do
+                [ -n "$name" ] || continue
+                encoded=$(python - "$name" <<'PY'
+import sys, urllib.parse
+print(urllib.parse.quote(sys.argv[1], safe=""))
+PY
+)
+                curl --fail --silent --show-error --max-time 60                   "$BASE_URL/dashboard/artifacts/$job_id/references/$encoded"                   -o "diagnostics/references/$name" || true
+              done < <(jq -r '.references[]?.name // empty' diagnostics/json/job.json)
+
+              while IFS= read -r name; do
+                [ -n "$name" ] || continue
+                encoded=$(python - "$name" <<'PY'
+import sys, urllib.parse
+print(urllib.parse.quote(sys.argv[1], safe=""))
+PY
+)
+                curl --fail --silent --show-error --max-time 60                   "$BASE_URL/dashboard/renders/$job_id/$encoded"                   -o "diagnostics/renders/$name" || true
+              done < <(jq -r '.renders[]?.name // empty' diagnostics/json/job.json)
+            fi
+
+            find diagnostics -maxdepth 2 -type f -printf '%P\t%s bytes\n'               | sort > diagnostics/inventory.txt
+            echo "=== DIAGNOSTIC FILES ==="
+            cat diagnostics/inventory.txt
+          }
+
+          status=0
+          job_id=""
+
+          case "$action" in
+            diagnose)
+              prompt="$rest"
+              if [ -z "$prompt" ]; then
+                echo "diagnose requires a prompt" >&2
+                status=2
+              else
+                payload=$(jq -nc --arg prompt "$prompt"                   '{prompt:$prompt,intended_use:"rendering"}')
+                code=$(api_json POST "/v1/jobs" "$payload" diagnostics/json/create.json)
+                echo "CREATE_HTTP=$code"
+                cat diagnostics/json/create.json | jq . || cat diagnostics/json/create.json
+                job_id=$(jq -r '.job_id // empty' diagnostics/json/create.json)
+                if [ -z "$job_id" ]; then
+                  status=1
+                else
+                  gen_payload='{"auto_research":true,"auto_improve_rounds":0}'
+                  code=$(api_json POST "/v1/jobs/$job_id/generate" "$gen_payload" diagnostics/json/generate.json)
+                  echo "GENERATE_HTTP=$code"
+                  cat diagnostics/json/generate.json | jq . || cat diagnostics/json/generate.json
+                  if [ "$code" -lt 200 ] || [ "$code" -ge 300 ]; then
+                    status=1
+                  fi
+                  capture_job "$job_id"
+                fi
+              fi
+              ;;
+            create)
+              prompt="$rest"
+              payload=$(jq -nc --arg prompt "$prompt"                 '{prompt:$prompt,intended_use:"rendering"}')
+              code=$(api_json POST "/v1/jobs" "$payload" diagnostics/json/create.json)
+              echo "CREATE_HTTP=$code"
+              cat diagnostics/json/create.json | jq . || cat diagnostics/json/create.json
+              job_id=$(jq -r '.job_id // empty' diagnostics/json/create.json)
+              [ -n "$job_id" ] && capture_job "$job_id"
+              ;;
+            research)
+              read -r job_id _ <<< "$rest"
+              payload='{"max_images":5}'
+              code=$(api_json POST "/v1/jobs/$job_id/research" "$payload" diagnostics/json/research.json)
+              echo "RESEARCH_HTTP=$code"
+              cat diagnostics/json/research.json | jq . || cat diagnostics/json/research.json
+              capture_job "$job_id"
+              [ "$code" -ge 200 ] && [ "$code" -lt 300 ] || status=1
+              ;;
+            generate)
+              read -r job_id _ <<< "$rest"
+              payload='{"auto_research":true,"auto_improve_rounds":0}'
+              code=$(api_json POST "/v1/jobs/$job_id/generate" "$payload" diagnostics/json/generate.json)
+              echo "GENERATE_HTTP=$code"
+              cat diagnostics/json/generate.json | jq . || cat diagnostics/json/generate.json
+              capture_job "$job_id"
+              [ "$code" -ge 200 ] && [ "$code" -lt 300 ] || status=1
+              ;;
+            auto|auto-improve)
+              read -r job_id rounds _ <<< "$rest"
+              rounds="${rounds:-30}"
+              payload=$(jq -nc --argjson rounds "$rounds" '{rounds:$rounds}')
+              code=$(api_json POST "/v1/jobs/$job_id/auto-improve" "$payload" diagnostics/json/auto-improve.json)
+              echo "AUTO_IMPROVE_HTTP=$code"
+              cat diagnostics/json/auto-improve.json | jq . || cat diagnostics/json/auto-improve.json
+              sleep 5
+              capture_job "$job_id"
+              [ "$code" -ge 200 ] && [ "$code" -lt 300 ] || status=1
+              ;;
+            inspect|snapshot)
+              read -r job_id _ <<< "$rest"
+              if [ -z "$job_id" ]; then
+                job_id=$(resolve_latest_job)
+              fi
+              if [ -z "$job_id" ]; then
+                echo "No job available to inspect." >&2
+                status=1
+              else
+                capture_job "$job_id"
+              fi
+              ;;
+            delete)
+              read -r job_id _ <<< "$rest"
+              code=$(api_json DELETE "/v1/jobs/$job_id" "" diagnostics/json/delete.json)
+              echo "DELETE_HTTP=$code"
+              cat diagnostics/json/delete.json | jq . || cat diagnostics/json/delete.json
+              ;;
+            *)
+              echo "Unknown action: $action" >&2
+              echo "Supported: diagnose, create, research, generate, auto, inspect, snapshot, delete" >&2
+              status=2
+              ;;
+          esac
+
+          printf '{"action":"%s","job_id":"%s","exit_status":%s}\n'             "$action" "$job_id" "$status" > diagnostics/result.json
+          echo "exit_status=$status" >> "$GITHUB_OUTPUT"
+          exit "$status"
+
+      - name: Upload live diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-diagnostics-${{ github.run_id }}
+          path: diagnostics
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Post control result
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          JOB_ID: ${{ steps.live.outputs.job_id }}
+          EXIT_STATUS: ${{ steps.live.outputs.exit_status }}
+        run: |
+          set -euo pipefail
+          RUN_URL="https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          state="completed"
+          if [ "${EXIT_STATUS:-1}" != "0" ]; then state="needs inspection"; fi
+          body="Live control **$state**. Action: \`$COMMENT_BODY\`"
+          if [ -n "${JOB_ID:-}" ]; then
+            body="$body\n\nJob: \`$JOB_ID\`"
+          fi
+          body="$body\n\nDiagnostics (JSON + downloaded references/renders) are attached to [workflow run $GITHUB_RUN_ID]($RUN_URL)."
+          gh api "repos/$GITHUB_REPOSITORY/issues/$ISSUE_NUMBER/comments" -f body="$body" >/dev/null

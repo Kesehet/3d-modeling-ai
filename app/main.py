@@ -2907,6 +2907,11 @@ async def _generate_adaptive_mesh_fallback(job_id: str, *, reason: str) -> dict:
 
 async def _generic_recognizability_check(job_id: str, *, stage: str) -> dict:
     root = _require_job(job_id)
+    inventory = _load_subject_inventory(root)
+    inventory_text = json.dumps(
+        inventory.model_dump() if inventory is not None else {},
+        ensure_ascii=False,
+    )
     vision = await analyze_vision(
         job_id,
         VisionAnalyzeRequest(
@@ -2917,10 +2922,11 @@ async def _generic_recognizability_check(job_id: str, *, stage: str) -> dict:
             instruction=(
                 "This is a strict generic-model quality gate. Compare the ACTIVE model renders with the exact "
                 "user request and any reference images. Set recognizable=true only if an unfamiliar viewer "
-                "would identify the requested subject from the geometry alone. Missing the subject's main "
-                "silhouette, primary body masses, required repeated structural parts, or identity-defining "
-                "features means recognizable=false even if a few colors or primitive parts are plausible. "
-                "If the primitive SceneSpec approach is fundamentally inadequate, recommend base_mesh or hybrid."
+                "would identify the requested subject from the geometry alone AND the visible model covers the "
+                "required major parts/counts in this subject inventory: " + inventory_text + ". Missing the "
+                "subject's main silhouette, primary body masses, required repeated structural parts, or "
+                "identity-defining features means recognizable=false even if a few colors or primitive parts "
+                "are plausible. If the current strategy is fundamentally inadequate, recommend base_mesh or hybrid."
             ),
         ),
     )

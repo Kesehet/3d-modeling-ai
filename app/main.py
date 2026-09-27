@@ -4201,12 +4201,7 @@ async def _generate_adaptive_mesh_fallback(
         )
 
     if feature_task is not None:
-        accepted_feature = bool(
-            feature_evaluation
-            and feature_evaluation.get("passed")
-            and not feature_evaluation.get("regression_detected")
-            and accept_candidate
-        )
+        accepted_feature = bool(feature_passed and accept_candidate)
         finish_feature(
             root,
             feature_task.id,

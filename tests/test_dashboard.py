@@ -25,3 +25,11 @@ def test_dashboard_job_detail_exposes_reference_images():
     assert '"references"' in html
     assert 'latest_vision_images' in html
     assert 'Used in latest vision pass' in html
+
+
+def test_dashboard_surfaces_quality_gate_and_pauses_unsafe_refinement():
+    html = dashboard_page().body.decode("utf-8")
+    assert 'id="qualityBanner"' in html
+    assert 'generic_needs_strategy_switch' in html
+    assert 'generic_quality_unverified' in html
+    assert 'Quality gate: current model is not recognizable enough.' in html

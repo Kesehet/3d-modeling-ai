@@ -624,8 +624,20 @@ def _collect_images(root: Path, request: VisionAnalyzeRequest) -> tuple[list[str
             if number_text.isdigit():
                 versioned.append((int(number_text), path))
         if versioned:
-            latest_version = max(version for version, _ in versioned)
-            renders = [path for version, path in versioned if version == latest_version]
+            accepted_version: int | None = None
+            status_path = root / "status.json"
+            if status_path.exists():
+                try:
+                    status_payload = json.loads(status_path.read_text(encoding="utf-8"))
+                    generic_model = status_payload.get("generic_model")
+                    if isinstance(generic_model, dict) and isinstance(generic_model.get("version"), int):
+                        accepted_version = generic_model["version"]
+                except (OSError, json.JSONDecodeError):
+                    accepted_version = None
+            target_version = accepted_version
+            if target_version is None or not any(version == target_version for version, _ in versioned):
+                target_version = max(version for version, _ in versioned)
+            renders = [path for version, path in versioned if version == target_version]
 
     if references and renders:
         reference_budget = min(len(references), max(2, request.max_images // 3))
@@ -1397,7 +1409,21 @@ async def refine_generic_scene(job_id: str, request: GenericRefineRequest) -> di
             key=lambda path: path.stat().st_mtime,
         )
 
-    current_payload = json.loads(spec_files[-1].read_text(encoding="utf-8"))
+    current_spec_path = spec_files[-1]
+    status_path = root / "status.json"
+    if status_path.exists():
+        try:
+            status_payload = json.loads(status_path.read_text(encoding="utf-8"))
+            active_generic = status_payload.get("generic_model")
+            active_version = active_generic.get("version") if isinstance(active_generic, dict) else None
+            if isinstance(active_version, int):
+                accepted_spec_path = root / f"scene-spec-v{active_version}.json"
+                if accepted_spec_path.is_file():
+                    current_spec_path = accepted_spec_path
+        except (OSError, json.JSONDecodeError):
+            pass
+
+    current_payload = json.loads(current_spec_path.read_text(encoding="utf-8"))
     current_spec = GenericSceneSpec.model_validate(current_payload["spec"])
     current_version = int(current_payload.get("version") or 1)
     completed = []

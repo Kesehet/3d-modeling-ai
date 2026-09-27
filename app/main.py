@@ -2465,12 +2465,89 @@ async def _execute_generic_spec(
     }
 
 
+async def _generic_recognizability_check(job_id: str, *, stage: str) -> dict:
+    root = _require_job(job_id)
+    vision = await analyze_vision(
+        job_id,
+        VisionAnalyzeRequest(
+            stage=stage,
+            include_references=True,
+            include_renders=True,
+            max_images=12,
+            instruction=(
+                "This is a strict generic-model quality gate. Compare the ACTIVE model renders with the exact "
+                "user request and any reference images. Set recognizable=true only if an unfamiliar viewer "
+                "would identify the requested subject from the geometry alone. Missing the subject's main "
+                "silhouette, primary body masses, required repeated structural parts, or identity-defining "
+                "features means recognizable=false even if a few colors or primitive parts are plausible. "
+                "If the primitive SceneSpec approach is fundamentally inadequate, recommend base_mesh or hybrid."
+            ),
+        ),
+    )
+    report = vision.get("report") or {}
+    recognizable = report.get("recognizable")
+    append_history(
+        root,
+        "generic_recognizability_gate",
+        stage=stage,
+        recognizable=recognizable,
+        subject_match_score=report.get("subject_match_score"),
+        recommended_strategy=report.get("recommended_modeling_strategy"),
+        summary=report.get("summary"),
+    )
+    return {
+        "recognizable": recognizable,
+        "subject_match_score": report.get("subject_match_score"),
+        "recommended_strategy": report.get("recommended_modeling_strategy"),
+        "summary": report.get("summary"),
+        "vision": vision,
+    }
+
+
 async def generate_generic_scene(job_id: str, request: GenericGenerateRequest) -> dict:
     root = _require_job(job_id)
     _write_status(root, state="running", stage="planning_generic_scene")
     spec = await _build_generic_scene_spec(job_id, request.auto_research)
     version = 1 + len(list((root / "scene").glob("model-v*.blend")))
-    return await _execute_generic_spec(job_id, spec, version=version)
+    build = await _execute_generic_spec(job_id, spec, version=version)
+
+    quality_gate: dict | None = None
+    try:
+        quality_gate = await _generic_recognizability_check(
+            job_id,
+            stage="generic_initial_quality",
+        )
+    except HTTPException as exc:
+        append_history(root, "generic_initial_quality_unavailable", error=str(exc.detail))
+        status = _write_status(
+            root,
+            state="ready",
+            stage="generic_quality_unverified",
+            quality_gate={"recognizable": None, "error": str(exc.detail)},
+        )
+    else:
+        recognizable = quality_gate.get("recognizable")
+        if recognizable is True:
+            next_stage = "generic_initial_recognizable"
+        elif quality_gate.get("recommended_strategy") in {"base_mesh", "hybrid"}:
+            next_stage = "generic_needs_strategy_switch"
+        else:
+            next_stage = "generic_needs_refinement"
+        status = _write_status(
+            root,
+            state="ready",
+            stage=next_stage,
+            quality_gate={
+                "recognizable": recognizable,
+                "subject_match_score": quality_gate.get("subject_match_score"),
+                "recommended_strategy": quality_gate.get("recommended_strategy"),
+                "summary": quality_gate.get("summary"),
+            },
+        )
+
+    build["status"] = status
+    build["quality_gate"] = quality_gate
+    return build
 
 
 @app.post("/v1/jobs/{job_id}/generate", dependencies=[Depends(require_api_token)])
@@ -2530,8 +2607,12 @@ async def refine_generic_scene(job_id: str, request: GenericRefineRequest) -> di
         issues = report.get("issues", [])
         high = sum(1 for issue in issues if issue.get("severity") == "high")
         medium = sum(1 for issue in issues if issue.get("severity") == "medium")
-        if high == 0 and medium <= 1:
-            append_history(root, "generic_refinement_stop", reason="visual severity threshold met")
+        if report.get("recognizable") is True and high == 0 and medium <= 1:
+            append_history(
+                root,
+                "generic_refinement_stop",
+                reason="recognizable subject with visual severity threshold met",
+            )
             break
 
         system = (
@@ -2655,7 +2736,7 @@ async def refine_generic_scene(job_id: str, request: GenericRefineRequest) -> di
                 "back-right", "right", "front-right", "top",
             )
         ]
-        status = _write_status(
+        _write_status(
             root,
             state="ready",
             stage="generic_refinement_preserved_previous",
@@ -2667,12 +2748,52 @@ async def refine_generic_scene(job_id: str, request: GenericRefineRequest) -> di
                 "qa": f"model-v{current_version}-qa.json",
             },
         )
+
+    final_quality: dict | None = None
+    try:
+        final_quality = await _generic_recognizability_check(
+            job_id,
+            stage="generic_final_quality",
+        )
+    except HTTPException as exc:
+        append_history(root, "generic_final_quality_unavailable", error=str(exc.detail))
+        final_stage = "generic_quality_unverified"
+        quality_gate = {"recognizable": None, "error": str(exc.detail)}
     else:
-        status = _write_status(root, state="ready", stage="generic_refinement_complete")
+        final_recognizable = final_quality.get("recognizable")
+        quality_gate = {
+            "recognizable": final_recognizable,
+            "subject_match_score": final_quality.get("subject_match_score"),
+            "recommended_strategy": final_quality.get("recommended_strategy"),
+            "summary": final_quality.get("summary"),
+        }
+        if final_recognizable is True:
+            final_stage = (
+                "generic_refinement_preserved_previous"
+                if rejected
+                else "generic_refinement_complete"
+            )
+        else:
+            final_stage = "generic_needs_strategy_switch"
+            append_history(
+                root,
+                "generic_strategy_switch_needed",
+                current_version=current_version,
+                recommended_strategy=final_quality.get("recommended_strategy"),
+                summary=final_quality.get("summary"),
+            )
+
+    status = _write_status(
+        root,
+        state="ready",
+        stage=final_stage,
+        quality_gate=quality_gate,
+    )
     return {
         "job_id": job_id,
         "iterations": completed,
         "rejected": rejected,
+        "quality_gate": final_quality,
         "status": status,
     }
 

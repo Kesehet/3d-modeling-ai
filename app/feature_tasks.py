@@ -419,6 +419,7 @@ def active_or_next_feature(plan: FeaturePlan) -> FeatureTask | None:
     candidates.sort(
         key=lambda feature: (
             0 if feature.required else 1,
+            0 if feature.build_mode == "in_place" else 1,
             order.get(feature.id, 10_000),
             feature.attempts,
             -feature.priority,

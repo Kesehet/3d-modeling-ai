@@ -67,7 +67,7 @@ class FeatureEvaluation(BaseModel):
 
 
 class FeaturePlan(BaseModel):
-    plan_version: int = Field(default=1, ge=1)
+    plan_version: int = Field(default=3, ge=1)
     subject: str = Field(default="", max_length=160)
     coordinator_notes: str = Field(default="", max_length=2000)
     features: list[FeatureTask] = Field(min_length=1, max_length=48)
@@ -262,7 +262,7 @@ def normalize_feature_plan_payload(data: object, *, subject: str) -> dict:
             item["parent"] = resolved_parent if resolved_parent in valid_ids else None
 
     return {
-        "plan_version": 2,
+        "plan_version": 3,
         "subject": str(data.get("subject") or subject)[:160],
         "coordinator_notes": str(
             data.get("coordinator_notes")
@@ -379,7 +379,7 @@ def active_or_next_feature(plan: FeaturePlan) -> FeatureTask | None:
     candidates = [
         feature
         for feature in plan.features
-        if feature.status in {"ready", "retry"}
+        if feature.status in {"ready", "retry", "component_ready"}
     ]
     if not candidates:
         # Defensive deadlock recovery for an imperfect AI-authored dependency
@@ -437,8 +437,9 @@ def begin_feature(root: Path) -> FeatureTask | None:
         save_feature_plan(root, plan)
         return None
     already_running = task.status == "running"
+    installing_component = task.status == "component_ready"
     task.status = "running"
-    if not already_running:
+    if not already_running and not installing_component:
         task.attempts += 1
     task.last_error = ""
     plan.active_feature_id = task.id

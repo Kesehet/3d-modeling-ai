@@ -56,7 +56,7 @@ def material_for(hex_color):
 def add_object(item):
     shape = item.get("shape", "cube")
     location = tuple(item.get("location", [0, 0, 0]))
-    if shape in {"rod", "beam"}:
+    if shape == "rod":
         start = Vector(item.get("start") or location)
         end = Vector(item.get("end") or [location[0], location[1], location[2] + 1.0])
         delta = end - start
@@ -64,22 +64,28 @@ def add_object(item):
             delta = Vector((0, 0, 0.02))
             end = start + delta
         radius = max(0.02, min(5.0, float(item.get("radius") or 0.2)))
-        if shape == "beam":
-            bpy.ops.mesh.primitive_cube_add(size=2, location=(start + end) / 2)
-            obj = bpy.context.object
-            obj.scale = (radius * 1.35, radius * 0.72, delta.length / 2)
-            obj.rotation_euler = delta.to_track_quat("Z", "Y").to_euler()
-            bpy.ops.object.transform_apply(location=False, rotation=False, scale=True)
-        else:
-            bpy.ops.mesh.primitive_cylinder_add(
-                vertices=48,
-                radius=radius,
-                depth=delta.length,
-                location=(start + end) / 2,
-            )
-            obj = bpy.context.object
-            obj.rotation_euler = delta.to_track_quat("Z", "Y").to_euler()
-            bpy.ops.object.transform_apply(location=False, rotation=False, scale=True)
+        bpy.ops.mesh.primitive_cylinder_add(
+            vertices=48,
+            radius=radius,
+            depth=delta.length,
+            location=(start + end) / 2,
+        )
+        obj = bpy.context.object
+        obj.rotation_euler = delta.to_track_quat("Z", "Y").to_euler()
+        bpy.ops.object.transform_apply(location=False, rotation=False, scale=True)
+    elif shape == "beam":
+        start = Vector(item.get("start") or location)
+        end = Vector(item.get("end") or [location[0], location[1], location[2] + 1.0])
+        delta = end - start
+        if delta.length < 0.02:
+            delta = Vector((0, 0, 0.02))
+            end = start + delta
+        radius = max(0.02, min(5.0, float(item.get("radius") or 0.2)))
+        bpy.ops.mesh.primitive_cube_add(size=2, location=(start + end) / 2)
+        obj = bpy.context.object
+        obj.scale = (radius * 1.35, radius * 0.72, delta.length / 2)
+        obj.rotation_euler = delta.to_track_quat("Z", "Y").to_euler()
+        bpy.ops.object.transform_apply(location=False, rotation=False, scale=True)
     elif shape == "frustum":
         bpy.ops.mesh.primitive_cone_add(
             vertices=64,

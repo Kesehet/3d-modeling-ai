@@ -2557,6 +2557,29 @@ async def generate_generic_scene_api(job_id: str, request: GenericGenerateReques
 
 async def refine_generic_scene(job_id: str, request: GenericRefineRequest) -> dict:
     root = _require_job(job_id)
+    status_path = root / "status.json"
+    if status_path.exists():
+        try:
+            existing_status = json.loads(status_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            existing_status = {}
+        if existing_status.get("stage") == "generic_needs_strategy_switch":
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "The active primitive SceneSpec failed the recognizability gate. "
+                    "Further primitive refinement is disabled; this job needs a mesh/hybrid strategy."
+                ),
+            )
+        if existing_status.get("stage") == "generic_quality_unverified":
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "The active model could not be quality-verified. "
+                    "Refinement is disabled until visual QA is available again."
+                ),
+            )
+
     spec_files = sorted(
         root.glob("scene-spec-v*.json"),
         key=lambda path: path.stat().st_mtime,

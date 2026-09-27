@@ -1,3 +1,5 @@
+import pytest
+
 from app.hard_surface_builder import hard_surface_cage_script
 from app.main import HardSurfaceCageSpec, _normalize_hard_surface_cage_payload
 
@@ -105,48 +107,70 @@ def test_hard_surface_cage_expands_three_terse_cross_sections():
 
 
 
-def test_vehicle_cage_enforces_dense_geometry_and_repairs_semantic_cutters():
+def test_complex_cage_rejects_under_specified_geometry():
+    with pytest.raises(ValueError, match="under-specified for complex geometry"):
+        _normalize_hard_surface_cage_payload(
+            {
+                "title": "complex hard-surface object",
+                "axis": "y",
+                "stations": [
+                    {"position": -3.0, "profile": [[0, -0.6], [1.0, -0.45], [1.1, 0.2], [0.7, 0.9], [0, 1.2]]},
+                    {"position": -1.5, "profile": [[0, -0.6], [1.1, -0.45], [1.2, 0.3], [0.8, 1.0], [0, 1.35]]},
+                    {"position": 0.0, "profile": [[0, -0.6], [1.15, -0.45], [1.2, 0.35], [0.8, 1.1], [0, 1.4]]},
+                    {"position": 1.5, "profile": [[0, -0.6], [1.1, -0.45], [1.15, 0.3], [0.75, 1.0], [0, 1.3]]},
+                    {"position": 3.0, "profile": [[0, -0.6], [0.95, -0.45], [1.0, 0.15], [0.6, 0.85], [0, 1.1]]},
+                ],
+            },
+            "complex object",
+            complexity="complex",
+        )
+
+
+def test_cage_rejects_three_collapsed_boolean_cutters():
+    stations = [
+        {
+            "position": float(position),
+            "profile": [[0, -0.7], [1.1, -0.5], [1.25, 0.0], [1.0, 0.7], [0.5, 1.2], [0, 1.4]],
+        }
+        for position in (-4, -3, -2, -1, 0, 1, 2, 4)
+    ]
+
+    with pytest.raises(ValueError, match="three or more cutters collapsed"):
+        _normalize_hard_surface_cage_payload(
+            {
+                "title": "complex mechanical shell",
+                "axis": "y",
+                "stations": stations,
+                "cutters": [
+                    {"name": "opening_a", "shape": "cylinder", "location": [0, 0, 0], "scale": [1, 1, 1]},
+                    {"name": "opening_b", "shape": "cylinder", "location": [0, 0, 0], "scale": [1.2, 1, 1]},
+                    {"name": "opening_c", "shape": "cube", "location": [0, 0, 0], "scale": [0.8, 0.5, 0.4]},
+                ],
+                "presentation_base": True,
+            },
+            "complex mechanical shell",
+            complexity="complex",
+        )
+
+
+def test_cage_disables_presentation_base_for_qa():
     payload = _normalize_hard_surface_cage_payload(
         {
-            "title": "Toyota Prius body",
-            "axis": "y",
+            "title": "simple hard-surface object",
             "stations": [
-                {"position": -3.0, "profile": [[0, -0.6], [1.0, -0.45], [1.1, 0.2], [0.7, 0.9], [0, 1.2]]},
-                {"position": -1.5, "profile": [[0, -0.6], [1.1, -0.45], [1.2, 0.3], [0.8, 1.0], [0, 1.35]]},
-                {"position": 0.0, "profile": [[0, -0.6], [1.15, -0.45], [1.2, 0.35], [0.8, 1.1], [0, 1.4]]},
-                {"position": 1.5, "profile": [[0, -0.6], [1.1, -0.45], [1.15, 0.3], [0.75, 1.0], [0, 1.3]]},
-                {"position": 3.0, "profile": [[0, -0.6], [0.95, -0.45], [1.0, 0.15], [0.6, 0.85], [0, 1.1]]},
-            ],
-            "cutters": [
-                {"name": "wheel_arch_front", "shape": "cylinder", "location": [0, 0, 0], "scale": [1, 1, 1]},
-                {"name": "wheel_arch_rear", "shape": "cylinder", "location": [0, 0, 0], "scale": [1, 1, 1]},
-                {"name": "front_grille_intake", "shape": "cube", "location": [0, 0, 0], "scale": [1, 1, 1]},
+                {"position": -2, "profile": [[0, -1], [1, -0.4], [1, 0.5], [0, 1]]},
+                {"position": -0.5, "profile": [[0, -1], [1, -0.4], [1, 0.5], [0, 1]]},
+                {"position": 0.5, "profile": [[0, -1], [1, -0.4], [1, 0.5], [0, 1]]},
+                {"position": 2, "profile": [[0, -1], [1, -0.4], [1, 0.5], [0, 1]]},
             ],
             "presentation_base": True,
         },
-        "Toyota Prius",
-        subject_family="vehicle",
-        complexity="complex",
+        "simple hard-surface object",
+        complexity="simple",
     )
 
     spec = HardSurfaceCageSpec.model_validate(payload)
-
-    assert len(spec.stations) >= 9
-    assert all(len(station.profile) >= 6 for station in spec.stations)
     assert spec.presentation_base is False
-
-    cutters = {item.name: item for item in spec.cutters}
-    front = cutters["wheel_arch_front"]
-    rear = cutters["wheel_arch_rear"]
-    grille = cutters["front_grille_intake"]
-
-    assert front.location[1] < 0
-    assert rear.location[1] > 0
-    assert front.location != rear.location
-    assert front.rotation_deg == [0.0, 90.0, 0.0]
-    assert rear.rotation_deg == [0.0, 90.0, 0.0]
-    assert grille.location[1] < front.location[1]
-    assert grille.location != [0.0, 0.0, 0.0]
 
 
 def test_hard_surface_builder_skips_qa_pedestal_and_cleans_boolean_mesh():
@@ -158,21 +182,3 @@ def test_hard_surface_builder_skips_qa_pedestal_and_cleans_boolean_mesh():
     assert '"applied_cutters": applied_cutters' in script
 
 
-def test_vehicle_detection_does_not_trigger_on_character_words():
-    payload = _normalize_hard_surface_cage_payload(
-        {
-            "title": "cartoon character",
-            "stations": [
-                {"position": -2, "profile": [[0, -1], [1, -0.4], [1, 0.5], [0, 1]]},
-                {"position": -0.5, "profile": [[0, -1], [1, -0.4], [1, 0.5], [0, 1]]},
-                {"position": 0.5, "profile": [[0, -1], [1, -0.4], [1, 0.5], [0, 1]]},
-                {"position": 2, "profile": [[0, -1], [1, -0.4], [1, 0.5], [0, 1]]},
-            ],
-        },
-        "cartoon character",
-        subject_family="character",
-        complexity="simple",
-    )
-
-    spec = HardSurfaceCageSpec.model_validate(payload)
-    assert len(spec.stations) == 4

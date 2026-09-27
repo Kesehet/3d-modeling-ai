@@ -5115,6 +5115,626 @@ def _normalize_adaptive_loft_payload(data: object, fallback_title: str) -> dict:
     return normalized
 
 
+
+def _normalize_hard_surface_cage_payload(data: object, fallback_title: str) -> dict:
+    if not isinstance(data, dict):
+        raise TypeError("Hard-surface cage response is not a JSON object.")
+
+    normalized = dict(data)
+    for wrapper in (
+        "hard_surface_cage_spec",
+        "hard_surface_cage",
+        "cage_spec",
+        "cage",
+        "mesh_spec",
+        "mesh",
+        "spec",
+        "result",
+    ):
+        candidate = normalized.get(wrapper)
+        if isinstance(candidate, dict) and any(
+            key in candidate for key in ("stations", "sections", "profiles", "slices")
+        ):
+            normalized = dict(candidate)
+            break
+
+    normalized["title"] = str(normalized.get("title") or fallback_title or "Hard-surface cage")[:120]
+    normalized["rationale"] = str(
+        normalized.get("rationale")
+        or normalized.get("reasoning")
+        or normalized.get("description")
+        or ""
+    )[:2400]
+    axis = str(normalized.get("axis") or normalized.get("length_axis") or "y").lower()
+    normalized["axis"] = axis if axis in {"x", "y"} else "y"
+
+    color = str(normalized.get("color") or normalized.get("base_color") or "#B8BDC6")
+    if not (
+        len(color) == 7
+        and color.startswith("#")
+        and all(ch in "0123456789abcdefABCDEF" for ch in color[1:])
+    ):
+        color = "#B8BDC6"
+    normalized["color"] = color.upper()
+
+    try:
+        subdivision = int(normalized.get("subdivision_levels", normalized.get("subdivision", 1)) or 0)
+    except (TypeError, ValueError):
+        subdivision = 1
+    normalized["subdivision_levels"] = max(0, min(2, subdivision))
+    try:
+        bevel_width = float(normalized.get("bevel_width", 0.04) or 0.0)
+    except (TypeError, ValueError):
+        bevel_width = 0.04
+    normalized["bevel_width"] = max(0.0, min(0.3, bevel_width))
+    try:
+        bevel_segments = int(normalized.get("bevel_segments", 2) or 2)
+    except (TypeError, ValueError):
+        bevel_segments = 2
+    normalized["bevel_segments"] = max(1, min(4, bevel_segments))
+    normalized["smooth"] = bool(normalized.get("smooth", True))
+    normalized["presentation_base"] = bool(normalized.get("presentation_base", True))
+
+    raw_stations = (
+        normalized.get("stations")
+        or normalized.get("sections")
+        or normalized.get("profiles")
+        or normalized.get("slices")
+    )
+    if isinstance(raw_stations, dict):
+        for key in ("items", "stations", "sections", "profiles", "slices"):
+            value = raw_stations.get(key)
+            if isinstance(value, list):
+                raw_stations = value
+                break
+        else:
+            values = list(raw_stations.values())
+            raw_stations = values if values and all(isinstance(v, dict) for v in values) else []
+    if not isinstance(raw_stations, list):
+        raise TypeError("Hard-surface cage stations could not be normalized to a list.")
+
+    stations: list[dict] = []
+    for raw in raw_stations[:16]:
+        if not isinstance(raw, dict):
+            continue
+        raw_position = raw.get("position")
+        if raw_position is None:
+            raw_position = raw.get("axis_position", raw.get("offset", raw.get(normalized["axis"])))
+        try:
+            position = max(-10.0, min(10.0, float(raw_position)))
+        except (TypeError, ValueError):
+            continue
+
+        raw_profile = raw.get("profile") or raw.get("points") or raw.get("contour")
+        if isinstance(raw_profile, dict):
+            raw_profile = raw_profile.get("points") or raw_profile.get("profile")
+        if not isinstance(raw_profile, list):
+            continue
+
+        profile: list[list[float]] = []
+        for point in raw_profile[:8]:
+            if isinstance(point, dict):
+                width = (
+                    point.get("half_width")
+                    if point.get("half_width") is not None
+                    else point.get("width")
+                    if point.get("width") is not None
+                    else point.get("x")
+                    if normalized["axis"] == "y"
+                    else point.get("y")
+                )
+                height = point.get("height") if point.get("height") is not None else point.get("z")
+            elif isinstance(point, (list, tuple)) and len(point) >= 2:
+                width, height = point[0], point[1]
+            else:
+                continue
+            try:
+                w = max(0.0, min(10.0, float(width)))
+                z = max(-10.0, min(10.0, float(height)))
+            except (TypeError, ValueError):
+                continue
+            profile.append([w, z])
+
+        if len(profile) < 4:
+            continue
+        # A human half-cage closes at the centerline before mirroring.
+        profile[0][0] = 0.0
+        profile[-1][0] = 0.0
+        stations.append({"position": position, "profile": profile})
+
+    stations.sort(key=lambda item: item["position"])
+    deduped: list[dict] = []
+    for station in stations:
+        if deduped and abs(station["position"] - deduped[-1]["position"]) < 0.05:
+            continue
+        deduped.append(station)
+
+    if len(deduped) < 4:
+        raise ValueError("Hard-surface cage needs at least four distinct stations.")
+
+    # Blender topology needs consistent rows. Keep the dominant profile size.
+    sizes: dict[int, int] = {}
+    for station in deduped:
+        sizes[len(station["profile"])] = sizes.get(len(station["profile"]), 0) + 1
+    profile_size = max(sizes, key=lambda size: (sizes[size], size))
+    deduped = [station for station in deduped if len(station["profile"]) == profile_size]
+    if len(deduped) < 4:
+        raise ValueError("Hard-surface cage needs four stations with a consistent profile size.")
+    normalized["stations"] = deduped
+
+    raw_cutters = normalized.get("cutters") or normalized.get("boolean_cutters") or normalized.get("cutouts") or []
+    if isinstance(raw_cutters, dict):
+        raw_cutters = list(raw_cutters.values())
+    cutters: list[dict] = []
+    if isinstance(raw_cutters, list):
+        for index, item in enumerate(raw_cutters[:16]):
+            if not isinstance(item, dict):
+                continue
+            shape = str(item.get("shape") or item.get("type") or "cube").lower()
+            if shape not in {"cube", "cylinder", "sphere"}:
+                shape = "cube"
+            location = item.get("location") or item.get("center") or [0, 0, 0]
+            scale = item.get("scale") or item.get("size") or [1, 1, 1]
+            rotation = item.get("rotation_deg") or item.get("rotation") or [0, 0, 0]
+            if not (
+                isinstance(location, list) and len(location) >= 3
+                and isinstance(scale, list) and len(scale) >= 3
+                and isinstance(rotation, list) and len(rotation) >= 3
+            ):
+                continue
+            try:
+                cutters.append(
+                    {
+                        "name": str(item.get("name") or f"cut-{index + 1}")[:80],
+                        "shape": shape,
+                        "location": [max(-20.0, min(20.0, float(v))) for v in location[:3]],
+                        "scale": [max(0.02, min(20.0, abs(float(v)))) for v in scale[:3]],
+                        "rotation_deg": [max(-360.0, min(360.0, float(v))) for v in rotation[:3]],
+                    }
+                )
+            except (TypeError, ValueError):
+                continue
+    normalized["cutters"] = cutters
+
+    attachments = normalized.get("attachments") or normalized.get("separate_parts") or normalized.get("details") or []
+    if isinstance(attachments, dict):
+        attachments = list(attachments.values())
+    if not isinstance(attachments, list):
+        attachments = []
+    normalized_attachments = _normalize_scene_spec_payload(
+        {"title": normalized["title"], "objects": attachments[:24]},
+        normalized["title"],
+    )
+    normalized["attachments"] = normalized_attachments["objects"]
+    return normalized
+
+
+def _active_hard_surface_cage_spec(
+    root: Path,
+    status_payload: dict,
+) -> tuple[int, HardSurfaceCageSpec] | None:
+    model = status_payload.get("generic_model")
+    if not isinstance(model, dict):
+        return None
+    version = model.get("version")
+    if not isinstance(version, int):
+        return None
+    path = root / f"cage-spec-v{version}.json"
+    if not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        spec_payload = payload.get("spec") if isinstance(payload, dict) else None
+        return version, HardSurfaceCageSpec.model_validate(spec_payload)
+    except (OSError, json.JSONDecodeError, ValidationError, TypeError):
+        return None
+
+
+async def _build_hard_surface_cage_spec(
+    job_id: str,
+    *,
+    reason: str,
+    feature_task: FeatureTask | None = None,
+) -> HardSurfaceCageSpec:
+    root = _require_job(job_id)
+    job_request = json.loads((root / "request.json").read_text(encoding="utf-8"))
+    inventory = _load_subject_inventory(root)
+    feature_plan = await _ensure_feature_plan(job_id, inventory)
+    feature_plan_context = feature_plan.model_dump() if feature_plan is not None else {}
+    feature_context = feature_task.model_dump() if feature_task is not None else {}
+
+    status_payload = _read_status(root)
+    active = _active_hard_surface_cage_spec(root, status_payload)
+    current_cage = active[1].model_dump() if active is not None else {}
+
+    latest_vision: dict = {}
+    vision_path = root / "vision-latest.json"
+    if vision_path.exists():
+        try:
+            payload = json.loads(vision_path.read_text(encoding="utf-8"))
+            if isinstance(payload, dict):
+                latest_vision = payload.get("report") or {}
+        except (OSError, json.JSONDecodeError):
+            pass
+
+    images, labels = _collect_images(
+        root,
+        VisionAnalyzeRequest(
+            stage="hard_surface_cage_planning",
+            include_references=True,
+            include_renders=True,
+            max_images=8 if feature_task is not None else 14,
+        ),
+    )
+    system = (
+        "You are directing a human-style Blender hard-surface modeling pass. Return JSON only matching "
+        "HardSurfaceCageSpec. Do NOT invent an external/generated base mesh. Model the primary object the way "
+        "a competent Blender artist would: establish a low-poly HALF CAGE from orthographic/reference evidence, "
+        "mirror it across the centerline, then use subdivision/bevel and bounded boolean cutters for visible openings. "
+        "The cage stations run along the main length axis. Every station uses the SAME 4-8 point half-profile ordered "
+        "from bottom centerline -> outer/lower side -> shoulder/upper side -> top centerline. The first and last profile "
+        "points are on the mirror plane (half_width=0). Add stations where the silhouette changes; do not waste stations "
+        "on tiny cosmetic detail. Use cutters only for genuine holes/recesses/openings that materially affect silhouette. "
+        "Use attachments only for separate IN-PLACE parts. Any feature whose build_mode=component_job belongs to an "
+        "isolated child job and must NOT be faked as an attachment. Preserve accepted/best geometry. If a current cage "
+        "is supplied, revise it rather than starting over unless its topology is fundamentally unsuitable. Front is "
+        "negative Y and Z is up. Favor proportion, silhouette and major construction lines over surface decoration."
+    )
+    prompt = (
+        f"Exact user request: {job_request.get('prompt', '')}\n"
+        f"Intended use: {job_request.get('intended_use', '')}\n"
+        f"Reason for this Blender strategy/pass: {reason}\n"
+        f"Subject inventory: {json.dumps(inventory.model_dump() if inventory else {}, ensure_ascii=False)}\n"
+        f"Feature plan: {json.dumps(feature_plan_context, ensure_ascii=False)}\n"
+        f"ACTIVE FEATURE: {json.dumps(feature_context, ensure_ascii=False)}\n"
+        f"CURRENT HARD-SURFACE CAGE (if any): {json.dumps(current_cage, ensure_ascii=False)}\n"
+        f"Latest visual critique: {json.dumps(latest_vision, ensure_ascii=False)}\n"
+        f"Images in order: {labels}\n"
+        "Choose coordinates from the visible references. For a focused feature pass, change the minimum cage stations, "
+        "cutters or attachments necessary to make that feature visibly correct while protecting unrelated good geometry."
+    )
+
+    client = OllamaProxyClient()
+    errors: list[str] = []
+    for candidate_model in VISION_MODELS:
+        try:
+            result = await client.chat_json(
+                model=candidate_model,
+                system=system,
+                prompt=prompt,
+                images=images or None,
+                schema=HardSurfaceCageSpec.model_json_schema(),
+                temperature=0.0,
+                num_predict=8192,
+            )
+            normalized = _normalize_hard_surface_cage_payload(
+                result.data,
+                str(job_request.get("prompt") or "Hard-surface cage"),
+            )
+            spec = HardSurfaceCageSpec.model_validate(normalized)
+            if job_request.get("component_job") is True:
+                spec.presentation_base = False
+        except (OllamaProxyError, httpx.HTTPError, ValidationError, ValueError, TypeError) as exc:
+            errors.append(f"{candidate_model}: {exc}")
+            continue
+
+        _write_llm_log(
+            root,
+            "hard-surface-cage-spec",
+            {
+                "job_id": job_id,
+                "model": candidate_model,
+                "endpoint": result.endpoint,
+                "usage": result.usage,
+                "images": labels,
+                "reason": reason,
+                "spec": spec.model_dump(),
+                "created_at": datetime.now(UTC).isoformat(),
+            },
+        )
+        append_history(
+            root,
+            "hard_surface_cage_planned",
+            model=candidate_model,
+            axis=spec.axis,
+            stations=len(spec.stations),
+            cutters=len(spec.cutters),
+            attachments=len(spec.attachments),
+            reason=reason,
+        )
+        return spec
+
+    raise HTTPException(
+        status_code=502,
+        detail="Hard-surface cage planning failed across configured vision models: "
+        + " | ".join(errors[-4:]),
+    )
+
+
+async def _execute_hard_surface_cage(
+    job_id: str,
+    spec: HardSurfaceCageSpec,
+    *,
+    version: int,
+) -> dict:
+    root = _require_job(job_id)
+    prefix = f"model-v{version}"
+    blend_path = root / "scene" / f"{prefix}.blend"
+    qa_path = root / "exports" / f"{prefix}-qa.json"
+
+    _write_status(
+        root,
+        state="running",
+        stage=f"hard_surface_cage_build_v{version}",
+        modeling_strategy="hard_surface_cage",
+    )
+    payload = {
+        "tool": "blender_python_exec",
+        "arguments": {
+            "code": hard_surface_cage_script(),
+            "args": {
+                "spec": spec.model_dump(),
+                "blend_path": str(blend_path),
+                "output_dir": str(root / "renders"),
+                "exports_dir": str(root / "exports"),
+                "qa_path": str(qa_path),
+                "prefix": prefix,
+            },
+            "transport": "headless",
+            "factory_startup": True,
+            "timeout_seconds": 300,
+        },
+    }
+    try:
+        async with httpx.AsyncClient(timeout=360) as client:
+            response = await client.post(f"{WORKER_URL}/v1/mcp/call", json=payload)
+            response.raise_for_status()
+            result = response.json()
+    except (httpx.HTTPError, ValueError) as exc:
+        _write_status(root, state="failed", stage=f"hard_surface_cage_build_v{version}", error=str(exc))
+        raise HTTPException(status_code=502, detail=f"Hard-surface cage Blender build failed: {exc}") from exc
+
+    blender_error = _worker_blender_error(result)
+    if blender_error:
+        _write_status(root, state="failed", stage=f"hard_surface_cage_build_v{version}", error=blender_error)
+        raise HTTPException(status_code=502, detail=f"Hard-surface cage Blender script failed: {blender_error}")
+
+    views = (
+        "front", "front-left", "left", "back-left", "back",
+        "back-right", "right", "front-right", "top",
+    )
+    expected = [f"{prefix}-{view}.png" for view in views]
+    missing = [name for name in expected if not (root / "renders" / name).is_file()]
+    if missing or not blend_path.is_file():
+        raise HTTPException(
+            status_code=502,
+            detail=f"Hard-surface cage build completed but artifacts are missing: {missing}",
+        )
+
+    (root / f"cage-spec-v{version}.json").write_text(
+        json.dumps(
+            {
+                "job_id": job_id,
+                "version": version,
+                "strategy": "hard_surface_cage",
+                "spec": spec.model_dump(),
+                "created_at": datetime.now(UTC).isoformat(),
+            },
+            indent=2,
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    append_history(
+        root,
+        "hard_surface_cage_generation",
+        version=version,
+        title=spec.title,
+        stations=len(spec.stations),
+        cutters=len(spec.cutters),
+        attachments=len(spec.attachments),
+        renders=expected,
+        blend=blend_path.name,
+        qa=qa_path.name,
+    )
+    status = _write_status(
+        root,
+        state="ready",
+        stage=f"hard_surface_cage_rendered_v{version}",
+        modeling_strategy="hard_surface_cage",
+        generic_model={
+            "version": version,
+            "title": spec.title,
+            "blend": blend_path.name,
+            "renders": expected,
+            "qa": qa_path.name,
+            "strategy": "hard_surface_cage",
+        },
+    )
+    return {
+        "job_id": job_id,
+        "status": status,
+        "strategy": "hard_surface_cage",
+        "spec": spec.model_dump(),
+        "renders": expected,
+        "worker_result": result,
+    }
+
+
+async def _generate_hard_surface_cage(
+    job_id: str,
+    *,
+    reason: str,
+    feature_task: FeatureTask | None = None,
+) -> dict:
+    root = _require_job(job_id)
+    previous_status = _read_status(root)
+    previous_model = (
+        dict(previous_status.get("generic_model"))
+        if isinstance(previous_status.get("generic_model"), dict)
+        else None
+    )
+    baseline_version = (
+        previous_model.get("version")
+        if isinstance(previous_model, dict) and isinstance(previous_model.get("version"), int)
+        else None
+    )
+
+    feature_task = feature_task or begin_feature(root)
+    if feature_task is not None:
+        append_history(
+            root,
+            "feature_subjob_started",
+            feature_id=feature_task.id,
+            feature_name=feature_task.name,
+            attempt=feature_task.attempts,
+            strategy=feature_task.strategy,
+            dependencies=feature_task.depends_on,
+            via="hard_surface_cage",
+        )
+
+    spec = await _build_hard_surface_cage_spec(
+        job_id,
+        reason=reason,
+        feature_task=feature_task,
+    )
+    version = 1 + len(list((root / "scene").glob("model-v*.blend")))
+    build = await _execute_hard_surface_cage(job_id, spec, version=version)
+
+    feature_evaluation: dict | None = None
+    comparison: dict | None = None
+    if feature_task is not None:
+        feature_evaluation = await _evaluate_feature_candidate(
+            job_id,
+            feature_task,
+            baseline_version=baseline_version,
+            candidate_version=version,
+        )
+        accepted = _feature_evaluation_accepts(feature_task, feature_evaluation)
+        quality = dict(
+            previous_status.get("quality_gate")
+            if isinstance(previous_status.get("quality_gate"), dict)
+            else {}
+        )
+        quality["summary"] = feature_evaluation.get("summary") or quality.get("summary")
+        quality["active_feature_id"] = feature_task.id
+        quality["active_feature_passed"] = accepted
+        quality["representation"] = "hard_surface_cage"
+    else:
+        if baseline_version is not None and baseline_version != version:
+            comparison = await _compare_generic_versions(
+                root,
+                baseline_version=baseline_version,
+                candidate_version=version,
+            )
+        try:
+            quality = await _generic_recognizability_check(
+                job_id,
+                stage="hard_surface_cage_quality",
+            )
+        except HTTPException as exc:
+            quality = {
+                "recognizable": None,
+                "subject_match_score": None,
+                "summary": str(exc.detail),
+                "director_action": "refine_mesh",
+            }
+        accepted = bool(
+            quality.get("recognizable") is True
+            or baseline_version is None
+            or (comparison and comparison.get("candidate_is_better"))
+        )
+
+    if accepted:
+        active_model = build["status"].get("generic_model")
+        recognizable = quality.get("recognizable")
+        status = _write_status(
+            root,
+            state="ready",
+            stage=(
+                "hard_surface_cage_recognizable"
+                if recognizable is True
+                else "hard_surface_cage_needs_refinement"
+            ),
+            modeling_strategy="hard_surface_cage",
+            generic_model=active_model,
+            quality_gate={
+                **quality,
+                "representation": "hard_surface_cage",
+                "baseline_version": baseline_version,
+                "candidate_version": version,
+                "better_than_previous": (
+                    comparison.get("candidate_is_better") if comparison else None
+                ),
+            },
+        )
+        append_history(
+            root,
+            "hard_surface_cage_accepted",
+            version=version,
+            recognizable=recognizable,
+            baseline_version=baseline_version,
+        )
+    else:
+        status = _write_status(
+            root,
+            state="ready",
+            stage="hard_surface_cage_needs_replan",
+            modeling_strategy="hard_surface_cage",
+            generic_model=previous_model,
+            quality_gate={
+                **quality,
+                "recognizable": False,
+                "representation": "hard_surface_cage",
+                "candidate_rejected": True,
+                "baseline_version": baseline_version,
+                "candidate_version": version,
+            },
+        )
+        append_history(
+            root,
+            "hard_surface_cage_rejected",
+            baseline_version=baseline_version,
+            candidate_version=version,
+            summary=(
+                feature_evaluation.get("summary")
+                if feature_evaluation
+                else (comparison or {}).get("summary")
+            ),
+        )
+
+    if feature_task is not None:
+        finish_feature(
+            root,
+            feature_task.id,
+            accepted=accepted,
+            version=version if accepted else None,
+            summary=str((feature_evaluation or {}).get("summary") or quality.get("summary") or ""),
+            error="" if accepted else "Hard-surface cage candidate failed strict focused QA.",
+            verified=accepted,
+            acceptance_score=float((feature_evaluation or {}).get("reference_match_score") or 0.0),
+            acceptance_model=(
+                str((feature_evaluation or {}).get("model"))
+                if (feature_evaluation or {}).get("model")
+                else None
+            ),
+        )
+        append_history(
+            root,
+            "feature_subjob_accepted" if accepted else "feature_subjob_retry",
+            feature_id=feature_task.id,
+            feature_name=feature_task.name,
+            version=version if accepted else None,
+            via="hard_surface_cage",
+        )
+
+    build["comparison"] = comparison
+    build["feature_evaluation"] = feature_evaluation
+    build["quality_gate"] = quality
+    build["status"] = status
+    return build
+
+
 async def _build_adaptive_loft_spec(
     job_id: str,
     *,

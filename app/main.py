@@ -1400,6 +1400,53 @@ async def build_plan(job_id: str, request: PlanRequest) -> dict:
     return payload
 
 
+def _generic_spatial_guidance(prompt: str) -> str:
+    text = prompt.lower()
+    hints = [
+        "Coordinate convention is mandatory: X is left/right, Y is depth, Z is up. "
+        "The FRONT camera sits on negative Y and looks toward positive Y, so front-facing details "
+        "(eyes, cheeks, buttons, screens, grille details) must protrude on the negative-Y surface. "
+        "The back of the subject is positive Y.",
+        "Do not bury small details inside a larger primitive. Visible secondary parts must sit just outside "
+        "the parent surface with a small overlap so they read clearly while remaining connected.",
+        "Use rods only for genuinely thin rigid connectors, limbs, stems, handles, spokes or struts. "
+        "Do not represent broad ears, heads, shoes, shades or other silhouette masses as antenna-like rods.",
+        "For paired parts, place both explicitly and symmetrically unless the request asks for asymmetry.",
+    ]
+    if any(term in text for term in ("pikachu", "character", "creature", "animal", "figurine")):
+        hints.append(
+            "Character rule: keep head and torso as distinct masses; pointed ears/horns should normally be "
+            "elongated cones or tapered masses above the head; eyes/cheeks belong on negative Y and must "
+            "protrude beyond the face; arms and feet must extend beyond the torso silhouette; a tail must "
+            "emerge from the rear/side of the torso and remain visible in side or rear views."
+        )
+    if "lamp" in text:
+        hints.append(
+            "Lamp rule: build an unbroken contact chain base -> vertical stem -> pivot/joint -> angled neck "
+            "-> shade. Use endpoint-aligned rods for stem/neck and overlap each endpoint with the adjoining "
+            "part. The shade must be centered on and attached to the end of the neck, never floating."
+        )
+    if "sneaker" in text or "shoe" in text:
+        hints.append(
+            "Shoe rule: establish a long low sole first, then a distinct upper/toe/heel volume above it. "
+            "The tongue must rise from the opening, and several thin lace rods should cross over the tongue. "
+            "Keep the shoe low and elongated rather than stacking round primitives vertically."
+        )
+    if "chair" in text:
+        hints.append(
+            "Chair rule: seat and backrest are separate broad surfaces; the backrest sits behind the seat "
+            "toward positive Y; armrests sit on both X sides; the central column extends downward from the "
+            "seat; five radial spokes and caster wheels must be visibly separated around the base."
+        )
+    if "quadruped" in text or ("robot" in text and "leg" in text):
+        hints.append(
+            "Quadruped rule: each of four legs needs an upper segment, visible joint, lower segment and foot. "
+            "Attach legs to four distinct torso corners and keep the camera/sensors/antenna/battery/tool arm "
+            "outside the torso surface so they remain visible across multiple views."
+        )
+    return "\n".join(f"- {hint}" for hint in hints)
+
+
 async def _build_generic_scene_spec(job_id: str, auto_research: bool) -> GenericSceneSpec:
     root = _require_job(job_id)
     job_request = json.loads((root / "request.json").read_text(encoding="utf-8"))
@@ -1458,8 +1505,10 @@ async def _build_generic_scene_spec(job_id: str, auto_research: bool) -> Generic
         "that are physically connected must touch or overlap their parent geometry; do not leave floating "
         "stems, necks, limbs, handles, shades, ears, tails, or connectors. Coordinates should normally stay "
         "within -8..8. Place the subject around the origin and keep its lowest major geometry near Z=0. "
-        "Use meaningful semantic object names and realistic relative proportions. Before returning JSON, "
-        "mentally inventory the requested parts and verify that each is represented in objects."
+        "Use meaningful semantic object names and realistic relative proportions. Treat the provided spatial "
+        "guidance as hard geometry constraints, especially the negative-Y front-face convention. Before "
+        "returning JSON, mentally inventory every requested part and verify both that it exists and that it "
+        "will be visibly exposed from at least one standard QA camera view."
     )
     prompt = (
         f"User request: {job_request.get('prompt', '')}\n"
@@ -1467,6 +1516,7 @@ async def _build_generic_scene_spec(job_id: str, auto_research: bool) -> Generic
         f"Target width mm: {job_request.get('target_width_mm')}\n"
         f"Visual reference analysis: {json.dumps(visual_context, ensure_ascii=False)}\n"
         f"Web research context: {json.dumps(research_context, ensure_ascii=False)}\n"
+        f"Spatial/modeling guidance:\n{_generic_spatial_guidance(str(job_request.get('prompt') or ''))}\n"
         "Create a primitive-based blockout scene specification. If the subject is organic, approximate "
         "it with overlapping ellipsoids/cones while keeping distinct head/body/limb/appendage/face forms "
         "when the prompt calls for them. If hard-surface, use cubes/cylinders/torus/rods as needed and keep "
@@ -1674,12 +1724,16 @@ async def refine_generic_scene(job_id: str, request: GenericRefineRequest) -> di
             "the critique explicitly identifies it as wrong or redundant. You may only use the schema's "
             "allowed primitive shapes. Prefer rod objects for articulated limbs, stems, necks, struts and "
             "connectors when two endpoints are known. Connected parts must touch or overlap their parent "
-            "geometry rather than float. Preserve good geometry and make the smallest changes that address "
-            "the critique. Do not output Python."
+            "geometry rather than float. Keep the coordinate convention fixed: negative Y is the visible "
+            "front surface, positive Y is the back, and Z is up. Do not move face/front details behind the "
+            "parent surface or bury them inside it. Preserve good geometry and make the smallest changes that "
+            "address the critique. Do not output Python."
         )
+        job_request = json.loads((root / "request.json").read_text(encoding="utf-8"))
         prompt = (
             f"Current SceneSpec: {json.dumps(current_spec.model_dump(), ensure_ascii=False)}\n"
             f"Visual critique: {json.dumps(report, ensure_ascii=False)}\n"
+            f"Spatial/modeling guidance:\n{_generic_spatial_guidance(str(job_request.get('prompt') or ''))}\n"
             "Return the improved full SceneSpec. Keep unaffected object names and parts. Do not reduce the "
             "overall part inventory unless the critique explicitly requires removal. The candidate will be "
             "rejected automatically if it loses too many existing semantic parts."

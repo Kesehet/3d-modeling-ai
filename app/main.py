@@ -1566,14 +1566,20 @@ async def build_plan(job_id: str, request: PlanRequest) -> dict:
 def _generic_spatial_guidance(prompt: str) -> str:
     text = prompt.lower()
     hints = [
-        "Coordinate convention is mandatory: X is left/right, Y is depth, Z is up. "
-        "The FRONT camera sits on negative Y and looks toward positive Y, so front-facing details "
-        "(eyes, cheeks, buttons, screens, grille details) must protrude on the negative-Y surface. "
-        "The back of the subject is positive Y.",
-        "Do not bury small details inside a larger primitive. Visible secondary parts must sit just outside "
-        "the parent surface with a small overlap so they read clearly while remaining connected.",
-        "Use rods only for genuinely thin rigid connectors, limbs, stems, handles, spokes or struts. "
-        "Do not represent broad ears, heads, shoes, shades or other silhouette masses as antenna-like rods.",
+        (
+            "Coordinate convention is mandatory: X is left/right, Y is depth, Z is up. "
+            "The FRONT camera sits on negative Y and looks toward positive Y, so front-facing details "
+            "(eyes, cheeks, buttons, screens, grille details) must protrude on the negative-Y surface. "
+            "The back of the subject is positive Y."
+        ),
+        (
+            "Do not bury small details inside a larger primitive. Visible secondary parts must sit just outside "
+            "the parent surface with a small overlap so they read clearly while remaining connected."
+        ),
+        (
+            "Use rods only for genuinely thin rigid connectors, limbs, stems, handles, spokes or struts. "
+            "Do not represent broad ears, heads, shoes, shades or other silhouette masses as antenna-like rods."
+        ),
         "For paired parts, place both explicitly and symmetrically unless the request asks for asymmetry.",
     ]
     if any(term in text for term in ("pikachu", "character", "creature", "animal", "figurine")):

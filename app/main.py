@@ -29,6 +29,7 @@ from .config import (
 from .dashboard import dashboard_page, jobs_snapshot, public_artifact, public_render
 from .generic_builder import generic_scene_script
 from .history import append_history, load_history
+from .mesh_builder import adaptive_loft_script
 from .ollama import OllamaProxyClient, OllamaProxyError
 from .quality import evaluate_scene_spec_structural, get_benchmark
 from .repair import print_repair_script
@@ -587,6 +588,23 @@ class GenericSceneSpec(BaseModel):
     rationale: str = Field(default="", max_length=2000)
     presentation_base: bool = True
     objects: list[SceneObjectSpec] = Field(min_length=1, max_length=40)
+
+
+class LoftSection(BaseModel):
+    position: float = Field(ge=-10.0, le=10.0)
+    contour: list[tuple[float, float]] = Field(min_length=8, max_length=8)
+
+
+class AdaptiveLoftSpec(BaseModel):
+    title: str = Field(min_length=1, max_length=120)
+    rationale: str = Field(default="", max_length=2400)
+    axis: Literal["x", "y", "z"] = "y"
+    color: str = Field(default="#B8BDC6", pattern=r"^#[0-9A-Fa-f]{6}$")
+    subdivision_levels: int = Field(default=1, ge=0, le=2)
+    smooth: bool = True
+    presentation_base: bool = True
+    sections: list[LoftSection] = Field(min_length=4, max_length=12)
+    attachments: list[SceneObjectSpec] = Field(default_factory=list, max_length=24)
 
 
 def _semantic_name_tokens(value: str) -> set[str]:
@@ -2465,6 +2483,428 @@ async def _execute_generic_spec(
     }
 
 
+def _load_subject_inventory(root: Path) -> SubjectInventory | None:
+    path = root / "subject-inventory.json"
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        raw = payload.get("inventory") if isinstance(payload, dict) else None
+        return SubjectInventory.model_validate(raw)
+    except (OSError, json.JSONDecodeError, ValidationError, TypeError):
+        return None
+
+
+def _normalize_adaptive_loft_payload(data: object, fallback_title: str) -> dict:
+    if not isinstance(data, dict):
+        raise TypeError("Adaptive loft response is not a JSON object.")
+
+    normalized = dict(data)
+    normalized["title"] = str(normalized.get("title") or fallback_title or "Adaptive mesh")[:120]
+    normalized["rationale"] = str(normalized.get("rationale") or "")[:2400]
+    axis = str(normalized.get("axis") or "y").lower()
+    normalized["axis"] = axis if axis in {"x", "y", "z"} else "y"
+    color = str(normalized.get("color") or "#B8BDC6")
+    if not (
+        len(color) == 7
+        and color.startswith("#")
+        and all(character in "0123456789abcdefABCDEF" for character in color[1:])
+    ):
+        color = "#B8BDC6"
+    normalized["color"] = color.upper()
+    normalized["subdivision_levels"] = max(
+        0,
+        min(2, int(normalized.get("subdivision_levels") or 0)),
+    )
+    normalized["smooth"] = bool(normalized.get("smooth", True))
+    normalized["presentation_base"] = bool(normalized.get("presentation_base", True))
+
+    sections = []
+    raw_sections = normalized.get("sections")
+    if not isinstance(raw_sections, list):
+        raise TypeError("Adaptive loft sections must be a list.")
+    for raw in raw_sections[:12]:
+        if not isinstance(raw, dict):
+            continue
+        raw_contour = raw.get("contour")
+        if not isinstance(raw_contour, list) or len(raw_contour) != 8:
+            continue
+        contour: list[list[float]] = []
+        valid = True
+        for point in raw_contour:
+            if not isinstance(point, (list, tuple)) or len(point) < 2:
+                valid = False
+                break
+            try:
+                u = max(-10.0, min(10.0, float(point[0])))
+                v = max(-10.0, min(10.0, float(point[1])))
+            except (TypeError, ValueError):
+                valid = False
+                break
+            contour.append([u, v])
+        if not valid:
+            continue
+        try:
+            position = max(-10.0, min(10.0, float(raw.get("position"))))
+        except (TypeError, ValueError):
+            continue
+        sections.append({"position": position, "contour": contour})
+
+    sections.sort(key=lambda section: section["position"])
+    deduped = []
+    for section in sections:
+        if deduped and abs(section["position"] - deduped[-1]["position"]) < 0.05:
+            continue
+        deduped.append(section)
+    if len(deduped) < 4:
+        raise ValueError("Adaptive loft needs at least four distinct valid cross sections.")
+    normalized["sections"] = deduped
+
+    attachments = normalized.get("attachments")
+    if not isinstance(attachments, list):
+        attachments = []
+    normalized_attachments = _normalize_scene_spec_payload(
+        {"title": normalized["title"], "objects": attachments[:24]},
+        normalized["title"],
+    )
+    normalized["attachments"] = normalized_attachments["objects"]
+    return normalized
+
+
+async def _build_adaptive_loft_spec(job_id: str, *, reason: str) -> AdaptiveLoftSpec:
+    root = _require_job(job_id)
+    job_request = json.loads((root / "request.json").read_text(encoding="utf-8"))
+    inventory = _load_subject_inventory(root)
+
+    latest_vision: dict = {}
+    vision_path = root / "vision-latest.json"
+    if vision_path.exists():
+        try:
+            vision_payload = json.loads(vision_path.read_text(encoding="utf-8"))
+            if isinstance(vision_payload, dict):
+                latest_vision = vision_payload.get("report") or {}
+        except (OSError, json.JSONDecodeError):
+            latest_vision = {}
+
+    images, labels = _collect_images(
+        root,
+        VisionAnalyzeRequest(
+            stage="generic_mesh_reference_reconstruction",
+            include_references=True,
+            include_renders=True,
+            max_images=14,
+        ),
+    )
+    if not images:
+        raise HTTPException(
+            status_code=400,
+            detail="Adaptive mesh fallback needs reference or current-render images.",
+        )
+
+    system = (
+        "You are the mesh-reconstruction stage of an autonomous Blender system. The primitive blockout "
+        "was not recognizable enough, so create a SAFE DECLARATIVE LOFT MESH instead of more cubes/wedges. "
+        "Return JSON only matching the supplied AdaptiveLoftSpec schema. Choose the axis that best follows "
+        "the subject's main length. Each cross section MUST contain exactly 8 perimeter points in consistent "
+        "clockwise order when viewed along the positive axis; use the same semantic perimeter order in every "
+        "section. Use 5-10 sections to capture major silhouette changes. Coordinates are Blender units and "
+        "must remain roughly within -8..8. The loft is the main continuous body mass. Put visually separate "
+        "identity-critical parts that should not be fused into the main silhouette into attachments using the "
+        "safe primitive schema (for example wheels, handles, lenses, windows, feet, knobs, antennas). "
+        "Do not approximate the whole subject with attachments; the loft must carry the primary silhouette. "
+        "Front-facing subject direction is negative Y and Z is up. Favor reference geometry and recognizability "
+        "over cosmetic detail."
+    )
+    prompt = (
+        f"User request: {job_request.get('prompt', '')}\n"
+        f"Intended use: {job_request.get('intended_use', '')}\n"
+        f"Target width mm: {job_request.get('target_width_mm')}\n"
+        f"Reason for strategy switch: {reason}\n"
+        f"Subject inventory: {json.dumps(inventory.model_dump() if inventory else {}, ensure_ascii=False)}\n"
+        f"Latest visual critique: {json.dumps(latest_vision, ensure_ascii=False)}\n"
+        f"Images in order: {labels}\n"
+        "Create a substantially more recognizable continuous base mesh. For an 8-point cross section, a useful "
+        "order is around the perimeter from lower-left -> mid-left -> upper-left/shoulder -> top-left -> "
+        "top-right -> upper-right/shoulder -> mid-right -> lower-right, adjusted to the actual subject."
+    )
+
+    client = OllamaProxyClient()
+    errors: list[str] = []
+    for candidate_model in VISION_MODELS:
+        try:
+            result = await client.chat_json(
+                model=candidate_model,
+                system=system,
+                prompt=prompt,
+                images=images,
+                schema=AdaptiveLoftSpec.model_json_schema(),
+                temperature=0.05,
+            )
+            normalized = _normalize_adaptive_loft_payload(
+                result.data,
+                str(job_request.get("prompt") or "Adaptive mesh"),
+            )
+            spec = AdaptiveLoftSpec.model_validate(normalized)
+        except (OllamaProxyError, httpx.HTTPError, ValidationError, ValueError, TypeError) as exc:
+            errors.append(f"{candidate_model}: {exc}")
+            continue
+
+        payload = {
+            "job_id": job_id,
+            "model": candidate_model,
+            "endpoint": result.endpoint,
+            "usage": result.usage,
+            "images": labels,
+            "reason": reason,
+            "spec": spec.model_dump(),
+            "created_at": datetime.now(UTC).isoformat(),
+        }
+        _write_llm_log(root, "adaptive-loft-spec", payload)
+        append_history(
+            root,
+            "adaptive_loft_planned",
+            model=candidate_model,
+            axis=spec.axis,
+            sections=len(spec.sections),
+            attachments=len(spec.attachments),
+            reason=reason,
+        )
+        return spec
+
+    detail = " | ".join(errors[-4:])
+    raise HTTPException(
+        status_code=502,
+        detail=f"Adaptive mesh planning failed across configured vision models: {detail}",
+    )
+
+
+async def _execute_adaptive_loft(
+    job_id: str,
+    spec: AdaptiveLoftSpec,
+    *,
+    version: int,
+) -> dict:
+    root = _require_job(job_id)
+    prefix = f"model-v{version}"
+    blend_path = root / "scene" / f"{prefix}.blend"
+    qa_path = root / "exports" / f"{prefix}-qa.json"
+
+    _write_status(root, state="running", stage=f"adaptive_mesh_build_v{version}")
+    payload = {
+        "tool": "blender_python_exec",
+        "arguments": {
+            "code": adaptive_loft_script(),
+            "args": {
+                "spec": spec.model_dump(),
+                "blend_path": str(blend_path),
+                "output_dir": str(root / "renders"),
+                "exports_dir": str(root / "exports"),
+                "qa_path": str(qa_path),
+                "prefix": prefix,
+            },
+            "transport": "headless",
+            "factory_startup": True,
+            "timeout_seconds": 300,
+        },
+    }
+    try:
+        async with httpx.AsyncClient(timeout=360) as client:
+            response = await client.post(f"{WORKER_URL}/v1/mcp/call", json=payload)
+            response.raise_for_status()
+            result = response.json()
+    except (httpx.HTTPError, ValueError) as exc:
+        _write_status(root, state="failed", stage=f"adaptive_mesh_build_v{version}", error=str(exc))
+        raise HTTPException(status_code=502, detail=f"Adaptive mesh Blender build failed: {exc}") from exc
+
+    blender_error = _worker_blender_error(result)
+    if blender_error:
+        _write_status(root, state="failed", stage=f"adaptive_mesh_build_v{version}", error=blender_error)
+        raise HTTPException(status_code=502, detail=f"Adaptive mesh Blender script failed: {blender_error}")
+
+    views = (
+        "front", "front-left", "left", "back-left", "back",
+        "back-right", "right", "front-right", "top",
+    )
+    expected = [f"{prefix}-{view}.png" for view in views]
+    missing = [name for name in expected if not (root / "renders" / name).is_file()]
+    if missing or not blend_path.is_file():
+        _write_status(
+            root,
+            state="failed",
+            stage=f"adaptive_mesh_build_v{version}",
+            error=f"Missing artifacts: {missing}",
+        )
+        raise HTTPException(
+            status_code=502,
+            detail=f"Adaptive mesh build completed but artifacts are missing: {missing}",
+        )
+
+    spec_payload = {
+        "job_id": job_id,
+        "version": version,
+        "strategy": "adaptive_loft",
+        "spec": spec.model_dump(),
+        "created_at": datetime.now(UTC).isoformat(),
+    }
+    (root / f"mesh-spec-v{version}.json").write_text(
+        json.dumps(spec_payload, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    append_history(
+        root,
+        "adaptive_mesh_generation",
+        version=version,
+        title=spec.title,
+        sections=len(spec.sections),
+        attachments=len(spec.attachments),
+        renders=expected,
+        blend=blend_path.name,
+        qa=qa_path.name,
+    )
+    status = _write_status(
+        root,
+        state="ready",
+        stage=f"adaptive_mesh_rendered_v{version}",
+        modeling_strategy="adaptive_loft",
+        generic_model={
+            "version": version,
+            "title": spec.title,
+            "blend": blend_path.name,
+            "renders": expected,
+            "qa": qa_path.name,
+            "strategy": "adaptive_loft",
+        },
+    )
+    return {
+        "job_id": job_id,
+        "status": status,
+        "strategy": "adaptive_loft",
+        "spec": spec.model_dump(),
+        "renders": expected,
+        "worker_result": result,
+    }
+
+
+async def _generate_adaptive_mesh_fallback(job_id: str, *, reason: str) -> dict:
+    root = _require_job(job_id)
+    status_path = root / "status.json"
+    previous_status: dict = {}
+    if status_path.exists():
+        try:
+            previous_status = json.loads(status_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            previous_status = {}
+
+    previous_model = (
+        dict(previous_status.get("generic_model"))
+        if isinstance(previous_status.get("generic_model"), dict)
+        else None
+    )
+    baseline_version = (
+        previous_model.get("version")
+        if isinstance(previous_model, dict) and isinstance(previous_model.get("version"), int)
+        else None
+    )
+
+    _write_status(root, state="running", stage="adaptive_mesh_planning")
+    spec = await _build_adaptive_loft_spec(job_id, reason=reason)
+    version = 1 + len(list((root / "scene").glob("model-v*.blend")))
+    build = await _execute_adaptive_loft(job_id, spec, version=version)
+
+    comparison: dict | None = None
+    if baseline_version is not None and baseline_version != version:
+        comparison = await _compare_generic_versions(
+            root,
+            baseline_version=baseline_version,
+            candidate_version=version,
+        )
+
+    try:
+        quality = await _generic_recognizability_check(
+            job_id,
+            stage="generic_mesh_fallback_quality",
+        )
+    except HTTPException as exc:
+        append_history(root, "adaptive_mesh_quality_unavailable", error=str(exc.detail))
+        quality = {
+            "recognizable": None,
+            "subject_match_score": None,
+            "recommended_strategy": "hybrid",
+            "summary": str(exc.detail),
+        }
+
+    recognizable = quality.get("recognizable")
+    better = bool(comparison and comparison.get("candidate_is_better"))
+    accept_candidate = recognizable is True or baseline_version is None or better
+
+    if not accept_candidate and previous_model is not None:
+        active_renders = previous_model.get("renders")
+        if not isinstance(active_renders, list):
+            active_renders = [
+                f"model-v{baseline_version}-{view}.png"
+                for view in (
+                    "front", "front-left", "left", "back-left", "back",
+                    "back-right", "right", "front-right", "top",
+                )
+            ]
+        status = _write_status(
+            root,
+            state="ready",
+            stage="generic_needs_strategy_switch",
+            modeling_strategy=previous_status.get("modeling_strategy") or "procedural",
+            generic_model=previous_model,
+            quality_gate={
+                "recognizable": False,
+                "subject_match_score": quality.get("subject_match_score"),
+                "recommended_strategy": quality.get("recommended_strategy"),
+                "summary": quality.get("summary"),
+                "adaptive_mesh_attempted": True,
+                "adaptive_mesh_candidate_version": version,
+            },
+        )
+        append_history(
+            root,
+            "adaptive_mesh_rejected",
+            baseline_version=baseline_version,
+            candidate_version=version,
+            comparison_summary=comparison.get("summary") if comparison else None,
+        )
+    else:
+        if recognizable is True:
+            stage = "adaptive_mesh_recognizable"
+        elif recognizable is None:
+            stage = "generic_quality_unverified"
+        else:
+            stage = "adaptive_mesh_needs_refinement"
+        status = _write_status(
+            root,
+            state="ready",
+            stage=stage,
+            modeling_strategy="adaptive_loft",
+            quality_gate={
+                "recognizable": recognizable,
+                "subject_match_score": quality.get("subject_match_score"),
+                "recommended_strategy": quality.get("recommended_strategy"),
+                "summary": quality.get("summary"),
+                "adaptive_mesh_attempted": True,
+                "adaptive_mesh_candidate_version": version,
+                "better_than_previous": better if comparison is not None else None,
+            },
+        )
+        append_history(
+            root,
+            "adaptive_mesh_accepted",
+            version=version,
+            recognizable=recognizable,
+            better_than_previous=better if comparison is not None else None,
+        )
+
+    build["comparison"] = comparison
+    build["quality_gate"] = quality
+    build["status"] = status
+    return build
+
+
 async def _generic_recognizability_check(job_id: str, *, stage: str) -> dict:
     root = _require_job(job_id)
     vision = await analyze_vision(
@@ -2529,21 +2969,45 @@ async def generate_generic_scene(job_id: str, request: GenericGenerateRequest) -
         recognizable = quality_gate.get("recognizable")
         if recognizable is True:
             next_stage = "generic_initial_recognizable"
-        elif quality_gate.get("recommended_strategy") in {"base_mesh", "hybrid"}:
-            next_stage = "generic_needs_strategy_switch"
+            status = _write_status(
+                root,
+                state="ready",
+                stage=next_stage,
+                quality_gate={
+                    "recognizable": recognizable,
+                    "subject_match_score": quality_gate.get("subject_match_score"),
+                    "recommended_strategy": quality_gate.get("recommended_strategy"),
+                    "summary": quality_gate.get("summary"),
+                },
+            )
+        elif recognizable is False:
+            append_history(
+                root,
+                "automatic_strategy_switch",
+                from_strategy="procedural",
+                to_strategy="adaptive_loft",
+                reason=quality_gate.get("summary"),
+            )
+            return await _generate_adaptive_mesh_fallback(
+                job_id,
+                reason=(
+                    quality_gate.get("summary")
+                    or "Primitive blockout failed recognizability and vision requested a mesh/hybrid strategy."
+                ),
+            )
         else:
             next_stage = "generic_needs_refinement"
-        status = _write_status(
-            root,
-            state="ready",
-            stage=next_stage,
-            quality_gate={
-                "recognizable": recognizable,
-                "subject_match_score": quality_gate.get("subject_match_score"),
-                "recommended_strategy": quality_gate.get("recommended_strategy"),
-                "summary": quality_gate.get("summary"),
-            },
-        )
+            status = _write_status(
+                root,
+                state="ready",
+                stage=next_stage,
+                quality_gate={
+                    "recognizable": recognizable,
+                    "subject_match_score": quality_gate.get("subject_match_score"),
+                    "recommended_strategy": quality_gate.get("recommended_strategy"),
+                    "summary": quality_gate.get("summary"),
+                },
+            )
 
     build["status"] = status
     build["quality_gate"] = quality_gate
@@ -2563,12 +3027,18 @@ async def refine_generic_scene(job_id: str, request: GenericRefineRequest) -> di
             existing_status = json.loads(status_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             existing_status = {}
-        if existing_status.get("stage") == "generic_needs_strategy_switch":
-            raise HTTPException(
-                status_code=409,
-                detail=(
-                    "The active primitive SceneSpec failed the recognizability gate. "
-                    "Further primitive refinement is disabled; this job needs a mesh/hybrid strategy."
+        if (
+            existing_status.get("modeling_strategy") == "adaptive_loft"
+            or existing_status.get("stage") in {
+                "generic_needs_strategy_switch",
+                "adaptive_mesh_needs_refinement",
+            }
+        ):
+            return await _generate_adaptive_mesh_fallback(
+                job_id,
+                reason=(
+                    str((existing_status.get("quality_gate") or {}).get("summary") or "")
+                    or "The current model is not recognizable enough; continue with adaptive mesh reconstruction."
                 ),
             )
         if existing_status.get("stage") == "generic_quality_unverified":

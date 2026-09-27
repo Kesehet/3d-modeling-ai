@@ -8,6 +8,7 @@ from app.main import (
     ReferenceSearchPlan,
     _is_usable_reference_record,
     _metadata_supports_reference_identity,
+    _metadata_title_supports_reference_identity,
     _normalize_reference_pack_payload,
     _prune_unverified_auto_references,
 )
@@ -256,3 +257,68 @@ def test_dashboard_and_wheel_are_penalized_unless_requested():
         "Toyota Prius wheel",
         exterior,
     )
+
+
+
+def test_reference_verifier_infers_score_from_strict_boolean_decision():
+    records = [{"stored_name": "candidate-a.jpg"}]
+    payload = {
+        "decisions": [
+            {
+                "stored_name": "candidate-a.jpg",
+                "accept": True,
+                "exact_identity_match": True,
+                "useful_for_geometry": True,
+            }
+        ]
+    }
+
+    normalized = _normalize_reference_pack_payload(payload, records)
+    pack = ReferencePackDecision.model_validate(normalized)
+    decision = pack.decisions[0]
+
+    assert decision.accept is True
+    assert decision.match_score == 0.85
+    assert decision.score_inferred is True
+
+
+def test_reference_verifier_infers_accept_when_strict_booleans_are_present():
+    records = [{"stored_name": "candidate-a.jpg"}]
+    payload = {
+        "decisions": [
+            {
+                "stored_name": "candidate-a.jpg",
+                "exact_identity_match": True,
+                "useful_for_geometry": True,
+            }
+        ]
+    }
+
+    normalized = _normalize_reference_pack_payload(payload, records)
+    pack = ReferencePackDecision.model_validate(normalized)
+    decision = pack.decisions[0]
+
+    assert decision.accept is True
+    assert decision.match_score == 0.85
+    assert decision.score_inferred is True
+
+
+def test_title_identity_support_rejects_incidental_caption_match():
+    plan = ReferenceSearchPlan(
+        primary_query="Toyota Prius",
+        subject_description="Toyota Prius",
+        identity_constraints=[],
+    )
+    full_vehicle = {
+        "title": "File:Toyota Prius XW30 China.jpg",
+        "source_title": "Toyota Prius XW30 China",
+        "description": "Toyota Prius",
+    }
+    battery = {
+        "title": "File:Prius 12v Battery Location.jpg",
+        "source_title": "Prius 12v Battery Location",
+        "description": "Battery in the back of a Toyota Prius",
+    }
+
+    assert _metadata_title_supports_reference_identity(plan, full_vehicle) is True
+    assert _metadata_title_supports_reference_identity(plan, battery) is False

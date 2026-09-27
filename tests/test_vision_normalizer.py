@@ -1,4 +1,9 @@
-from app.main import VisionReport, _normalize_vision_report_payload
+import base64
+from io import BytesIO
+
+from PIL import Image
+
+from app.main import VisionReport, _encode_vision_image, _normalize_vision_report_payload
 
 
 def test_normalize_nested_vision_analysis():
@@ -33,3 +38,20 @@ def test_normalize_native_vision_report():
     }
     report = VisionReport.model_validate(_normalize_vision_report_payload(raw))
     assert report.issues[0].severity == "high"
+
+
+def test_vision_image_encoder_downscales_payload_without_touching_source(tmp_path):
+    path = tmp_path / "large-reference.png"
+    Image.new("RGB", (2400, 1200), (160, 170, 180)).save(path)
+
+    encoded = _encode_vision_image(path)
+    payload = base64.b64decode(encoded)
+
+    with Image.open(BytesIO(payload)) as prepared:
+        assert prepared.format == "JPEG"
+        assert max(prepared.size) <= 640
+
+    with Image.open(path) as original:
+        assert original.size == (2400, 1200)
+
+    assert len(payload) < 250_000

@@ -2937,7 +2937,6 @@ async def _build_generic_scene_spec(job_id: str, auto_research: bool) -> Generic
     inventory_context = inventory.model_dump() if inventory is not None else {}
     feature_plan = await _ensure_feature_plan(job_id, inventory)
     feature_plan_context = feature_plan.model_dump() if feature_plan is not None else {}
-    feature_context = feature_task.model_dump() if feature_task is not None else {}
 
     system = (
         "You are the modeling agent for Blender. Inspect the user request and supplied reference images, then "
@@ -3309,6 +3308,7 @@ async def _build_adaptive_loft_spec(
     inventory = _load_subject_inventory(root)
     feature_plan = await _ensure_feature_plan(job_id, inventory)
     feature_plan_context = feature_plan.model_dump() if feature_plan is not None else {}
+    feature_context = feature_task.model_dump() if feature_task is not None else {}
 
     latest_vision: dict = {}
     vision_path = root / "vision-latest.json"

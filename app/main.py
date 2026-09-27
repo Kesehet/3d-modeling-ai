@@ -1233,8 +1233,7 @@ def _is_auto_reference_record(record: dict) -> bool:
     stored_name = str(record.get("stored_name") or "")
     return (
         provider in {"wikipedia", "wikimedia_commons", "wikimedia"}
-        or stored_name.startswith("web-")
-        or stored_name.startswith("candidate-")
+        or stored_name.startswith(("web-", "candidate-"))
     )
 
 

@@ -2197,6 +2197,22 @@ def _persisted_auto_improve_no_progress_rounds(root: Path) -> int:
     return streak
 
 
+def _assembled_parent_requires_safe_stop(root: Path, status: dict) -> bool:
+    """Do not let generic refinement discard already-frozen component geometry."""
+
+    model = status.get("generic_model")
+    if not isinstance(model, dict):
+        return False
+    assembled = model.get("assembled_components")
+    if not isinstance(assembled, list) or not assembled:
+        return False
+    quality = status.get("quality_gate")
+    if isinstance(quality, dict) and quality.get("recognizable") is True:
+        return False
+    summary = feature_plan_summary(root) or {}
+    return bool(summary.get("required_complete") and not summary.get("next_feature_id"))
+
+
 def _remaining_feature_attempt_budget(root: Path) -> int:
     plan = load_feature_plan(root)
     if plan is None or plan.plan_version < 2:

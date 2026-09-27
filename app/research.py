@@ -66,14 +66,15 @@ def _query_terms(query: str) -> list[str]:
 def _candidate_relevance_score(query: str, candidate: dict[str, Any]) -> float:
     """Cheap lexical pre-ranking before the expensive multimodal verifier.
 
-    This is intentionally permissive: the vision model is the authority. The goal here is
-    only to avoid wasting its image budget on obviously unrelated Wikimedia results.
+    The vision model remains authoritative. This stage only pushes likely whole-subject
+    views ahead of parts/interiors so we spend the visual-verification budget sensibly.
     """
-    query_text = _canonical_text(query)
     terms = _query_terms(query)
+    query_text = " ".join(terms)
     title = _canonical_text(candidate.get("title") or "")
     description = _canonical_text(candidate.get("description") or "")
     source_title = _canonical_text(candidate.get("source_title") or "")
+    title_text = " ".join(item for item in (title, source_title) if item)
     haystack = " ".join(item for item in (title, description, source_title) if item)
 
     score = 0.0
@@ -87,10 +88,18 @@ def _candidate_relevance_score(query: str, candidate: dict[str, Any]) -> float:
         elif matched >= max(1, len(terms) - 1):
             score += 3.0
 
+        # Matching the requested identity in the image title is much stronger than
+        # mentioning it incidentally in a caption about a battery, dashboard, tow, etc.
+        title_matches = sum(term in title_text for term in terms)
+        if title_matches == len(terms):
+            score += 9.0
+        elif title_matches >= max(1, len(terms) - 1):
+            score += 3.0
+
     provider = candidate.get("provider")
     if provider == "wikipedia":
         # A lead image from a closely matching article is often an excellent identity anchor.
-        score += 2.0
+        score += 3.0
 
     try:
         rank = int(candidate.get("search_rank") or 99)
@@ -98,7 +107,9 @@ def _candidate_relevance_score(query: str, candidate: dict[str, Any]) -> float:
         rank = 99
     score += max(0.0, 4.0 - (rank * 0.25))
 
-    # Common Wikimedia assets that are usually bad 3D reconstruction references.
+    # Common Wikimedia assets that are usually bad *whole-object* 3D references.
+    # Do not penalize a marker when the user explicitly asked for that thing.
+    query_term_set = set(terms)
     bad_markers = (
         "logo",
         "icon",
@@ -111,9 +122,21 @@ def _candidate_relevance_score(query: str, candidate: dict[str, Any]) -> float:
         "wordmark",
         "poster",
         "screenshot",
+        "battery",
+        "dashboard",
+        "instrument cluster",
+        "engine bay",
+        "wheel",
+        "tire",
+        "tyre",
+        "interior",
+        "close up",
+        "closeup",
     )
-    if any(marker in title for marker in bad_markers):
-        score -= 8.0
+    for marker in bad_markers:
+        marker_terms = set(_query_terms(marker))
+        if marker in haystack and not marker_terms.issubset(query_term_set):
+            score -= 12.0
 
     return score
 

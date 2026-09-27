@@ -20,6 +20,7 @@ from PIL import Image, UnidentifiedImageError
 from pydantic import BaseModel, Field, ValidationError
 
 from .builders import pikachu_script
+from .component_assembly import component_assembly_script
 from .config import (
     JOBS_ROOT,
     OLLAMA_PROXY_BASE_URL,
@@ -44,7 +45,9 @@ from .feature_tasks import (
     feature_plan_summary,
     finish_feature,
     invalidate_unverified_acceptances,
+    link_component_job,
     load_feature_plan,
+    mark_component_ready,
     normalize_feature_plan_payload,
     save_feature_plan,
 )
@@ -62,6 +65,9 @@ AUTO_IMPROVE_TASKS: dict[str, asyncio.Task[None]] = {}
 REFERENCE_RECOVERY_TASKS: dict[str, asyncio.Task[None]] = {}
 FEATURE_MAX_ATTEMPTS = 3
 AUTO_IMPROVE_HARD_ROUND_CAP = 60
+COMPONENT_MAX_DEPTH = 2
+COMPONENT_AUTO_IMPROVE_ROUNDS = 6
+COMPONENT_MAX_INSTANCES = 16
 
 
 @app.on_event("startup")
@@ -75,7 +81,7 @@ async def reconcile_interrupted_jobs_after_restart() -> None:
                 continue
 
             plan = load_feature_plan(root)
-            if plan is not None and plan.plan_version < 2:
+            if plan is not None and plan.plan_version < 3:
                 source = root / "feature-plan.json"
                 backup = root / "feature-plan-v1-legacy.json"
                 try:
@@ -89,7 +95,7 @@ async def reconcile_interrupted_jobs_after_restart() -> None:
                     root,
                     "legacy_feature_plan_archived",
                     previous_version=plan.plan_version,
-                    reason="strict visually-verifiable feature plan required",
+                    reason="recursive component-job feature plan v3 required",
                 )
 
                 status = _read_status(root)
@@ -125,7 +131,7 @@ async def reconcile_interrupted_jobs_after_restart() -> None:
                     root,
                     "legacy_feature_acceptances_invalidated",
                     count=reset,
-                    reason="strict reference-based acceptance enabled",
+                    reason="recursive component-job feature plan v3 enabled",
                 )
     _resume_auto_improve_jobs()
     _resume_interrupted_reference_jobs()
@@ -793,6 +799,17 @@ class GenericRefineRequest(BaseModel):
     iterations: int = Field(default=1, ge=1, le=3)
 
 
+class ComponentInstanceSpec(BaseModel):
+    location: list[float] = Field(min_length=3, max_length=3)
+    rotation_deg: list[float] = Field(default_factory=lambda: [0.0, 0.0, 0.0], min_length=3, max_length=3)
+    scale: list[float] = Field(default_factory=lambda: [1.0, 1.0, 1.0], min_length=3, max_length=3)
+
+
+class ComponentAssemblySpec(BaseModel):
+    rationale: str = Field(default="", max_length=1600)
+    instances: list[ComponentInstanceSpec] = Field(min_length=1, max_length=COMPONENT_MAX_INSTANCES)
+
+
 class SubjectPartSpec(BaseModel):
     name: str = Field(min_length=1, max_length=100)
     count: int = Field(default=1, ge=1, le=12)
@@ -948,6 +965,27 @@ async def _build_feature_plan(
             max_images=10,
         ),
     )
+    try:
+        component_depth = int(job_request.get("component_depth") or 0)
+    except (TypeError, ValueError):
+        component_depth = 0
+    component_jobs_allowed = component_depth < COMPONENT_MAX_DEPTH
+    component_policy = (
+        "Recursive component jobs ARE allowed at this depth. Mark build_mode=component_job for an independently "
+        "modelable visible assembly that has meaningful internal visible structure and benefits from isolated QA "
+        "(for example a wheel assembly that itself contains a tire, rim and visible fasteners). Keep the primary "
+        "supporting body/silhouette and ordinary surface details in_place. A component job will be frozen after its "
+        "own children and QA pass, then installed into the parent; do not duplicate its internal details as sibling "
+        "parent features. Repeated identical components should be one component job with count/symmetry metadata, "
+        "not separate rebuilds for each instance. Treat component_job features as terminal assembly leaves at the parent level: "
+        "finish all supporting in_place shell/surface work first, and do not make a later in_place feature depend on an "
+        "installed component. If a detail only makes sense inside that component, put it in the child component plan. "
+        if component_jobs_allowed
+        else (
+            "This job is already at the maximum recursive component depth. Every feature MUST use build_mode=in_place; "
+            "group smaller internal details into the current component instead of creating more child jobs. "
+        )
+    )
     system = (
         "You are the feature coordinator for an autonomous 3D modeling system. Build an exhaustive but useful "
         "inventory of ALL externally visible features that should be modeled for the requested object. Return JSON "
@@ -955,11 +993,12 @@ async def _build_feature_plan(
         "as wheels, windows, lights, handles, mirrors, openings, trim, screens, feet, buttons, appendages, seams or "
         "other identity-bearing geometry when they are actually visible/relevant. Do not include hidden internals. "
         "Each feature is a separate sub-job. Return features in the intended BUILD ORDER. Give every sub-job a stable "
-        "lowercase id, priority, modeling strategy, target regions, ownership scope, acceptance criteria and dependency "
-        "ids. Priority uses 10=highest/most important and 1=lowest. Dependencies must form a DAG. "
+        "lowercase id, priority, modeling strategy, build_mode, target regions, ownership scope, acceptance criteria, "
+        "assembly anchor/notes where relevant, and dependency ids. Priority uses 10=highest/most important and 1=lowest. "
+        "Dependencies must form a DAG. " + component_policy +
         "The primary silhouette/body should normally be first; dependent details should wait for the supporting "
-        "surface. Workers share one best-so-far model, so ownership scopes must be narrow enough to prevent one "
-        "feature worker from unnecessarily rewriting unrelated geometry. Acceptance criteria MUST be visually "
+        "surface. In-place workers share one best-so-far model, so ownership scopes must be narrow enough to prevent "
+        "one feature worker from unnecessarily rewriting unrelated geometry. Acceptance criteria MUST be visually "
         "verifiable from the supplied references/renders. Do not invent exact millimetres, percentages, tolerances, "
         "materials, badge dimensions, or other measurements unless the user/reference evidence explicitly provides "
         "them. Phrase criteria as visible shape, proportion, count, placement, continuity, and identity checks."
@@ -992,6 +1031,9 @@ async def _build_feature_plan(
                 subject=str(job_request.get("prompt") or ""),
             )
             plan = FeaturePlan.model_validate(normalized)
+            if not component_jobs_allowed:
+                for feature in plan.features:
+                    feature.build_mode = "in_place"
         except (OllamaProxyError, httpx.HTTPError, ValidationError, ValueError, TypeError) as exc:
             errors.append(f"{candidate_model}: {exc}")
             continue
@@ -1029,7 +1071,7 @@ async def _ensure_feature_plan(
 ) -> FeaturePlan | None:
     root = _require_job(job_id)
     existing = load_feature_plan(root)
-    if existing is not None and existing.plan_version >= 2:
+    if existing is not None and existing.plan_version >= 3:
         return existing
     if existing is not None:
         append_history(
@@ -1039,6 +1081,740 @@ async def _ensure_feature_plan(
             reason="strict visual acceptance criteria upgrade",
         )
     return await _build_feature_plan(job_id, inventory)
+
+
+def _component_child_prompt(parent_request: dict, feature_task: FeatureTask) -> str:
+    criteria = "; ".join(feature_task.acceptance_criteria) or "Match the visible reference geometry closely."
+    assembly = "; ".join(feature_task.assembly_notes)
+    parent_prompt = str(parent_request.get("prompt") or "parent object")
+    count_note = (
+        f"The parent needs {feature_task.count} instance(s), but build ONE canonical reusable component; "
+        "the parent assembler will instance it."
+        if feature_task.count > 1
+        else "Build one canonical component."
+    )
+    return (
+        f"Model ONLY the isolated component '{feature_task.name}' for this parent subject: {parent_prompt}. "
+        f"{count_note} Do NOT model the complete parent object. The component must be complete enough to be judged "
+        "on its own from multiple angles and later installed as frozen geometry into the parent. "
+        f"Visible acceptance criteria: {criteria}. "
+        f"Target/ownership context: {', '.join(feature_task.target_regions + feature_task.owner_scope)}. "
+        + (f"Assembly context: {assembly}. " if assembly else "")
+        + "Keep the component centered around a sensible mounting/origin point. Decompose it recursively only when "
+        "a visible child assembly has meaningful independent geometry; do not recurse into microscopic or trivial details."
+    )
+
+
+def _create_component_child_job(parent_job_id: str, feature_task: FeatureTask) -> str:
+    parent_root = _require_job(parent_job_id)
+    parent_request = json.loads((parent_root / "request.json").read_text(encoding="utf-8"))
+    try:
+        parent_depth = int(parent_request.get("component_depth") or 0)
+    except (TypeError, ValueError):
+        parent_depth = 0
+    if parent_depth >= COMPONENT_MAX_DEPTH:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Component recursion depth {parent_depth} reached the configured maximum "
+                f"of {COMPONENT_MAX_DEPTH}; this feature must be modeled in-place."
+            ),
+        )
+
+    existing_id = feature_task.component_job_id
+    if existing_id:
+        existing_root = _job_dir(existing_id)
+        if existing_root.is_dir():
+            return existing_id
+
+    JOBS_ROOT.mkdir(parents=True, exist_ok=True)
+    child_job_id = str(uuid.uuid4())
+    child_root = _job_dir(child_job_id)
+    for category in ARTIFACT_CATEGORIES:
+        (child_root / category).mkdir(parents=True, exist_ok=True)
+
+    child_depth = parent_depth + 1
+    request = {
+        "prompt": _component_child_prompt(parent_request, feature_task),
+        "intended_use": parent_request.get("intended_use") or "rendering",
+        "target_width_mm": None,
+        "job_id": child_job_id,
+        "created_at": datetime.now(UTC).isoformat(),
+        "component_job": True,
+        "component_depth": child_depth,
+        "component_name": feature_task.name,
+        "component_count_in_parent": feature_task.count,
+        "parent_job_id": parent_job_id,
+        "parent_feature_id": feature_task.id,
+        "parent_prompt": parent_request.get("prompt"),
+    }
+    (child_root / "request.json").write_text(
+        json.dumps(request, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    _write_status(
+        child_root,
+        job_id=child_job_id,
+        state="created",
+        stage="component_waiting_for_research",
+        component_job={
+            "parent_job_id": parent_job_id,
+            "parent_feature_id": feature_task.id,
+            "depth": child_depth,
+            "name": feature_task.name,
+        },
+    )
+    link_component_job(
+        parent_root,
+        feature_task.id,
+        component_job_id=child_job_id,
+        component_depth=child_depth,
+    )
+    append_history(
+        parent_root,
+        "component_child_created",
+        feature_id=feature_task.id,
+        feature_name=feature_task.name,
+        child_job_id=child_job_id,
+        depth=child_depth,
+    )
+    append_history(
+        child_root,
+        "component_job_created",
+        parent_job_id=parent_job_id,
+        parent_feature_id=feature_task.id,
+        depth=child_depth,
+    )
+    return child_job_id
+
+
+def _active_model_artifact(root: Path, status: dict) -> tuple[int, Path, dict] | None:
+    model = status.get("generic_model")
+    if not isinstance(model, dict):
+        return None
+    version = model.get("version")
+    blend_name = model.get("blend")
+    if not isinstance(version, int) or not isinstance(blend_name, str):
+        return None
+    blend_path = root / "scene" / Path(blend_name).name
+    if not blend_path.is_file():
+        return None
+    return version, blend_path, model
+
+
+async def _ensure_component_child_ready(
+    parent_job_id: str,
+    feature_task: FeatureTask,
+) -> dict:
+    parent_root = _require_job(parent_job_id)
+    child_job_id = _create_component_child_job(parent_job_id, feature_task)
+    child_root = _require_job(child_job_id)
+    child_status = _read_status(child_root)
+
+    if _active_model_artifact(child_root, child_status) is None:
+        append_history(
+            parent_root,
+            "component_child_build_started",
+            feature_id=feature_task.id,
+            child_job_id=child_job_id,
+        )
+        try:
+            await generate_generic_scene(
+                child_job_id,
+                GenericGenerateRequest(auto_research=True, auto_improve_rounds=0),
+            )
+        except Exception as exc:
+            detail = str(exc.detail) if isinstance(exc, HTTPException) else str(exc)
+            append_history(
+                parent_root,
+                "component_child_build_failed",
+                feature_id=feature_task.id,
+                child_job_id=child_job_id,
+                error=detail,
+            )
+            raise
+
+    child_status = _read_status(child_root)
+    if not _auto_improve_goal_reached(child_root, child_status):
+        await _run_auto_improve(child_job_id, COMPONENT_AUTO_IMPROVE_ROUNDS)
+        child_status = _read_status(child_root)
+
+    active = _active_model_artifact(child_root, child_status)
+    if active is None or not _auto_improve_goal_reached(child_root, child_status):
+        auto_state = child_status.get("auto_improve")
+        reason = (
+            auto_state.get("reason")
+            if isinstance(auto_state, dict)
+            else child_status.get("error")
+        ) or "Component child did not satisfy its own strict quality gate."
+        return {
+            "ready": False,
+            "child_job_id": child_job_id,
+            "reason": str(reason),
+            "status": child_status,
+        }
+
+    component_version, component_blend, component_model = active
+    mark_component_ready(
+        parent_root,
+        feature_task.id,
+        component_version=component_version,
+        component_artifact=f"{child_job_id}/scene/{component_blend.name}",
+        summary="Child component passed its own quality gate and is frozen for parent assembly.",
+    )
+    _write_status(
+        child_root,
+        state="ready",
+        stage="component_frozen",
+        frozen_component={
+            "version": component_version,
+            "blend": component_blend.name,
+            "parent_job_id": parent_job_id,
+            "parent_feature_id": feature_task.id,
+        },
+    )
+    append_history(
+        parent_root,
+        "component_child_frozen",
+        feature_id=feature_task.id,
+        feature_name=feature_task.name,
+        child_job_id=child_job_id,
+        version=component_version,
+        blend=component_blend.name,
+    )
+    return {
+        "ready": True,
+        "child_job_id": child_job_id,
+        "version": component_version,
+        "blend_path": component_blend,
+        "model": component_model,
+        "status": child_status,
+    }
+
+
+def _read_json_if_present(path: Path) -> dict:
+    if not path.is_file():
+        return {}
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+async def _plan_component_assembly(
+    parent_job_id: str,
+    feature_task: FeatureTask,
+    child_job_id: str,
+) -> ComponentAssemblySpec:
+    parent_root = _require_job(parent_job_id)
+    child_root = _require_job(child_job_id)
+    parent_status = _read_status(parent_root)
+    child_status = _read_status(child_root)
+    parent_active = _active_model_artifact(parent_root, parent_status)
+    child_active = _active_model_artifact(child_root, child_status)
+    if parent_active is None or child_active is None:
+        raise HTTPException(status_code=409, detail="Parent and frozen child models are required for assembly.")
+
+    parent_version, _, parent_model = parent_active
+    child_version, _, child_model = child_active
+    parent_request = _read_json_if_present(parent_root / "request.json")
+
+    active_parent_spec = _read_json_if_present(parent_root / f"scene-spec-v{parent_version}.json")
+    if not active_parent_spec:
+        active_parent_spec = _read_json_if_present(parent_root / f"mesh-spec-v{parent_version}.json")
+    parent_qa = _read_json_if_present(parent_root / "exports" / str(parent_model.get("qa") or ""))
+    child_qa = _read_json_if_present(child_root / "exports" / str(child_model.get("qa") or ""))
+
+    image_paths: list[Path] = []
+    for record in _usable_reference_index(parent_root)[-2:]:
+        stored_name = str(record.get("stored_name") or "")
+        path = parent_root / "references" / Path(stored_name).name
+        if path.is_file():
+            image_paths.append(path)
+
+    for view in ("front", "left", "back", "top"):
+        path = parent_root / "renders" / f"model-v{parent_version}-{view}.png"
+        if path.is_file():
+            image_paths.append(path)
+    for view in ("front", "left", "front-right", "top"):
+        path = child_root / "renders" / f"model-v{child_version}-{view}.png"
+        if path.is_file():
+            image_paths.append(path)
+
+    images = _encode_vision_images(image_paths) if image_paths else []
+    labels = [
+        (
+            f"parent/{path.name}"
+            if path.parent == parent_root / "renders"
+            else f"child/{path.name}"
+            if path.parent == child_root / "renders"
+            else f"reference/{path.name}"
+        )
+        for path in image_paths
+    ]
+
+    expected_instances = max(1, min(COMPONENT_MAX_INSTANCES, int(feature_task.count)))
+    system = (
+        "You are the assembly coordinator for an autonomous Blender system. The child component is FROZEN accepted "
+        "geometry; do not redesign it. Decide only where/how to instance it in the parent. Return JSON matching the "
+        "ComponentAssemblySpec schema. Coordinates are Blender world coordinates: X left/right, Y depth, Z up; the "
+        "front camera is on negative Y. Use parent dimensions/spec and pixels to place the component on the correct "
+        "visible mounting regions. Preserve realistic contact with the parent and avoid floating/intersection errors. "
+        f"Return exactly {expected_instances} instance transform(s). For repeated identical parts, reuse this one "
+        "frozen component with separate transforms. If unsure, prefer conservative scale and physically plausible contact."
+    )
+    prompt = (
+        f"Exact parent request: {parent_request.get('prompt', '')}\n"
+        f"Feature to install: {json.dumps(feature_task.model_dump(), ensure_ascii=False)}\n"
+        f"Parent active spec/context: {json.dumps(active_parent_spec, ensure_ascii=False)[:12000]}\n"
+        f"Parent QA/bounds: {json.dumps(parent_qa, ensure_ascii=False)}\n"
+        f"Frozen child QA/bounds: {json.dumps(child_qa, ensure_ascii=False)}\n"
+        f"Image labels: {labels}\n"
+        f"Return exactly {expected_instances} transforms. The child geometry is normalized around its own bounds center "
+        "before each transform is applied."
+    )
+
+    client = OllamaProxyClient()
+    errors: list[str] = []
+    for candidate_model in (VISION_MODELS if images else (REASONING_MODEL, *VISION_MODELS)):
+        try:
+            result = await client.chat_json(
+                model=candidate_model,
+                system=system,
+                prompt=prompt,
+                images=images or None,
+                schema=ComponentAssemblySpec.model_json_schema(),
+                temperature=0.0,
+                num_predict=4096,
+            )
+            assembly = ComponentAssemblySpec.model_validate(result.data)
+            if len(assembly.instances) != expected_instances:
+                raise ValueError(
+                    f"Expected {expected_instances} assembly instances, got {len(assembly.instances)}."
+                )
+            for instance in assembly.instances:
+                instance.location = [max(-50.0, min(50.0, float(v))) for v in instance.location]
+                instance.rotation_deg = [max(-360.0, min(360.0, float(v))) for v in instance.rotation_deg]
+                instance.scale = [max(0.02, min(20.0, float(v))) for v in instance.scale]
+        except (OllamaProxyError, httpx.HTTPError, ValidationError, ValueError, TypeError) as exc:
+            errors.append(f"{candidate_model}: {exc}")
+            continue
+
+        payload = {
+            "job_id": parent_job_id,
+            "child_job_id": child_job_id,
+            "feature_id": feature_task.id,
+            "model": candidate_model,
+            "images": labels,
+            "assembly": assembly.model_dump(),
+            "created_at": datetime.now(UTC).isoformat(),
+        }
+        _write_llm_log(parent_root, "component-assembly-plan", payload)
+        append_history(
+            parent_root,
+            "component_assembly_planned",
+            feature_id=feature_task.id,
+            child_job_id=child_job_id,
+            model=candidate_model,
+            instances=len(assembly.instances),
+            rationale=assembly.rationale,
+        )
+        return assembly
+
+    raise HTTPException(
+        status_code=502,
+        detail="Component assembly planning failed across configured models: " + " | ".join(errors[-4:]),
+    )
+
+
+async def _execute_component_assembly_candidate(
+    parent_job_id: str,
+    feature_task: FeatureTask,
+    child_job_id: str,
+    assembly: ComponentAssemblySpec,
+) -> dict:
+    parent_root = _require_job(parent_job_id)
+    child_root = _require_job(child_job_id)
+    previous_status = _read_status(parent_root)
+    parent_active = _active_model_artifact(parent_root, previous_status)
+    child_active = _active_model_artifact(child_root, _read_status(child_root))
+    if parent_active is None or child_active is None:
+        raise HTTPException(status_code=409, detail="Parent and child model artifacts are required for assembly.")
+
+    baseline_version, parent_blend, _ = parent_active
+    child_version, child_blend, _ = child_active
+    version = 1 + max(
+        [0]
+        + [
+            int(path.stem.split("model-v", 1)[1])
+            for path in (parent_root / "scene").glob("model-v*.blend")
+            if path.stem.split("model-v", 1)[1].isdigit()
+        ]
+    )
+    prefix = f"model-v{version}"
+    blend_path = parent_root / "scene" / f"{prefix}.blend"
+    qa_path = parent_root / "exports" / f"{prefix}-qa.json"
+    _write_status(
+        parent_root,
+        state="running",
+        stage=f"component_assembly_build_v{version}",
+        modeling_strategy=previous_status.get("modeling_strategy") or "procedural",
+    )
+    payload = {
+        "tool": "blender_python_exec",
+        "arguments": {
+            "code": component_assembly_script(),
+            "args": {
+                "parent_blend_path": str(parent_blend),
+                "component_blend_path": str(child_blend),
+                "blend_path": str(blend_path),
+                "output_dir": str(parent_root / "renders"),
+                "exports_dir": str(parent_root / "exports"),
+                "qa_path": str(qa_path),
+                "prefix": prefix,
+                "component_name": feature_task.name,
+                "instances": [item.model_dump() for item in assembly.instances],
+            },
+            "transport": "headless",
+            "factory_startup": True,
+            "timeout_seconds": 300,
+        },
+    }
+    try:
+        async with httpx.AsyncClient(timeout=360) as client:
+            response = await client.post(f"{WORKER_URL}/v1/mcp/call", json=payload)
+            response.raise_for_status()
+            result = response.json()
+    except (httpx.HTTPError, ValueError) as exc:
+        _write_status(
+            parent_root,
+            state="ready",
+            stage=previous_status.get("stage") or "generic_needs_refinement",
+            generic_model=previous_status.get("generic_model"),
+            quality_gate=previous_status.get("quality_gate"),
+            error=str(exc),
+        )
+        raise HTTPException(status_code=502, detail=f"Component assembly Blender build failed: {exc}") from exc
+
+    blender_error = _worker_blender_error(result)
+    if blender_error:
+        _write_status(
+            parent_root,
+            state="ready",
+            stage=previous_status.get("stage") or "generic_needs_refinement",
+            generic_model=previous_status.get("generic_model"),
+            quality_gate=previous_status.get("quality_gate"),
+            error=blender_error,
+        )
+        raise HTTPException(status_code=502, detail=f"Component assembly Blender script failed: {blender_error}")
+
+    views = (
+        "front", "front-left", "left", "back-left", "back",
+        "back-right", "right", "front-right", "top",
+    )
+    expected = [f"{prefix}-{view}.png" for view in views]
+    missing = [name for name in expected if not (parent_root / "renders" / name).is_file()]
+    if missing or not blend_path.is_file():
+        _write_status(
+            parent_root,
+            state="ready",
+            stage=previous_status.get("stage") or "generic_needs_refinement",
+            generic_model=previous_status.get("generic_model"),
+            quality_gate=previous_status.get("quality_gate"),
+        )
+        raise HTTPException(
+            status_code=502,
+            detail=f"Component assembly completed but expected artifacts are missing: {missing}",
+        )
+
+    assembly_payload = {
+        "parent_job_id": parent_job_id,
+        "child_job_id": child_job_id,
+        "feature_id": feature_task.id,
+        "baseline_version": baseline_version,
+        "candidate_version": version,
+        "child_version": child_version,
+        "assembly": assembly.model_dump(),
+        "created_at": datetime.now(UTC).isoformat(),
+    }
+    (parent_root / f"component-assembly-v{version}.json").write_text(
+        json.dumps(assembly_payload, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    append_history(
+        parent_root,
+        "component_assembly_candidate",
+        feature_id=feature_task.id,
+        child_job_id=child_job_id,
+        baseline_version=baseline_version,
+        candidate_version=version,
+        child_version=child_version,
+        instances=len(assembly.instances),
+    )
+    _write_status(
+        parent_root,
+        state="ready",
+        stage=f"component_candidate_rendered_v{version}",
+        generic_model=previous_status.get("generic_model"),
+        quality_gate=previous_status.get("quality_gate"),
+    )
+    return {
+        "baseline_version": baseline_version,
+        "candidate_version": version,
+        "blend": blend_path.name,
+        "renders": expected,
+        "qa": qa_path.name,
+        "previous_status": previous_status,
+        "worker_result": result,
+    }
+
+
+async def _build_and_install_component_feature(
+    parent_job_id: str,
+    feature_task: FeatureTask,
+) -> dict:
+    parent_root = _require_job(parent_job_id)
+    previous_status = _read_status(parent_root)
+
+    try:
+        child = await _ensure_component_child_ready(parent_job_id, feature_task)
+    except Exception as exc:
+        detail = str(exc.detail) if isinstance(exc, HTTPException) else str(exc)
+        finish_feature(
+            parent_root,
+            feature_task.id,
+            accepted=False,
+            version=None,
+            error=detail,
+        )
+        _write_status(
+            parent_root,
+            state="ready",
+            stage=previous_status.get("stage") or "generic_needs_refinement",
+            generic_model=previous_status.get("generic_model"),
+            quality_gate=previous_status.get("quality_gate"),
+        )
+        raise
+
+    if not child.get("ready"):
+        reason = str(child.get("reason") or "Component child is not ready.")
+        finish_feature(
+            parent_root,
+            feature_task.id,
+            accepted=False,
+            version=None,
+            error=reason,
+        )
+        status = _write_status(
+            parent_root,
+            state="ready",
+            stage=previous_status.get("stage") or "generic_needs_refinement",
+            generic_model=previous_status.get("generic_model"),
+            quality_gate=previous_status.get("quality_gate"),
+        )
+        append_history(
+            parent_root,
+            "component_child_not_ready",
+            feature_id=feature_task.id,
+            child_job_id=child.get("child_job_id"),
+            reason=reason,
+        )
+        return {
+            "job_id": parent_job_id,
+            "component_feature": feature_task.id,
+            "child_job_id": child.get("child_job_id"),
+            "accepted": False,
+            "reason": reason,
+            "status": status,
+        }
+
+    child_job_id = str(child["child_job_id"])
+    # Refresh the feature record because mark_component_ready persisted the frozen child metadata.
+    plan = load_feature_plan(parent_root)
+    refreshed_task = (
+        next((item for item in plan.features if item.id == feature_task.id), feature_task)
+        if plan is not None
+        else feature_task
+    )
+    assembly = await _plan_component_assembly(parent_job_id, refreshed_task, child_job_id)
+    candidate = await _execute_component_assembly_candidate(
+        parent_job_id,
+        refreshed_task,
+        child_job_id,
+        assembly,
+    )
+    baseline_version = int(candidate["baseline_version"])
+    candidate_version = int(candidate["candidate_version"])
+
+    comparison = await _compare_generic_versions(
+        parent_root,
+        baseline_version=baseline_version,
+        candidate_version=candidate_version,
+    )
+    evaluation = await _evaluate_feature_candidate(
+        parent_job_id,
+        refreshed_task,
+        baseline_version=baseline_version,
+        candidate_version=candidate_version,
+    )
+    feature_passed = _feature_evaluation_accepts(refreshed_task, evaluation)
+    better = bool(comparison.get("candidate_is_better"))
+    accept_candidate = bool(feature_passed and better)
+
+    if accept_candidate:
+        finish_feature(
+            parent_root,
+            refreshed_task.id,
+            accepted=True,
+            version=candidate_version,
+            summary=str(evaluation.get("summary") or comparison.get("summary") or ""),
+            verified=True,
+            acceptance_score=float(evaluation.get("reference_match_score") or 0.0),
+            acceptance_model=(
+                str(evaluation.get("model"))
+                if evaluation.get("model")
+                else str(comparison.get("model") or "") or None
+            ),
+        )
+        previous_model_meta = (
+            previous_status.get("generic_model")
+            if isinstance(previous_status.get("generic_model"), dict)
+            else {}
+        )
+        assembled_components = list(previous_model_meta.get("assembled_components") or [])
+        assembled_components.append(
+            {
+                "feature_id": refreshed_task.id,
+                "name": refreshed_task.name,
+                "child_job_id": child_job_id,
+                "child_version": child.get("version"),
+                "parent_version": candidate_version,
+                "instances": len(assembly.instances),
+            }
+        )
+        candidate_model = {
+            "version": candidate_version,
+            "title": previous_model_meta.get("title") or refreshed_task.name,
+            "blend": str(candidate["blend"]),
+            "renders": list(candidate["renders"]),
+            "qa": str(candidate["qa"]),
+            "assembled_component": refreshed_task.name,
+            "component_child_job_id": child_job_id,
+            "assembled_components": assembled_components,
+        }
+        previous_quality = (
+            previous_status.get("quality_gate")
+            if isinstance(previous_status.get("quality_gate"), dict)
+            else {}
+        )
+        # Promote only after feature + regression QA have both passed, then immediately
+        # re-score the assembled whole object so the autonomous stop condition reflects
+        # the actual parent with the frozen component installed.
+        _write_status(
+            parent_root,
+            state="ready",
+            stage="component_assembly_validating",
+            modeling_strategy=previous_status.get("modeling_strategy") or "procedural",
+            generic_model=candidate_model,
+            quality_gate=previous_quality,
+        )
+        try:
+            assembled_quality = await _generic_recognizability_check(
+                parent_job_id,
+                stage="component_assembly_quality",
+            )
+        except HTTPException as exc:
+            assembled_quality = {
+                **previous_quality,
+                "recognizable": previous_quality.get("recognizable"),
+                "summary": str(exc.detail),
+            }
+            append_history(
+                parent_root,
+                "component_assembly_quality_unavailable",
+                feature_id=refreshed_task.id,
+                error=str(exc.detail),
+            )
+        quality = {
+            **assembled_quality,
+            "better_than_previous": True,
+            "baseline_version": baseline_version,
+            "candidate_version": candidate_version,
+            "component_feature_id": refreshed_task.id,
+            "component_child_job_id": child_job_id,
+            "component_feature_passed": True,
+            "component_summary": evaluation.get("summary") or comparison.get("summary"),
+        }
+        status = _write_status(
+            parent_root,
+            state="ready",
+            stage=(
+                "component_assembly_recognizable"
+                if quality.get("recognizable") is True
+                else "component_assembly_accepted"
+            ),
+            modeling_strategy=previous_status.get("modeling_strategy") or "procedural",
+            generic_model=candidate_model,
+            quality_gate=quality,
+        )
+        append_history(
+            parent_root,
+            "component_assembly_accepted",
+            feature_id=refreshed_task.id,
+            child_job_id=child_job_id,
+            baseline_version=baseline_version,
+            candidate_version=candidate_version,
+            reference_match_score=evaluation.get("reference_match_score"),
+            comparison_summary=comparison.get("summary"),
+        )
+    else:
+        reason = str(
+            evaluation.get("summary")
+            or comparison.get("summary")
+            or "Parent-level QA rejected the installed component."
+        )
+        finish_feature(
+            parent_root,
+            refreshed_task.id,
+            accepted=False,
+            version=None,
+            summary=reason,
+            error=(
+                "Frozen component was preserved, but this installation candidate did not pass "
+                "both feature QA and whole-parent regression QA."
+            ),
+        )
+        status = _write_status(
+            parent_root,
+            state="ready",
+            stage=previous_status.get("stage") or "generic_needs_refinement",
+            modeling_strategy=previous_status.get("modeling_strategy") or "procedural",
+            generic_model=previous_status.get("generic_model"),
+            quality_gate=previous_status.get("quality_gate"),
+        )
+        append_history(
+            parent_root,
+            "component_assembly_rejected",
+            feature_id=refreshed_task.id,
+            child_job_id=child_job_id,
+            baseline_version=baseline_version,
+            candidate_version=candidate_version,
+            feature_passed=feature_passed,
+            better_than_previous=better,
+            reason=reason,
+        )
+
+    return {
+        "job_id": parent_job_id,
+        "component_feature": refreshed_task.id,
+        "child_job_id": child_job_id,
+        "candidate_version": candidate_version,
+        "accepted": accept_candidate,
+        "comparison": comparison,
+        "feature_evaluation": evaluation,
+        "status": status,
+    }
 
 
 def _feature_task_context(root: Path) -> tuple[FeaturePlan | None, FeatureTask | None]:
@@ -1324,6 +2100,21 @@ def _auto_improve_progress_signature(root: Path, status: dict) -> tuple[object, 
     )
 
 
+def _assembled_parent_requires_safe_stop(root: Path, status: dict) -> bool:
+    """Do not let generic refinement discard already-frozen component geometry."""
+    model = status.get("generic_model")
+    if not isinstance(model, dict):
+        return False
+    assembled = model.get("assembled_components")
+    if not isinstance(assembled, list) or not assembled:
+        return False
+    quality = status.get("quality_gate")
+    if isinstance(quality, dict) and quality.get("recognizable") is True:
+        return False
+    summary = feature_plan_summary(root) or {}
+    return bool(summary.get("required_complete") and not summary.get("next_feature_id"))
+
+
 def _remaining_feature_attempt_budget(root: Path) -> int:
     plan = load_feature_plan(root)
     if plan is None or plan.plan_version < 2:
@@ -1428,6 +2219,29 @@ async def _run_auto_improve(job_id: str, max_rounds: int) -> None:
             return
 
         before = _read_status(root)
+        if _assembled_parent_requires_safe_stop(root, before):
+            _write_status(
+                root,
+                state="ready",
+                stage="assembled_parent_needs_coordinated_replan",
+                auto_improve=_auto_improve_payload(
+                    state="assembled_needs_review",
+                    current_round=round_number,
+                    max_rounds=round_limit,
+                    reason=(
+                        "All frozen required components are installed, but whole-object QA still needs work. "
+                        "Generic SceneSpec rebuilding is paused because it could erase accepted component geometry."
+                    ),
+                ),
+            )
+            append_history(
+                root,
+                "auto_improve_stopped",
+                round=round_number,
+                reason="preserved frozen component assembly before destructive global rebuild",
+            )
+            return
+
         if _auto_improve_goal_reached(root, before):
             _write_status(
                 root,
@@ -3908,7 +4722,11 @@ async def _build_generic_scene_spec(job_id: str, auto_research: bool) -> Generic
         f"Coordinated visible-feature plan: {json.dumps(feature_plan_context, ensure_ascii=False)}\n"
         f"Spatial/modeling guidance:\n{_generic_spatial_guidance(str(job_request.get('prompt') or ''))}\n"
         "Create the complete SceneSpec. Favor visual recognizability and the reference evidence over a "
-        "small object count. You may use as much of the available object budget as the subject genuinely needs."
+        "small object count. You may use as much of the available object budget as the subject genuinely needs. "
+        "IMPORTANT OWNERSHIP RULE: any FeaturePlan entry with build_mode=component_job is owned by its isolated "
+        "child job. Do NOT author that component's final geometry in this parent SceneSpec and do not leave a crude "
+        "placeholder that would survive into the final model. Shape the supporting parent/mounting region so the "
+        "frozen child component can be installed later, but reserve the component geometry itself for the child."
     )
     reference_images, reference_labels = _collect_images(
         root,
@@ -3942,6 +4760,8 @@ async def _build_generic_scene_spec(job_id: str, auto_research: bool) -> Generic
                 str(job_request.get("prompt") or "Generated model"),
             )
             candidate_spec = GenericSceneSpec.model_validate(normalized)
+            if job_request.get("component_job") is True:
+                candidate_spec.presentation_base = False
         except (OllamaProxyError, httpx.HTTPError, ValidationError, ValueError, TypeError) as exc:
             planning_errors.append(f"{candidate_model}: {exc}")
             continue
@@ -4287,9 +5107,12 @@ async def _build_adaptive_loft_spec(
         "clockwise order when viewed along the positive axis; use the same semantic perimeter order in every "
         "section. Use 5-10 sections to capture major silhouette changes. Coordinates are Blender units and "
         "must remain roughly within -8..8. The loft is the main continuous body mass. Put visually separate "
-        "identity-critical parts that should not be fused into the main silhouette into attachments using the "
-        "safe primitive schema (for example wheels, handles, lenses, windows, feet, knobs, antennas). "
-        "Do not approximate the whole subject with attachments; the loft must carry the primary silhouette. "
+        "identity-critical parts that are explicitly IN-PLACE features and should not be fused into the main silhouette "
+        "into attachments using the safe primitive schema (for example handles, lenses, windows, feet, knobs, antennas). "
+        "FeaturePlan entries with build_mode=component_job are owned by isolated child jobs: do NOT create those parts "
+        "as attachments or placeholders here. Leave the supporting/mounting region suitable for later installation of "
+        "the frozen child artifact. Do not approximate the whole subject with attachments; the loft must carry the "
+        "primary silhouette. "
         "Front-facing subject direction is negative Y and Z is up. Favor reference geometry and recognizability "
         "over cosmetic detail."
     )
@@ -4328,6 +5151,8 @@ async def _build_adaptive_loft_spec(
                 str(job_request.get("prompt") or "Adaptive mesh"),
             )
             spec = AdaptiveLoftSpec.model_validate(normalized)
+            if job_request.get("component_job") is True:
+                spec.presentation_base = False
         except (OllamaProxyError, httpx.HTTPError, ValidationError, ValueError, TypeError) as exc:
             errors.append(f"{candidate_model}: {exc}")
             continue
@@ -4521,7 +5346,9 @@ async def _revise_adaptive_loft_spec(
         "per section. The loft must remain the main continuous body. Use attachments for visually separate parts. "
         "Front is negative Y and Z is up. A feature sub-job may be supplied. When present, treat it as the primary "
         "owner for this pass: make the requested feature visibly better while preserving unrelated accepted geometry. "
-        "Respect its target_regions, owner_scope, dependencies and acceptance_criteria. Return JSON only matching the schema."
+        "Respect its target_regions, owner_scope, dependencies and acceptance_criteria. Never add, recreate or reshape "
+        "geometry owned by any FeaturePlan entry whose build_mode=component_job; those parts are frozen/installed by the "
+        "component assembler, not by this mesh revision worker. Return JSON only matching the schema."
     )
     prompt = (
         f"Exact user request: {job_request.get('prompt', '')}\n"
@@ -4554,6 +5381,8 @@ async def _revise_adaptive_loft_spec(
                 str(job_request.get("prompt") or current_spec.title),
             )
             revised = AdaptiveLoftSpec.model_validate(normalized)
+            if job_request.get("component_job") is True:
+                revised.presentation_base = False
         except (OllamaProxyError, httpx.HTTPError, ValidationError, ValueError, TypeError) as exc:
             errors.append(f"{candidate_model}: {exc}")
             continue
@@ -5435,6 +6264,8 @@ async def refine_generic_scene(job_id: str, request: GenericRefineRequest) -> di
         "adaptive_mesh_needs_refinement",
     }:
         feature_task = begin_feature(root)
+        if feature_task is not None and feature_task.build_mode == "component_job":
+            return await _build_and_install_component_feature(job_id, feature_task)
         if feature_task is not None:
             append_history(
                 root,
@@ -5529,6 +6360,8 @@ async def refine_generic_scene(job_id: str, request: GenericRefineRequest) -> di
 
     for offset in range(request.iterations):
         feature_task = begin_feature(root)
+        if feature_task is not None and feature_task.build_mode == "component_job":
+            return await _build_and_install_component_feature(job_id, feature_task)
         if feature_task is not None:
             append_history(
                 root,
@@ -5646,6 +6479,8 @@ async def refine_generic_scene(job_id: str, request: GenericRefineRequest) -> di
                 )
                 normalized = _normalize_scene_spec_payload(result.data, current_spec.title)
                 revised = GenericSceneSpec.model_validate(normalized)
+                if job_request.get("component_job") is True:
+                    revised.presentation_base = False
             except (OllamaProxyError, httpx.HTTPError, ValidationError, ValueError, TypeError) as exc:
                 errors.append(f"{candidate_model}: {exc}")
                 continue

@@ -4,9 +4,32 @@ This file is the working definition of "done" for the project. A level is only c
 
 ## Current focus
 
-**Immediate target:** make Levels 0–4 reliable, establish the Level 12 visual correction loop, and pull forward useful pieces of Levels 10–11 (exports and geometry QA).
+**Immediate target:** P0 production recovery only. Do not spend autonomous cycles on roadmap breadth until the generic pipeline can repeatedly turn verified references into recognizable geometry for unseen subjects.
 
-**Benchmark subject:** Pikachu remains the first visual regression target because it exposes proportion, silhouette, appendage, face-placement, asymmetry, multi-angle, and iteration problems quickly. It is a benchmark, not the intended final limitation of the system.
+**Primary production gate:** Toyota Prius. It must pass reference acquisition -> modeling -> multi-angle QA -> refinement without subject-specific geometry code.
+
+**Unseen holdout set immediately after Prius:** Bugatti Veyron, teapot, desk fan, bicycle, one household appliance, one furniture item, and one permitted stylized character. A pass means recognizable geometry from multiple views, not merely a successful job status.
+
+**Benchmark subject:** Pikachu remains a regression target because it exposes proportion, silhouette, appendage, face-placement, asymmetry, multi-angle, and iteration problems quickly. It is a benchmark, not the intended final limitation of the system.
+
+### Production-ready fast path
+
+Work these in order. The hourly production-fix automation should choose the first failing item, gather live evidence, fix it, deploy, and re-test before moving lower.
+
+- [x] Hard-gate modeling on usable verified references.
+- [x] Preserve and expose exact reference images and every generated iteration for audit.
+- [x] Reject unrelated reference candidates and keep automatic reference packs visually generation-coherent.
+- [x] Use an AI modeling director for initial strategy and subsequent revise/rebuild decisions.
+- [ ] Make Toyota Prius produce a recognizable accepted model on the deployed VPS.
+- [ ] Add pairwise visual comparison: candidate iteration vs current accepted best, using the same reference pack.
+- [ ] Reject/rollback any candidate that is materially worse than the accepted best.
+- [ ] Detect semantic stalls even when SceneSpec JSON changes superficially.
+- [ ] Force a strategy switch after repeated non-improving attempts instead of spending more rounds on the same approach.
+- [ ] Add an autonomous-run budget ledger: model calls, render attempts, elapsed time, accepted improvements, rejected candidates, and stop reason.
+- [ ] Recover stale `running` jobs automatically and guarantee that a dead worker cannot leave a job permanently running.
+- [ ] Add a per-job mutation lock so two workers/refinement requests cannot alter the same scene concurrently.
+- [ ] Pass the unseen holdout set without adding prompt/object-specific geometry recipes.
+- [ ] Run a mixed production batch twice consecutively with no manual intervention and no false-success statuses.
 
 ---
 
@@ -36,6 +59,27 @@ This file is the working definition of "done" for the project. A level is only c
 - [ ] Pass the real deployed Toyota Prius holdout with the AI director making all geometry/strategy decisions.
 - [ ] Add additional unseen holdouts: teapot, desk fan, bicycle and one household appliance.
 - [ ] Do not add subject-specific geometry code to make any holdout pass.
+
+### Recursive component-job architecture
+
+For complex subjects, stop treating every feature as an in-place edit to one giant scene. Major reusable/identity-bearing components should be modeled in isolated child workspaces, recursively decomposed when useful, accepted independently, then installed into the parent assembly.
+
+Example: `Toyota Prius -> wheel assembly -> tire + rim + visible fasteners`. The wheel is not eligible for installation on the Prius until its required child components and component-level multi-angle QA pass.
+
+- [x] Add component-job workspace/manifest linked to parent job + parent feature.
+- [x] Let the feature planner mark major features as `component_job` versus `in_place`.
+- [x] Allow component jobs to create their own feature plans recursively.
+- [x] Enforce recursion depth and repeated-instance caps; broader per-tree token/render accounting remains pending.
+- [ ] Inherit/crop/select parent references for the component instead of blindly researching from scratch.
+- [x] Give every component its own accepted-best checkpoint, renders, QA and failure history.
+- [x] Block parent feature acceptance until all required child components are accepted.
+- [x] Freeze an accepted component artifact before parent assembly.
+- [x] Add assembly metadata plus AI-planned bounded transforms: anchor, orientation, scale, count and parent target region.
+- [x] Install the frozen component into the parent `.blend` without asking the parent worker to redraw it.
+- [x] Re-run feature + parent-vs-previous QA after assembly; reject the installation and preserve the prior parent when it regresses.
+- [x] Reuse one accepted component for repeated instances where appropriate (e.g. four wheels) rather than rebuilding it four times.
+- [ ] Show the component tree in the dashboard: parent -> children -> acceptance state -> installed version.
+- [ ] Add a recursive production benchmark: Prius body + independently accepted wheel assembly, with wheel decomposed into tire/rim/fasteners.
 
 ### P0 recovery tasks
 - [x] Freeze unrelated roadmap feature work until the generic path generalizes.
@@ -122,7 +166,9 @@ A refinement iteration must be able to change visible proportions without rewrit
 - [x] Download free-license research images into the job reference pack.
 - [x] Save a research manifest for reproducibility.
 - [ ] Add a second general web/image-search provider.
-- [ ] Rank references by usefulness: front, side, rear, detail, dimensions.
+- [x] Rank whole-object references ahead of incidental part/detail results and add deterministic view-oriented searches.
+- [x] Keep automatic reference packs visually coherent around one canonical identity/generation.
+- [ ] Classify usable references by view: front, side, rear, 3/4, detail, dimensions.
 - [ ] Detect duplicate/near-duplicate references.
 - [ ] Let users approve/remove references before modeling.
 - [ ] Extract dimensional facts from trustworthy textual sources where available.
@@ -296,9 +342,10 @@ Known broken test meshes are detected correctly and at least common manifold/nor
 - [x] Reasoning-model translation from critique to bounded geometry parameters.
 - [x] Multi-iteration benchmark refinement endpoint.
 - [x] Stop early when no high-severity issues and very few medium issues remain.
-- [ ] Compare latest iteration specifically against previous iteration.
-- [ ] Detect regressions and rollback.
-- [x] Detect a basic stalled loop when the revised generic SceneSpec is unchanged; broader semantic stall detection remains future work.
+- [ ] Compare each candidate iteration directly against the current accepted best using matched views and the same references.
+- [ ] Detect regressions and rollback/reject the candidate before it becomes latest.
+- [x] Detect a basic stalled loop when the revised generic SceneSpec is unchanged.
+- [ ] Detect semantic stalls when specs differ but rendered geometry/quality does not materially improve.
 - [ ] Strategy switch when repeated edits do not improve.
 - [x] Generalize visual correction beyond Pikachu: multimodal critique can drive a full revised safe SceneSpec and re-render a generic v2.
 
@@ -391,7 +438,7 @@ A dimensioned functional benchmark assembles/moves as intended and respects spec
 - [ ] Choose modeling strategy (generic safe primitive strategy implemented; automatic strategy selection still pending).
 - [ ] Build blockout.
 - [x] Render nine-view checkpoints for generic and benchmark builds.
-- [x] Run visual critique through Qwen3-VL.
+- [x] Run multimodal visual critique through the current vision fallback chain; retired Qwen routes are no longer production defaults.
 - [x] Apply safe corrections through bounded benchmark tuning or revised SceneSpec.
 - [ ] Repeat with stopping rules (severity and unchanged-spec stops implemented; regression rollback still pending).
 - [ ] Run geometry/print QA.
@@ -462,6 +509,7 @@ The first deployed benchmark produced 23 mesh objects, 12 non-manifold edges and
 - [x] Add artifact listing/download endpoints.
 - [x] Add structured job/event history.
 - [ ] Add concurrency lock so one worker cannot mutate the same scene twice.
+- [ ] Reconcile stale `running` jobs on startup/heartbeat when no active worker lease exists.
 
 ## Phase 2 — Ollama orchestration
 
@@ -470,8 +518,9 @@ The first deployed benchmark produced 23 mesh objects, 12 non-manifold edges and
 - [x] Add vision-model call supporting multiple reference/render images.
 - [x] Default vision model to Qwen3-VL through the Ollama proxy.
 - [x] Add structured visual critique schema: object, issue, severity, suggested change.
-- [ ] Add iteration budget and stopping rules.
-- [ ] Add checkpoint rollback when a visual score/regression gets worse.
+- [x] Add bounded auto-improve budgets and explicit stop reasons.
+- [ ] Add per-run token/model/render budget telemetry so autonomous loops can prove useful progress per cost.
+- [ ] Add checkpoint rollback/rejection when pairwise visual comparison says a candidate is worse.
 - [x] Persist planner/vision model responses and usage metadata for debugging.
 
 ## Phase 3 — Blender modeling tools

@@ -4,7 +4,9 @@ from app.feature_tasks import (
     begin_feature,
     finish_feature,
     invalidate_unverified_acceptances,
+    link_component_job,
     load_feature_plan,
+    mark_component_ready,
     normalize_feature_plan_payload,
     save_feature_plan,
 )
@@ -244,3 +246,118 @@ def test_feature_name_aliases_are_preserved():
 
     assert plan.features[0].name == "Primary Body Silhouette"
     assert plan.features[1].name == "Headlight Assemblies"
+
+
+
+def test_component_job_mode_and_assembly_metadata_are_normalized():
+    payload = normalize_feature_plan_payload(
+        {
+            "subject": "Toyota Prius",
+            "features": [
+                {
+                    "id": "body",
+                    "name": "Body shell",
+                    "build_mode": "in_place",
+                },
+                {
+                    "id": "wheel",
+                    "name": "Wheel assembly",
+                    "build_mode": "recursive",
+                    "count": 4,
+                    "depends_on": ["body"],
+                    "assembly_anchor": "four wheel centers at front/rear axles",
+                    "assembly_notes": ["Reuse one accepted wheel for all four positions"],
+                },
+            ],
+        },
+        subject="Toyota Prius",
+    )
+    plan = FeaturePlan.model_validate(payload)
+
+    assert plan.plan_version == 3
+    wheel = next(feature for feature in plan.features if feature.id == "wheel")
+    assert wheel.build_mode == "component_job"
+    assert wheel.count == 4
+    assert "wheel centers" in wheel.assembly_anchor
+    assert wheel.assembly_notes == ["Reuse one accepted wheel for all four positions"]
+
+
+def test_frozen_component_is_scheduled_for_installation_without_spending_new_build_attempt(tmp_path):
+    plan = FeaturePlan.model_validate(
+        normalize_feature_plan_payload(
+            {
+                "subject": "Toyota Prius",
+                "features": [
+                    {
+                        "id": "wheel",
+                        "name": "Wheel assembly",
+                        "build_mode": "component_job",
+                        "count": 4,
+                    }
+                ],
+            },
+            subject="Toyota Prius",
+        )
+    )
+    save_feature_plan(tmp_path, plan)
+
+    first = begin_feature(tmp_path)
+    assert first is not None
+    assert first.attempts == 1
+
+    link_component_job(
+        tmp_path,
+        "wheel",
+        component_job_id="11111111-1111-1111-1111-111111111111",
+        component_depth=1,
+    )
+    mark_component_ready(
+        tmp_path,
+        "wheel",
+        component_version=3,
+        component_artifact="child/scene/model-v3.blend",
+        summary="Child passed strict QA.",
+    )
+
+    persisted = load_feature_plan(tmp_path)
+    assert persisted is not None
+    wheel = persisted.features[0]
+    assert wheel.status == "component_ready"
+    assert wheel.component_job_id is not None
+    assert wheel.component_version == 3
+
+    install = begin_feature(tmp_path)
+    assert install is not None
+    assert install.id == "wheel"
+    assert install.status == "running"
+    assert install.attempts == 1
+
+
+
+def test_in_place_parent_work_is_scheduled_before_component_installation():
+    payload = normalize_feature_plan_payload(
+        {
+            "subject": "car",
+            "features": [
+                {
+                    "id": "wheel",
+                    "name": "Wheel assembly",
+                    "build_mode": "component_job",
+                    "priority": 10,
+                },
+                {
+                    "id": "windows",
+                    "name": "Window surfaces",
+                    "build_mode": "in_place",
+                    "priority": 5,
+                },
+            ],
+        },
+        subject="car",
+    )
+    plan = FeaturePlan.model_validate(payload)
+
+    task = active_or_next_feature(plan)
+
+    assert task is not None
+    assert task.id == "windows"

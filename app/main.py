@@ -29,6 +29,7 @@ from .dashboard import dashboard_page, jobs_snapshot, public_artifact, public_re
 from .generic_builder import generic_scene_script
 from .history import append_history, load_history
 from .ollama import OllamaProxyClient, OllamaProxyError
+from .quality import evaluate_scene_spec_structural, get_benchmark
 from .repair import print_repair_script
 from .research import research_web_references, write_research_manifest
 from .security import require_api_token
@@ -82,6 +83,73 @@ class RefinementComparison(BaseModel):
     summary: str = ""
     improvements: list[str] = Field(default_factory=list)
     regressions: list[str] = Field(default_factory=list)
+
+
+class QualityBenchmarkRequest(BaseModel):
+    key: Literal["pikachu", "desk-lamp", "sneaker", "office-chair", "quadruped-robot"]
+
+
+class BenchmarkVisualReport(BaseModel):
+    pass_benchmark: bool
+    recognizable: bool
+    summary: str = ""
+    required_features_visible: dict[str, bool] = Field(default_factory=dict)
+    major_failures: list[str] = Field(default_factory=list)
+
+
+def _normalize_benchmark_visual_payload(
+    data: object,
+    required_features: tuple[str, ...],
+) -> dict:
+    if not isinstance(data, dict):
+        raise TypeError("Benchmark visual response is not a JSON object.")
+
+    def as_bool(value: object) -> bool:
+        if isinstance(value, bool):
+            return value
+        return str(value).strip().lower() in {"1", "true", "yes", "pass", "passed", "visible"}
+
+    normalized = dict(data)
+    normalized["pass_benchmark"] = as_bool(
+        normalized.get("pass_benchmark", normalized.get("passed", False))
+    )
+    normalized["recognizable"] = as_bool(
+        normalized.get("recognizable", normalized.get("is_recognizable", False))
+    )
+    raw_features = normalized.get("required_features_visible")
+    feature_map: dict[str, bool] = {}
+    if isinstance(raw_features, dict):
+        canonical = {
+            " ".join(
+                "".join(character if character.isalnum() else " " for character in str(key).lower()).split()
+            ): value
+            for key, value in raw_features.items()
+        }
+        for feature in required_features:
+            normalized_feature = " ".join(
+                "".join(
+                    character if character.isalnum() else " "
+                    for character in feature.lower()
+                ).split()
+            )
+            feature_map[feature] = as_bool(canonical.get(normalized_feature, False))
+    else:
+        for feature in required_features:
+            feature_map[feature] = False
+    normalized["required_features_visible"] = feature_map
+
+    failures = normalized.get("major_failures")
+    if isinstance(failures, str):
+        normalized["major_failures"] = [failures]
+    elif not isinstance(failures, list):
+        normalized["major_failures"] = []
+
+    normalized.setdefault("summary", "")
+    if not all(feature_map.values()):
+        normalized["pass_benchmark"] = False
+    if not normalized["recognizable"]:
+        normalized["pass_benchmark"] = False
+    return normalized
 
 
 def _normalize_refinement_comparison_payload(data: object) -> dict:
@@ -697,6 +765,11 @@ async def dashboard_improve_generic(job_id: str, request: GenericRefineRequest) 
     return await refine_generic_scene(job_id, request)
 
 
+@app.post("/dashboard/jobs/{job_id}/quality-benchmark", include_in_schema=False)
+async def dashboard_quality_benchmark(job_id: str, request: QualityBenchmarkRequest) -> dict:
+    return await evaluate_quality_benchmark(job_id, request)
+
+
 @app.delete("/dashboard/jobs/{job_id}", include_in_schema=False)
 async def dashboard_delete_job(job_id: str) -> dict:
     return await delete_job(job_id)
@@ -762,6 +835,7 @@ async def capabilities() -> dict:
             "safe-declarative-generic-scene-builder",
             "generic-prompt-to-primitive-blockout",
             "generic-visual-refinement",
+            "quality-regression-benchmark-suite",
             "permanent-job-delete",
         ],
     }
@@ -1039,6 +1113,145 @@ async def analyze_vision(job_id: str, request: VisionAnalyzeRequest) -> dict:
     log_name = _write_llm_log(root, "vision", payload)
     (root / "vision-latest.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
     _write_status(root, state="ready", stage="vision_analyzed", latest_vision_log=log_name)
+    return payload
+
+
+async def _evaluate_benchmark_visual(
+    root: Path,
+    *,
+    version: int,
+    key: str,
+) -> dict:
+    profile = get_benchmark(key)
+    views = ("front", "front-left", "left", "back", "right", "front-right")
+    render_paths = [root / "renders" / f"model-v{version}-{view}.png" for view in views]
+    if not all(path.is_file() for path in render_paths):
+        return {
+            "pass_benchmark": False,
+            "recognizable": False,
+            "summary": "Required benchmark renders are missing.",
+            "required_features_visible": {
+                feature: False for feature in profile.visual_requirements
+            },
+            "major_failures": ["missing benchmark renders"],
+            "model": None,
+        }
+
+    reference_paths = sorted(
+        [
+            path
+            for path in (root / "references").glob("*")
+            if path.is_file() and path.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp"}
+        ],
+        key=lambda path: path.stat().st_mtime,
+    )[-2:]
+    image_paths = reference_paths + render_paths
+    images = [base64.b64encode(path.read_bytes()).decode("ascii") for path in image_paths]
+    labels = [f"{path.parent.name}/{path.name}" for path in image_paths]
+
+    feature_keys = list(profile.visual_requirements)
+    system = (
+        "You are a strict visual quality gate for a 3D-model regression suite. "
+        "Judge the rendered model against the exact benchmark prompt and required features. "
+        "A model passes only if it is immediately recognizable as the requested subject and every "
+        "required feature is visibly represented across the supplied views. Floating major parts, missing "
+        "appendages, generic stacked blobs, or incorrect object structure are failures. Return JSON only "
+        "matching the supplied schema. In required_features_visible, use the exact required-feature strings "
+        "provided by the user as keys."
+    )
+    prompt = (
+        f"Benchmark: {profile.title}\n"
+        f"Exact prompt: {profile.prompt}\n"
+        f"Required feature keys: {json.dumps(feature_keys, ensure_ascii=False)}\n"
+        f"Images in order: {labels}\n"
+        "Set pass_benchmark=true only if the subject is recognizable and all required features are visible. "
+        "Do not give credit merely because the colors or rough category are correct."
+    )
+
+    client = OllamaProxyClient()
+    errors: list[str] = []
+    for candidate_model in VISION_MODELS:
+        try:
+            result = await client.chat_json(
+                model=candidate_model,
+                system=system,
+                prompt=prompt,
+                images=images,
+                schema=BenchmarkVisualReport.model_json_schema(),
+                temperature=0.0,
+            )
+            normalized = _normalize_benchmark_visual_payload(
+                result.data,
+                profile.visual_requirements,
+            )
+            report = BenchmarkVisualReport.model_validate(normalized)
+        except (OllamaProxyError, httpx.HTTPError, ValidationError, ValueError, TypeError) as exc:
+            errors.append(f"{candidate_model}: {exc}")
+            continue
+
+        return {
+            **report.model_dump(),
+            "model": candidate_model,
+            "version": version,
+            "images": labels,
+        }
+
+    return {
+        "pass_benchmark": False,
+        "recognizable": False,
+        "summary": "Visual benchmark evaluation failed across configured vision models.",
+        "required_features_visible": {
+            feature: False for feature in profile.visual_requirements
+        },
+        "major_failures": errors[-4:] or ["visual benchmark unavailable"],
+        "model": None,
+        "version": version,
+        "images": labels,
+    }
+
+
+async def evaluate_quality_benchmark(job_id: str, request: QualityBenchmarkRequest) -> dict:
+    root = _require_job(job_id)
+    profile = get_benchmark(request.key)
+    status_path = root / "status.json"
+    if not status_path.exists():
+        raise HTTPException(status_code=409, detail="Job has no generated model yet.")
+    status = json.loads(status_path.read_text(encoding="utf-8"))
+    generic_model = status.get("generic_model")
+    if not isinstance(generic_model, dict) or not isinstance(generic_model.get("version"), int):
+        raise HTTPException(status_code=409, detail="Job has no accepted generic model yet.")
+
+    version = int(generic_model["version"])
+    spec_path = root / f"scene-spec-v{version}.json"
+    if not spec_path.is_file():
+        raise HTTPException(status_code=409, detail="Accepted SceneSpec is missing.")
+    spec_payload = json.loads(spec_path.read_text(encoding="utf-8"))
+    spec = spec_payload.get("spec") or {}
+
+    structural = evaluate_scene_spec_structural(spec, profile)
+    visual = await _evaluate_benchmark_visual(root, version=version, key=request.key)
+    passed = bool(structural.get("passed")) and bool(visual.get("pass_benchmark"))
+    payload = {
+        "job_id": job_id,
+        "benchmark": request.key,
+        "title": profile.title,
+        "version": version,
+        "passed": passed,
+        "structural": structural,
+        "visual": visual,
+        "created_at": datetime.now(UTC).isoformat(),
+    }
+    report_path = root / "exports" / f"benchmark-{request.key}-quality.json"
+    report_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    append_history(
+        root,
+        "quality_benchmark",
+        benchmark=request.key,
+        version=version,
+        passed=passed,
+        structural_passed=structural.get("passed"),
+        visual_passed=visual.get("pass_benchmark"),
+    )
     return payload
 
 
@@ -1586,6 +1799,11 @@ async def refine_generic_scene(job_id: str, request: GenericRefineRequest) -> di
 @app.post("/v1/jobs/{job_id}/improve", dependencies=[Depends(require_api_token)])
 async def refine_generic_scene_api(job_id: str, request: GenericRefineRequest) -> dict:
     return await refine_generic_scene(job_id, request)
+
+
+@app.post("/v1/jobs/{job_id}/quality-benchmark", dependencies=[Depends(require_api_token)])
+async def quality_benchmark_api(job_id: str, request: QualityBenchmarkRequest) -> dict:
+    return await evaluate_quality_benchmark(job_id, request)
 
 
 async def _execute_pikachu(

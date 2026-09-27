@@ -2589,7 +2589,7 @@ async def _build_adaptive_loft_spec(job_id: str, *, reason: str) -> AdaptiveLoft
     images, labels = _collect_images(
         root,
         VisionAnalyzeRequest(
-            stage="mesh_reference_reconstruction",
+            stage="generic_mesh_reference_reconstruction",
             include_references=True,
             include_renders=True,
             max_images=14,

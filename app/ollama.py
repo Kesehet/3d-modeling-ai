@@ -139,6 +139,15 @@ class OllamaProxyClient:
         temperature: float = 0.1,
         num_predict: int | None = None,
     ) -> OllamaJSONResult:
+        if schema:
+            # Hosted gateways may treat `format` as JSON mode and ignore the
+            # schema itself. The model must see the contract in every endpoint.
+            system += (
+                "\nOutput contract: return one JSON value matching this schema. "
+                "Include every judgment field explicitly, even fields with defaults. "
+                "Do not return the schema itself.\n"
+                + json.dumps(schema, separators=(",", ":"), ensure_ascii=False)
+            )
         user_message: dict[str, Any] = {"role": "user", "content": prompt}
         if images:
             user_message["images"] = images

@@ -297,11 +297,13 @@ def active_or_next_feature(plan: FeaturePlan) -> FeatureTask | None:
             if feature.status == "pending"
         ]
         if unresolved:
+            order = {feature.id: index for index, feature in enumerate(plan.features)}
             unresolved.sort(
                 key=lambda feature: (
                     0 if feature.required else 1,
-                    -feature.priority,
+                    order.get(feature.id, 10_000),
                     feature.attempts,
+                    -feature.priority,
                     feature.name.lower(),
                 )
             )
@@ -312,11 +314,13 @@ def active_or_next_feature(plan: FeaturePlan) -> FeatureTask | None:
             candidates = [unresolved[0]]
     if not candidates:
         return None
+    order = {feature.id: index for index, feature in enumerate(plan.features)}
     candidates.sort(
         key=lambda feature: (
             0 if feature.required else 1,
-            -feature.priority,
+            order.get(feature.id, 10_000),
             feature.attempts,
+            -feature.priority,
             feature.name.lower(),
         )
     )

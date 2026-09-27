@@ -1482,6 +1482,7 @@ async def _evaluate_benchmark_visual(
             "model": candidate_model,
             "version": version,
             "images": labels,
+            "raw_response": result.data,
         }
 
     return {

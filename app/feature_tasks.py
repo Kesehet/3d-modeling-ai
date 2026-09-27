@@ -236,7 +236,14 @@ def save_feature_plan(root: Path, plan: FeaturePlan) -> FeaturePlan:
 
 
 def refresh_feature_states(plan: FeaturePlan) -> FeaturePlan:
-    accepted = {feature.id for feature in plan.features if feature.status == "accepted"}
+    # A dependency that exhausted its own attempts should not freeze every
+    # downstream visible feature forever. "Resolved" means the coordinator has
+    # finished attempting that dependency, even if it could not be accepted.
+    resolved = {
+        feature.id
+        for feature in plan.features
+        if feature.status in {"accepted", "blocked", "failed"}
+    }
     feature_ids = {feature.id for feature in plan.features}
 
     for feature in plan.features:
@@ -246,7 +253,7 @@ def refresh_feature_states(plan: FeaturePlan) -> FeaturePlan:
             feature.status = "blocked"
             feature.last_error = "One or more dependencies are missing from the feature plan."
             continue
-        if all(dep in accepted for dep in feature.depends_on):
+        if all(dep in resolved for dep in feature.depends_on):
             if feature.status in {"pending", "blocked"}:
                 feature.status = "ready"
         elif feature.status == "ready":
@@ -273,6 +280,29 @@ def active_or_next_feature(plan: FeaturePlan) -> FeatureTask | None:
         for feature in plan.features
         if feature.status in {"ready", "retry"}
     ]
+    if not candidates:
+        # Defensive deadlock recovery for an imperfect AI-authored dependency
+        # graph. Break a cycle by releasing the highest-value unresolved task
+        # rather than leaving the whole job permanently blocked.
+        unresolved = [
+            feature
+            for feature in plan.features
+            if feature.status == "pending"
+        ]
+        if unresolved:
+            unresolved.sort(
+                key=lambda feature: (
+                    0 if feature.required else 1,
+                    -feature.priority,
+                    feature.attempts,
+                    feature.name.lower(),
+                )
+            )
+            unresolved[0].status = "ready"
+            unresolved[0].last_error = (
+                "Dependency deadlock was bypassed by the coordinator so feature work can continue."
+            )
+            candidates = [unresolved[0]]
     if not candidates:
         return None
     candidates.sort(

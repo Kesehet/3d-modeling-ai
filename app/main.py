@@ -6819,12 +6819,17 @@ async def generate_generic_scene(job_id: str, request: GenericGenerateRequest) -
     )
     initial_action = initial_decision["action"]
     if initial_action in {"build_mesh", "rebuild_mesh"}:
-        _write_status(root, state="running", stage="agent_selected_mesh", modeling_strategy="adaptive_loft")
-        return await _generate_adaptive_mesh_fallback(
+        _write_status(
+            root,
+            state="running",
+            stage="agent_selected_hard_surface_cage",
+            modeling_strategy="hard_surface_cage",
+        )
+        return await _generate_hard_surface_cage(
             job_id,
             reason=(
                 initial_decision.get("summary")
-                or "The AI modeling director selected a continuous mesh strategy."
+                or "The modeling director selected a human-style editable base-mesh strategy."
             )
             + "\n"
             + "\n".join(initial_decision.get("instructions") or []),
@@ -6870,10 +6875,10 @@ async def generate_generic_scene(job_id: str, request: GenericGenerateRequest) -
             root,
             "automatic_strategy_switch",
             from_strategy="procedural",
-            to_strategy="adaptive_loft",
+            to_strategy="hard_surface_cage",
             reason=quality_gate.get("summary"),
         )
-        return await _generate_adaptive_mesh_fallback(
+        return await _generate_hard_surface_cage(
             job_id,
             reason=(quality_gate.get("summary") or "")
             + "\n"
@@ -6927,6 +6932,65 @@ async def refine_generic_scene(job_id: str, request: GenericRefineRequest) -> di
             status_payload = {}
 
     current_strategy = str(status_payload.get("modeling_strategy") or "procedural")
+    if current_strategy == "hard_surface_cage" or status_payload.get("stage") in {
+        "hard_surface_cage_needs_refinement",
+        "hard_surface_cage_needs_replan",
+    }:
+        feature_task = begin_feature(root)
+        if feature_task is not None and feature_task.build_mode == "component_job":
+            return await _build_and_install_component_feature(job_id, feature_task)
+
+        if feature_task is not None:
+            reason = (
+                f"Work the queued feature sub-job with human-style Blender cage editing: {feature_task.name}.\n"
+                + "\n".join(
+                    [
+                        *feature_task.acceptance_criteria,
+                        *[f"Target region: {region}" for region in feature_task.target_regions],
+                        *[f"Protect/own scope: {scope}" for scope in feature_task.owner_scope],
+                    ]
+                )
+            )
+        else:
+            decision = await _ask_modeling_director(
+                job_id,
+                stage="hard_surface_cage_continuation",
+                current_strategy="hard_surface_cage",
+                include_renders=True,
+            )
+            if decision["action"] == "accept":
+                quality_gate = {
+                    "recognizable": True,
+                    "subject_match_score": decision.get("subject_match_score"),
+                    "recommended_strategy": "base_mesh",
+                    "summary": decision.get("summary"),
+                    "director_action": "accept",
+                    "instructions": decision.get("instructions") or [],
+                }
+                status = _write_status(
+                    root,
+                    state="ready",
+                    stage="hard_surface_cage_recognizable",
+                    modeling_strategy="hard_surface_cage",
+                    quality_gate=quality_gate,
+                )
+                return {
+                    "job_id": job_id,
+                    "iterations": [],
+                    "rejected": None,
+                    "quality_gate": quality_gate,
+                    "status": status,
+                }
+            reason = (decision.get("summary") or "") + "\n" + "\n".join(
+                decision.get("instructions") or []
+            )
+
+        return await _generate_hard_surface_cage(
+            job_id,
+            reason=reason,
+            feature_task=feature_task,
+        )
+
     if current_strategy == "adaptive_loft" or status_payload.get("stage") in {
         "generic_needs_strategy_switch",
         "adaptive_mesh_needs_refinement",
@@ -6945,6 +7009,28 @@ async def refine_generic_scene(job_id: str, request: GenericRefineRequest) -> di
                 dependencies=feature_task.depends_on,
                 via="auto_feature_queue",
             )
+            # A strict failure on the same feature means the representation, not
+            # merely its numbers, is suspect. Do not burn more vision/model calls
+            # endlessly rewriting an adaptive loft.
+            if feature_task.attempts >= 2:
+                append_history(
+                    root,
+                    "representation_strategy_exhausted",
+                    feature_id=feature_task.id,
+                    feature_name=feature_task.name,
+                    exhausted_strategy="adaptive_loft",
+                    next_strategy="hard_surface_cage",
+                    attempt=feature_task.attempts,
+                )
+                return await _generate_hard_surface_cage(
+                    job_id,
+                    reason=(
+                        f"Adaptive loft failed strict QA for {feature_task.name}. "
+                        "Switch representation and rebuild this feature using a human-style Blender "
+                        "half-cage, Mirror, subdivision/bevel, booleans and separate components."
+                    ),
+                    feature_task=feature_task,
+                )
             decision = {
                 "action": "refine_mesh",
                 "subject_match_score": (
@@ -6990,8 +7076,9 @@ async def refine_generic_scene(job_id: str, request: GenericRefineRequest) -> di
                 "adaptive_mesh_rebuild_requested",
                 score=decision.get("subject_match_score"),
                 reason=decision.get("summary"),
+                next_strategy="hard_surface_cage",
             )
-            return await _generate_adaptive_mesh_fallback(
+            return await _generate_hard_surface_cage(
                 job_id,
                 reason=(decision.get("summary") or "")
                 + "\n"
@@ -7090,10 +7177,10 @@ async def refine_generic_scene(job_id: str, request: GenericRefineRequest) -> di
                 root,
                 "agent_strategy_switch",
                 from_strategy="procedural",
-                to_strategy="adaptive_loft",
+                to_strategy="hard_surface_cage",
                 reason=decision.get("summary"),
             )
-            return await _generate_adaptive_mesh_fallback(
+            return await _generate_hard_surface_cage(
                 job_id,
                 reason=(decision.get("summary") or "")
                 + "\n"

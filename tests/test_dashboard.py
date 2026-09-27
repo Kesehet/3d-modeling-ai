@@ -41,6 +41,7 @@ def test_dashboard_uses_live_mobile_model_viewer():
     assert 'job.latest_model' in html
     assert 'QA renders & checkpoints' in html
     assert '@media(max-width:520px)' in html
+    assert '[hidden]{display:none!important}' in html
 
 
 def test_dashboard_surfaces_quality_gate_and_allows_vision_retry():
@@ -128,6 +129,6 @@ def test_dashboard_exposes_feature_worker_state_and_disables_cache():
 
     assert 'AI feature sub-jobs' in html
     assert 'Feature coordinator' in html
-    assert 'CLIENT_UI_VERSION="live-model-viewer-v1"' in html
+    assert 'CLIENT_UI_VERSION="live-model-viewer-v2"' in html
     assert 'data.ui_version' in html
     assert response.headers["cache-control"] == "no-store, no-cache, must-revalidate"

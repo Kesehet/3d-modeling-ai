@@ -68,6 +68,7 @@ services:
       BLENDER_BIN: /home/headless/blender/blender
       BLENDER_MCP_HEADLESS: "1"
       BLENDER_MCP_HEADLESS_TIMEOUT: ${BLENDER_MCP_HEADLESS_TIMEOUT:-3600}
+      BLENDER_MCP_MAX_CONCURRENCY: ${BLENDER_MCP_MAX_CONCURRENCY:-1}
     volumes:
       - jobs-data:/var/lib/3d-modeling-ai/jobs
     networks:

@@ -14,6 +14,9 @@ from .config import BLENDER_BIN
 
 app = FastAPI(title="3D Modeling AI Blender Worker", version="0.1.0")
 
+BLENDER_MCP_MAX_CONCURRENCY = max(1, int(os.getenv("BLENDER_MCP_MAX_CONCURRENCY", "1")))
+MCP_CALL_SEMAPHORE = asyncio.Semaphore(BLENDER_MCP_MAX_CONCURRENCY)
+
 ALLOWED_TOOLS = {
     "blender_python_exec",
     "blender_python_exec_async",
@@ -39,40 +42,16 @@ def _server_env() -> dict[str, str]:
 
 @app.get("/health")
 async def health() -> dict:
+    """Cheap liveness check; the deployment smoke test verifies Blender execution."""
+
     blender = shutil.which(BLENDER_BIN) or (BLENDER_BIN if os.path.exists(BLENDER_BIN) else None)
     mcp_server = shutil.which("blender-mcp-server")
-    if not blender or not mcp_server:
-        return {"ok": False, "blender": blender, "mcp_server": mcp_server}
-
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            BLENDER_BIN,
-            "--version",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-    except OSError as exc:
-        return {"ok": False, "blender": blender, "mcp_server": mcp_server, "error": str(exc)}
-
-    try:
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=10)
-    except TimeoutError:
-        proc.kill()
-        await proc.wait()
-        return {
-            "ok": False,
-            "blender": blender,
-            "mcp_server": mcp_server,
-            "error": "Blender version check timed out",
-        }
-
-    if proc.returncode != 0:
-        error = stderr.decode("utf-8", errors="replace").strip() or f"Blender exited with {proc.returncode}"
-        return {"ok": False, "blender": blender, "mcp_server": mcp_server, "error": error}
-
-    output = stdout.decode("utf-8", errors="replace")
-    version = output.splitlines()[0] if output else "unknown"
-    return {"ok": True, "blender": version, "mcp_server": mcp_server}
+    return {
+        "ok": bool(blender and mcp_server),
+        "blender": blender,
+        "mcp_server": mcp_server,
+        "max_concurrency": BLENDER_MCP_MAX_CONCURRENCY,
+    }
 
 
 @app.post("/v1/mcp/call")
@@ -96,7 +75,14 @@ async def call_mcp(payload: ToolCall) -> dict:
     )
 
     try:
-        async with stdio_client(params) as (read, write), ClientSession(read, write) as session:
+        # One Blender process at a time by default. Multiple concurrent model jobs
+        # must queue instead of exhausting the VPS with competing Blender/MCP
+        # subprocesses.
+        async with (
+            MCP_CALL_SEMAPHORE,
+            stdio_client(params) as (read, write),
+            ClientSession(read, write) as session,
+        ):
             await session.initialize()
             result = await session.call_tool(payload.tool, arguments=arguments)
     except Exception as exc:

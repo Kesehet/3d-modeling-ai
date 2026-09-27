@@ -2098,6 +2098,28 @@ async def _guard_job_action(
 
 
 
+def _quality_snapshot(value: object) -> dict:
+    """Keep only the latest quality facts; candidate history belongs in history.json."""
+
+    if not isinstance(value, dict):
+        return {}
+    snapshot = dict(value)
+    snapshot.pop("last_candidate_evaluation", None)
+    return snapshot
+
+
+def _compact_quality_gate(value: object) -> dict:
+    """Bound legacy recursive candidate-evaluation state to a single level."""
+
+    if not isinstance(value, dict):
+        return {}
+    compact = _quality_snapshot(value)
+    latest = value.get("last_candidate_evaluation")
+    if isinstance(latest, dict):
+        compact["last_candidate_evaluation"] = _quality_snapshot(latest)
+    return compact
+
+
 def _read_status(root: Path) -> dict:
     status_path = root / "status.json"
     if not status_path.is_file():
@@ -2106,7 +2128,11 @@ def _read_status(root: Path) -> dict:
         payload = json.loads(status_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return {}
-    return payload if isinstance(payload, dict) else {}
+    if not isinstance(payload, dict):
+        return {}
+    if isinstance(payload.get("quality_gate"), dict):
+        payload["quality_gate"] = _compact_quality_gate(payload["quality_gate"])
+    return payload
 
 
 def _auto_improve_goal_reached(root: Path, status: dict) -> bool:
@@ -2128,30 +2154,52 @@ def _auto_improve_goal_reached(root: Path, status: dict) -> bool:
 
 
 def _auto_improve_progress_signature(root: Path, status: dict) -> tuple[object, ...]:
+    """Track accepted visual/feature progress, not bookkeeping or strategy churn."""
+
     model = status.get("generic_model")
     version = model.get("version") if isinstance(model, dict) else None
-    quality = status.get("quality_gate")
-    score = quality.get("subject_match_score") if isinstance(quality, dict) else None
-    try:
-        score = round(float(score), 3) if score is not None else None
-    except (TypeError, ValueError):
-        score = None
     plan = feature_plan_summary(root) or {}
     counts = plan.get("counts") or {}
     return (
         version,
         status.get("working_cage_version"),
-        status.get("stage"),
-        score,
         counts.get("accepted", 0),
-        counts.get("blocked", 0),
-        counts.get("failed", 0),
-        plan.get("next_feature_id"),
     )
+
+
+def _persisted_auto_improve_no_progress_rounds(root: Path) -> int:
+    """Carry a no-progress streak across repeated auto-improve invocations.
+
+    Without this, callers can accidentally bypass the token/geometry safety gate
+    by scheduling many short runs. Accepted geometry or an accepted feature resets
+    the streak; administrative state changes do not.
+    """
+
+    streak = 0
+    accepted_events = {
+        "cage_edit_kept",
+        "hard_surface_cage_progress",
+        "hard_surface_cage_accepted",
+        "adaptive_mesh_accepted",
+        "feature_subjob_accepted",
+        "component_assembly_accepted",
+    }
+    for item in reversed(load_history(root)):
+        event = item.get("event")
+        if event == "auto_improve_round_completed":
+            if item.get("progress_changed") is True:
+                return 0
+            if item.get("progress_changed") is False:
+                streak += 1
+            continue
+        if event in accepted_events:
+            return 0
+    return streak
 
 
 def _assembled_parent_requires_safe_stop(root: Path, status: dict) -> bool:
     """Do not let generic refinement discard already-frozen component geometry."""
+
     model = status.get("generic_model")
     if not isinstance(model, dict):
         return False
@@ -2235,7 +2283,7 @@ async def _run_auto_improve(job_id: str, max_rounds: int) -> None:
     requested_rounds = max(1, min(30, int(max_rounds)))
     round_limit = requested_rounds
     round_number = 0
-    no_progress_rounds = 0
+    no_progress_rounds = _persisted_auto_improve_no_progress_rounds(root)
     consecutive_errors = 0
     append_history(root, "auto_improve_started", requested_rounds=requested_rounds)
 
@@ -2308,6 +2356,34 @@ async def _run_auto_improve(job_id: str, max_rounds: int) -> None:
                 "auto_improve_completed",
                 rounds=round_number,
                 reason="quality gate satisfied",
+            )
+            return
+
+        no_progress_limit = (
+            6 if before.get("modeling_strategy") == "hard_surface_cage"
+            else FEATURE_MAX_ATTEMPTS
+        )
+        if no_progress_rounds >= no_progress_limit:
+            _write_status(
+                root,
+                state="ready",
+                auto_improve=_auto_improve_payload(
+                    state="stalled",
+                    current_round=round_number,
+                    max_rounds=round_limit,
+                    reason=(
+                        f"Persistent no-progress budget already reached "
+                        f"({no_progress_rounds}/{no_progress_limit}); no new model/vision "
+                        "calls were made."
+                    ),
+                ),
+            )
+            append_history(
+                root,
+                "auto_improve_stopped",
+                round=round_number,
+                reason="persistent no-progress budget reached",
+                no_progress_rounds=no_progress_rounds,
             )
             return
 
@@ -6571,10 +6647,10 @@ async def _generate_hard_surface_cage(
                 working_cage_version=kept_working_version,
                 cage_edit_stall_count=previous_stall_count + 1,
                 quality_gate={
-                    **(previous_status.get("quality_gate") or {}),
+                    **_quality_snapshot(previous_status.get("quality_gate")),
                     "candidate_rejected": True,
                     "last_rejected_candidate_version": version,
-                    "last_candidate_evaluation": quality,
+                    "last_candidate_evaluation": _quality_snapshot(quality),
                 },
             )
             append_history(
@@ -6669,8 +6745,8 @@ async def _generate_hard_surface_cage(
                 working_cage_version=baseline_version,
                 cage_edit_stall_count=int(previous_status.get("cage_edit_stall_count") or 0) + 1,
                 quality_gate={
-                    **(previous_status.get("quality_gate") or {}),
-                    "last_candidate_evaluation": quality,
+                    **_quality_snapshot(previous_status.get("quality_gate")),
+                    "last_candidate_evaluation": _quality_snapshot(quality),
                     "representation": "hard_surface_cage",
                     "candidate_rejected": True,
                     "baseline_version": baseline_version,
@@ -7168,11 +7244,7 @@ async def _refine_adaptive_mesh(
             "candidate_version": version,
             "focused_feature_qa": True,
         }
-        previous_quality = (
-            previous_status.get("quality_gate")
-            if isinstance(previous_status.get("quality_gate"), dict)
-            else {}
-        )
+        previous_quality = _quality_snapshot(previous_status.get("quality_gate"))
         quality = dict(previous_quality)
         quality.setdefault("recognizable", False)
         quality["summary"] = feature_evaluation.get("summary") or quality.get("summary")
@@ -7421,11 +7493,7 @@ async def _generate_adaptive_mesh_fallback(
         )
 
     if feature_task is not None:
-        previous_quality = (
-            previous_status.get("quality_gate")
-            if isinstance(previous_status.get("quality_gate"), dict)
-            else {}
-        )
+        previous_quality = _quality_snapshot(previous_status.get("quality_gate"))
         quality = dict(previous_quality)
         feature_passed = bool(
             feature_evaluation
@@ -7492,16 +7560,12 @@ async def _generate_adaptive_mesh_fallback(
         )
 
     if not accept_candidate:
-        restored_quality = dict(
-            previous_status.get("quality_gate")
-            if isinstance(previous_status.get("quality_gate"), dict)
-            else {}
-        )
+        restored_quality = _quality_snapshot(previous_status.get("quality_gate"))
         restored_quality.update(
             {
                 "candidate_rejected": True,
                 "last_rejected_candidate_version": version,
-                "last_candidate_evaluation": quality,
+                "last_candidate_evaluation": _quality_snapshot(quality),
                 "summary": (
                     (comparison or {}).get("summary")
                     or quality.get("summary")

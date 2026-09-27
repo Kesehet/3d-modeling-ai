@@ -2460,7 +2460,7 @@ async def _evaluate_benchmark_visual(
     key: str,
 ) -> dict:
     profile = get_benchmark(key)
-    views = _feature_diagnostic_views(feature_task)
+    views = ("front", "front-left", "left", "back", "right", "front-right")
     render_paths = [root / "renders" / f"model-v{version}-{view}.png" for view in views]
     if not all(path.is_file() for path in render_paths):
         return {
@@ -2722,7 +2722,7 @@ async def _evaluate_feature_candidate(
 ) -> dict:
     root = _require_job(job_id)
     job_request = json.loads((root / "request.json").read_text(encoding="utf-8"))
-    views = ("front", "front-left", "left", "back", "right", "front-right")
+    views = _feature_diagnostic_views(feature_task)
     reference_paths = sorted(
         [
             path
@@ -2730,11 +2730,15 @@ async def _evaluate_feature_candidate(
             if path.is_file() and path.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp"}
         ],
         key=lambda path: path.stat().st_mtime,
-    )[-4:]
-    baseline_paths = [
-        root / "renders" / f"model-v{baseline_version}-{view}.png"
-        for view in views
-    ]
+    )[-3:]
+    baseline_paths = (
+        [
+            root / "renders" / f"model-v{baseline_version}-{view}.png"
+            for view in views
+        ]
+        if baseline_version is not None
+        else []
+    )
     candidate_paths = [
         root / "renders" / f"model-v{candidate_version}-{view}.png"
         for view in views
@@ -2757,24 +2761,25 @@ async def _evaluate_feature_candidate(
     labels = [f"{path.parent.name}/{path.name}" for path in image_paths]
     system = (
         "You are the visual QA reviewer for ONE feature sub-job in an autonomous 3D modeling pipeline. "
-        "Compare the candidate against the references and, when supplied, the baseline; judge the active feature's acceptance "
-        "criteria specifically. Set passed=true only when that feature is visibly improved or already convincingly "
-        "satisfied in the candidate AND unrelated protected geometry has not materially regressed. Minor changes to "
-        "supporting surfaces are allowed when required by dependencies. Do not require a tiny feature to cause a large "
-        "whole-object score change. Return JSON only matching the supplied schema."
+        "Compare the candidate against the references and, when supplied, the baseline; judge the active feature's "
+        "acceptance criteria specifically. Set passed=true only when that feature is visibly improved or already "
+        "convincingly satisfied in the candidate AND unrelated protected geometry has not materially regressed. "
+        "Minor changes to supporting surfaces are allowed when required by dependencies. Do not require a tiny "
+        "feature to cause a large whole-object score change. Return JSON only matching the supplied schema."
+    )
+    comparison_context = (
+        f"Reference images come first. Then BASELINE v{baseline_version} views {list(views)}. "
+        if baseline_version is not None
+        else "Reference images come first. There is no trusted baseline yet. "
     )
     prompt = (
         f"User request: {job_request.get('prompt', '')}\n"
         f"ACTIVE FEATURE SUB-JOB: {json.dumps(feature_task.model_dump(), ensure_ascii=False)}\n"
         f"Images in order: {labels}\n"
-        (
-            f"Reference images come first. Then BASELINE v{baseline_version} views {list(views)}. "
-            if baseline_version is not None
-            else "Reference images come first. There is no trusted baseline yet. "
-        )
+        + comparison_context
         + f"Then CANDIDATE v{candidate_version} views {list(views)}.\n"
-        "Check the feature's target_regions, owner_scope and acceptance_criteria. Mention any protected geometry "
-        "that regressed."
+        + "Check the feature's target_regions, owner_scope and acceptance_criteria. Mention any protected geometry "
+        + "that regressed."
     )
 
     client = OllamaProxyClient()

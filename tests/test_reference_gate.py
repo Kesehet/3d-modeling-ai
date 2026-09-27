@@ -4,7 +4,7 @@ import json
 import pytest
 from fastapi import HTTPException
 
-import app.main as main
+from app import main
 
 
 def _make_job(tmp_path, monkeypatch, job_id="abc123"):

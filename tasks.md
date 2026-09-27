@@ -108,6 +108,8 @@ A refinement may only become the accepted/latest model when it preserves require
 - [x] Public gallery and file downloads exist.
 - [x] Deployment smoke test creates a Blender file and PNG.
 - [x] Traditional tabbed dashboard: Overview / New Job / Gallery / Files / Jobs.
+- [x] Mobile-friendly interactive GLB viewer on job detail pages, following the active model version automatically.
+- [x] Keep QA render checkpoints available for audit without making static render tiles the primary model view.
 - [x] VPS CPU limits match the actual 2-vCPU host.
 - [x] Add a deploy regression that validates a complex quadruped robot through v1 + visual critique + v2, while retaining the cube only as a hidden infrastructure heartbeat.
 - [x] Add automatic rollback to the previous healthy image when deployment smoke/quality tests fail.

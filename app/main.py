@@ -49,6 +49,20 @@ IMAGE_FORMATS = {
 }
 ARTIFACT_CATEGORIES = {"references", "scene", "renders", "exports", "logs"}
 
+# Keep multimodal requests comfortably below the MediaPitch Ollama proxy body limit.
+# The budget counts base64 image characters only; prompt/schema/JSON overhead still has headroom.
+VISION_IMAGE_BATCH_MAX_B64_CHARS = 650_000
+VISION_IMAGE_ENCODING_PROFILES: tuple[tuple[int, int], ...] = (
+    (640, 70),
+    (560, 65),
+    (480, 60),
+    (384, 55),
+    (320, 50),
+    (256, 45),
+    (192, 45),
+    (160, 45),
+)
+
 
 class JobCreate(BaseModel):
     prompt: str = Field(min_length=1, max_length=20_000)
@@ -959,6 +973,33 @@ def _encode_vision_image(path: Path, *, max_side: int = 640, quality: int = 70) 
     return base64.b64encode(payload).decode("ascii")
 
 
+def _encode_vision_images(
+    image_paths: list[Path],
+    *,
+    max_total_chars: int = VISION_IMAGE_BATCH_MAX_B64_CHARS,
+) -> list[str]:
+    """Encode a whole multimodal batch under a hard proxy-safe request budget."""
+    if not image_paths:
+        return []
+
+    latest: list[str] = []
+    for max_side, quality in VISION_IMAGE_ENCODING_PROFILES:
+        latest = [
+            _encode_vision_image(path, max_side=max_side, quality=quality)
+            for path in image_paths
+        ]
+        if sum(len(item) for item in latest) <= max_total_chars:
+            return latest
+
+    # At 160px/JPEG45 even a 16-image batch should be far below the proxy limit.
+    # Fail locally with a useful error rather than repeatedly sending a known-oversize body.
+    total = sum(len(item) for item in latest)
+    raise ValueError(
+        f"Vision image batch is still too large after compression: {total} base64 chars "
+        f"(limit {max_total_chars})."
+    )
+
+
 def _collect_images(root: Path, request: VisionAnalyzeRequest) -> tuple[list[str], list[str]]:
     def images_in(folder: str) -> list[Path]:
         paths = []
@@ -1005,7 +1046,7 @@ def _collect_images(root: Path, request: VisionAnalyzeRequest) -> tuple[list[str
     else:
         image_paths = (references or renders)[-request.max_images :]
 
-    encoded = [_encode_vision_image(path) for path in image_paths]
+    encoded = _encode_vision_images(image_paths)
     labels = [f"{path.parent.name}/{path.name}" for path in image_paths]
     return encoded, labels
 
@@ -1441,7 +1482,7 @@ async def _evaluate_benchmark_visual(
         key=lambda path: path.stat().st_mtime,
     )[-2:]
     image_paths = reference_paths + render_paths
-    images = [base64.b64encode(path.read_bytes()).decode("ascii") for path in image_paths]
+    images = _encode_vision_images(image_paths)
     labels = [f"{path.parent.name}/{path.name}" for path in image_paths]
 
     feature_keys = list(profile.visual_requirements)
@@ -1585,7 +1626,7 @@ async def _compare_generic_versions(
         }
 
     image_paths = reference_paths + baseline_paths + candidate_paths
-    images = [base64.b64encode(path.read_bytes()).decode("ascii") for path in image_paths]
+    images = _encode_vision_images(image_paths)
     labels = [f"{path.parent.name}/{path.name}" for path in image_paths]
     system = (
         "You are a strict visual regression gate for an autonomous 3D modeling system. "

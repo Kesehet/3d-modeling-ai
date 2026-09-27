@@ -7159,7 +7159,31 @@ async def refine_generic_scene(job_id: str, request: GenericRefineRequest) -> di
             # A strict failure on the same feature means the representation, not
             # merely its numbers, is suspect. Do not burn more vision/model calls
             # endlessly rewriting an adaptive loft.
-            if feature_task.attempts >= 2:
+            quality_gate = (
+                status_payload.get("quality_gate")
+                if isinstance(status_payload.get("quality_gate"), dict)
+                else {}
+            )
+            try:
+                active_score = float(
+                    quality_gate.get("subject_match_score")
+                    if quality_gate.get("subject_match_score") is not None
+                    else quality_gate.get("reference_match_score")
+                    if quality_gate.get("reference_match_score") is not None
+                    else 0.0
+                )
+            except (TypeError, ValueError):
+                active_score = 0.0
+            severe_representation_failure = (
+                quality_gate.get("recognizable") is False
+                and active_score <= 0.20
+            )
+            # A catastrophic visual miss is evidence that the representation is
+            # wrong, not merely that its numeric parameters need another pass.
+            # Human artists would change construction strategy here instead of
+            # rebuilding the same coarse loft. Switch immediately; otherwise
+            # allow one ordinary retry before exhausting adaptive_loft.
+            if severe_representation_failure or feature_task.attempts >= 2:
                 append_history(
                     root,
                     "representation_strategy_exhausted",
@@ -7168,13 +7192,18 @@ async def refine_generic_scene(job_id: str, request: GenericRefineRequest) -> di
                     exhausted_strategy="adaptive_loft",
                     next_strategy="hard_surface_cage",
                     attempt=feature_task.attempts,
+                    severe_visual_failure=severe_representation_failure,
+                    visual_score=active_score,
                 )
                 return await _generate_hard_surface_cage(
                     job_id,
                     reason=(
-                        f"Adaptive loft failed strict QA for {feature_task.name}. "
-                        "Switch representation and rebuild this feature using a human-style Blender "
-                        "half-cage, Mirror, subdivision/bevel, booleans and separate components."
+                        f"Adaptive loft failed strict visual QA for {feature_task.name} "
+                        f"(score={active_score:.2f}). Do not regenerate another loft. "
+                        "Rebuild this feature the way a human Blender hard-surface artist would: "
+                        "reference-driven low-poly half-cage, Mirror before Subdivision, deliberate "
+                        "support loops/edge flow, bounded bevels/booleans, and separate visible components. "
+                        "Preserve the previous best model until this candidate wins strict comparison."
                     ),
                     feature_task=feature_task,
                 )

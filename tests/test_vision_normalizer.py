@@ -3,7 +3,13 @@ from io import BytesIO
 
 from PIL import Image
 
-from app.main import VisionReport, _encode_vision_image, _normalize_vision_report_payload
+from app.main import (
+    ModelingDirectorDecision,
+    VisionReport,
+    _encode_vision_image,
+    _normalize_modeling_director_payload,
+    _normalize_vision_report_payload,
+)
 
 
 def test_normalize_nested_vision_analysis():
@@ -55,3 +61,37 @@ def test_vision_image_encoder_downscales_payload_without_touching_source(tmp_pat
         assert original.size == (2400, 1200)
 
     assert len(payload) < 250_000
+
+
+def test_modeling_director_normalizes_string_instructions():
+    raw = {
+        "action": "revise_procedural",
+        "subject_match_score": 67,
+        "summary": "The silhouette needs work.",
+        "instructions": "Create a high-fidelity, gently tapered front hood.",
+        "major_problems": "The hood is too blocky.",
+    }
+    decision = ModelingDirectorDecision.model_validate(
+        _normalize_modeling_director_payload(raw)
+    )
+
+    assert decision.action == "revise_procedural"
+    assert decision.subject_match_score == 0.67
+    assert decision.instructions == ["Create a high-fidelity, gently tapered front hood."]
+    assert decision.major_problems == ["The hood is too blocky."]
+
+
+def test_modeling_director_normalizes_aliases_and_dict_lists():
+    raw = {
+        "next_action": "base mesh",
+        "match_score": "0.42",
+        "recommendations": [{"action": "Rebuild the roofline"}, {"instruction": "Fix wheel arches"}],
+        "issues": [{"problem": "Cabin silhouette is wrong"}],
+    }
+    decision = ModelingDirectorDecision.model_validate(
+        _normalize_modeling_director_payload(raw)
+    )
+
+    assert decision.action == "build_mesh"
+    assert decision.instructions == ["Rebuild the roofline", "Fix wheel arches"]
+    assert decision.major_problems == ["Cabin silhouette is wrong"]

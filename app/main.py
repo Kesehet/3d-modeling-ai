@@ -42,6 +42,7 @@ from .feature_tasks import (
     begin_feature,
     feature_plan_summary,
     finish_feature,
+    invalidate_unverified_acceptances,
     load_feature_plan,
     normalize_feature_plan_payload,
     save_feature_plan,
@@ -64,6 +65,18 @@ async def reconcile_interrupted_jobs_after_restart() -> None:
     # Any persisted running state predates this process and therefore cannot
     # represent an operation still executing in this API process.
     reconcile_all_running_jobs(force=True)
+    if JOBS_ROOT.exists():
+        for root in JOBS_ROOT.iterdir():
+            if not root.is_dir():
+                continue
+            reset = invalidate_unverified_acceptances(root)
+            if reset:
+                append_history(
+                    root,
+                    "legacy_feature_acceptances_invalidated",
+                    count=reset,
+                    reason="strict reference-based acceptance enabled",
+                )
     _resume_auto_improve_jobs()
 
 
@@ -887,7 +900,10 @@ async def _build_feature_plan(
         "ids. Priority uses 10=highest/most important and 1=lowest. Dependencies must form a DAG. "
         "The primary silhouette/body should normally be first; dependent details should wait for the supporting "
         "surface. Workers share one best-so-far model, so ownership scopes must be narrow enough to prevent one "
-        "feature worker from unnecessarily rewriting unrelated geometry."
+        "feature worker from unnecessarily rewriting unrelated geometry. Acceptance criteria MUST be visually "
+        "verifiable from the supplied references/renders. Do not invent exact millimetres, percentages, tolerances, "
+        "materials, badge dimensions, or other measurements unless the user/reference evidence explicitly provides "
+        "them. Phrase criteria as visible shape, proportion, count, placement, continuity, and identity checks."
     )
     prompt = (
         f"Exact user request: {job_request.get('prompt', '')}\n"
@@ -954,8 +970,15 @@ async def _ensure_feature_plan(
 ) -> FeaturePlan | None:
     root = _require_job(job_id)
     existing = load_feature_plan(root)
-    if existing is not None:
+    if existing is not None and existing.plan_version >= 2:
         return existing
+    if existing is not None:
+        append_history(
+            root,
+            "feature_plan_replanned",
+            previous_version=existing.plan_version,
+            reason="strict visual acceptance criteria upgrade",
+        )
     return await _build_feature_plan(job_id, inventory)
 
 
@@ -2713,6 +2736,39 @@ def _feature_diagnostic_views(feature_task: FeatureTask) -> tuple[str, ...]:
     return ("front-left", "left", "back-right")
 
 
+def _feature_evaluation_accepts(
+    feature_task: FeatureTask,
+    evaluation: dict,
+) -> bool:
+    try:
+        confidence = float(evaluation.get("confidence") or 0.0)
+    except (TypeError, ValueError):
+        confidence = 0.0
+    try:
+        match_score = float(evaluation.get("reference_match_score") or 0.0)
+    except (TypeError, ValueError):
+        match_score = 0.0
+
+    feature_text = " ".join(
+        [feature_task.name, feature_task.category, *feature_task.target_regions]
+    ).lower()
+    primary_shape = (
+        feature_task.strategy == "base_mesh_region"
+        or any(token in feature_text for token in ("silhouette", "body shell", "main body", "primary body"))
+    )
+    minimum_match = 0.82 if primary_shape else 0.72
+
+    return bool(
+        evaluation.get("passed") is True
+        and evaluation.get("visible") is True
+        and evaluation.get("criteria_satisfied") is True
+        and evaluation.get("regression_detected") is not True
+        and (not primary_shape or evaluation.get("subject_recognizable") is True)
+        and confidence >= 0.75
+        and match_score >= minimum_match
+    )
+
+
 async def _evaluate_feature_candidate(
     job_id: str,
     feature_task: FeatureTask,
@@ -2760,12 +2816,19 @@ async def _evaluate_feature_candidate(
     images = _encode_vision_images(image_paths)
     labels = [f"{path.parent.name}/{path.name}" for path in image_paths]
     system = (
-        "You are the visual QA reviewer for ONE feature sub-job in an autonomous 3D modeling pipeline. "
-        "Compare the candidate against the references and, when supplied, the baseline; judge the active feature's "
-        "acceptance criteria specifically. Set passed=true only when that feature is visibly improved or already "
-        "convincingly satisfied in the candidate AND unrelated protected geometry has not materially regressed. "
-        "Minor changes to supporting surfaces are allowed when required by dependencies. Do not require a tiny "
-        "feature to cause a large whole-object score change. Return JSON only matching the supplied schema."
+        "You are the strict visual QA reviewer for ONE feature sub-job in an autonomous 3D modeling pipeline. "
+        "Compare the candidate against the exact references and, when supplied, the baseline. ACCEPTANCE IS ABSOLUTE, "
+        "NOT RELATIVE: a feature being better than the baseline is never enough by itself. Set passed=true and "
+        "criteria_satisfied=true only when the candidate visibly satisfies ALL acceptance criteria that can be judged "
+        "from the supplied pixels. Set visible=true only when the feature itself is clearly visible in the candidate. "
+        "subject_recognizable must indicate whether an unfamiliar viewer could recognize the requested overall subject "
+        "from the candidate renders; this is mandatory for primary silhouette/body features. reference_match_score is "
+        "an absolute 0..1 score for how closely this feature matches the reference appearance, "
+        "shape, placement, count and proportions. If a criterion demands precision that cannot actually be verified "
+        "from these images (for example exact millimetres or a 1% tolerance), do NOT pretend it was measured: set "
+        "criteria_satisfied=false and explain the unverifiable criterion. If the candidate merely improved but remains "
+        "wrong, passed MUST be false. If unrelated protected geometry regressed, regression_detected must be true. "
+        "Return JSON only matching the supplied schema."
     )
     comparison_context = (
         f"Reference images come first. Then BASELINE v{baseline_version} views {list(views)}. "
@@ -2778,8 +2841,8 @@ async def _evaluate_feature_candidate(
         f"Images in order: {labels}\n"
         + comparison_context
         + f"Then CANDIDATE v{candidate_version} views {list(views)}.\n"
-        + "Check the feature's target_regions, owner_scope and acceptance_criteria. Mention any protected geometry "
-        + "that regressed."
+        + "Check every acceptance criterion explicitly. Passing means DONE, not just improved. "
+        + "Mention any unmet/unverifiable criterion in problems and any protected geometry regression separately."
     )
 
     client = OllamaProxyClient()
@@ -3771,9 +3834,9 @@ async def _refine_adaptive_mesh(
             baseline_version=baseline_version,
             candidate_version=version,
         )
-        feature_passed = bool(
-            feature_evaluation.get("passed")
-            and not feature_evaluation.get("regression_detected")
+        feature_passed = _feature_evaluation_accepts(
+            feature_task,
+            feature_evaluation,
         )
         comparison = {
             "candidate_is_better": feature_passed,
@@ -3860,6 +3923,15 @@ async def _refine_adaptive_mesh(
                     or comparison.get("summary")
                     or quality.get("summary")
                     or ""
+                ),
+                verified=True,
+                acceptance_score=float(
+                    (feature_evaluation or {}).get("reference_match_score") or 0.0
+                ),
+                acceptance_model=(
+                    str((feature_evaluation or {}).get("model"))
+                    if (feature_evaluation or {}).get("model")
+                    else None
                 ),
             )
             append_history(
@@ -4030,8 +4102,7 @@ async def _generate_adaptive_mesh_fallback(
         quality = dict(previous_quality)
         feature_passed = bool(
             feature_evaluation
-            and feature_evaluation.get("passed")
-            and not feature_evaluation.get("regression_detected")
+            and _feature_evaluation_accepts(feature_task, feature_evaluation)
         )
         quality["summary"] = (
             (feature_evaluation or {}).get("summary")
@@ -4130,19 +4201,23 @@ async def _generate_adaptive_mesh_fallback(
         )
 
     if feature_task is not None:
-        accepted_feature = bool(
-            feature_evaluation
-            and feature_evaluation.get("passed")
-            and not feature_evaluation.get("regression_detected")
-            and accept_candidate
-        )
+        accepted_feature = bool(feature_passed and accept_candidate)
         finish_feature(
             root,
             feature_task.id,
             accepted=accepted_feature,
             version=version if accepted_feature else None,
             summary=str((feature_evaluation or {}).get("summary") or quality.get("summary") or ""),
-            error="" if accepted_feature else "Focused feature QA did not pass.",
+            error="" if accepted_feature else "Strict focused feature QA did not pass.",
+            verified=accepted_feature,
+            acceptance_score=float(
+                (feature_evaluation or {}).get("reference_match_score") or 0.0
+            ),
+            acceptance_model=(
+                str((feature_evaluation or {}).get("model"))
+                if (feature_evaluation or {}).get("model")
+                else None
+            ),
         )
         append_history(
             root,
@@ -4463,8 +4538,7 @@ async def auto_improve_job_api(job_id: str, request: AutoImproveRequest) -> dict
 
 async def refine_generic_scene(job_id: str, request: GenericRefineRequest) -> dict:
     root = _require_job(job_id)
-    if load_feature_plan(root) is None:
-        await _ensure_feature_plan(job_id, _load_subject_inventory(root))
+    await _ensure_feature_plan(job_id, _load_subject_inventory(root))
     status_path = root / "status.json"
     status_payload: dict = {}
     if status_path.exists():
@@ -4591,20 +4665,41 @@ async def refine_generic_scene(job_id: str, request: GenericRefineRequest) -> di
         )
         if decision["action"] == "accept":
             if feature_task is not None:
+                feature_evaluation = await _evaluate_feature_candidate(
+                    job_id,
+                    feature_task,
+                    baseline_version=None,
+                    candidate_version=current_version,
+                )
+                feature_passed = _feature_evaluation_accepts(
+                    feature_task,
+                    feature_evaluation,
+                )
                 finish_feature(
                     root,
                     feature_task.id,
-                    accepted=True,
-                    version=current_version,
-                    summary=str(decision.get("summary") or "Director accepted the current feature."),
+                    accepted=feature_passed,
+                    version=current_version if feature_passed else None,
+                    summary=str(feature_evaluation.get("summary") or decision.get("summary") or ""),
+                    error="" if feature_passed else "Strict feature QA rejected the current geometry.",
+                    verified=feature_passed,
+                    acceptance_score=float(
+                        feature_evaluation.get("reference_match_score") or 0.0
+                    ),
+                    acceptance_model=(
+                        str(feature_evaluation.get("model"))
+                        if feature_evaluation.get("model")
+                        else None
+                    ),
                 )
                 append_history(
                     root,
-                    "feature_subjob_accepted",
+                    "feature_subjob_accepted" if feature_passed else "feature_subjob_retry",
                     feature_id=feature_task.id,
                     feature_name=feature_task.name,
-                    version=current_version,
+                    version=current_version if feature_passed else None,
                     accepted_without_rebuild=True,
+                    strict_qa=True,
                 )
             break
         if decision["action"] in {"build_mesh", "rebuild_mesh"}:
@@ -4712,6 +4807,7 @@ async def refine_generic_scene(job_id: str, request: GenericRefineRequest) -> di
                 )
             break
 
+        previous_iteration_status = _read_status(root)
         version = 1 + len(list((root / "scene").glob("model-v*.blend")))
         build = await _execute_generic_spec(job_id, revised, version=version)
         append_history(
@@ -4722,29 +4818,79 @@ async def refine_generic_scene(job_id: str, request: GenericRefineRequest) -> di
             object_count=len(revised.objects),
             director_summary=decision.get("summary"),
         )
+
+        feature_evaluation = None
+        feature_passed = True
         if feature_task is not None:
+            feature_evaluation = await _evaluate_feature_candidate(
+                job_id,
+                feature_task,
+                baseline_version=current_version,
+                candidate_version=version,
+            )
+            feature_passed = _feature_evaluation_accepts(
+                feature_task,
+                feature_evaluation,
+            )
             finish_feature(
                 root,
                 feature_task.id,
-                accepted=True,
-                version=version,
-                summary=str(decision.get("summary") or ""),
+                accepted=feature_passed,
+                version=version if feature_passed else None,
+                summary=str(feature_evaluation.get("summary") or ""),
+                error="" if feature_passed else "Strict feature QA rejected the candidate.",
+                verified=feature_passed,
+                acceptance_score=float(
+                    feature_evaluation.get("reference_match_score") or 0.0
+                ),
+                acceptance_model=(
+                    str(feature_evaluation.get("model"))
+                    if feature_evaluation.get("model")
+                    else None
+                ),
             )
             append_history(
                 root,
-                "feature_subjob_accepted",
+                "feature_subjob_accepted" if feature_passed else "feature_subjob_retry",
                 feature_id=feature_task.id,
                 feature_name=feature_task.name,
-                version=version,
+                version=version if feature_passed else None,
+                strict_qa=True,
+                reference_match_score=feature_evaluation.get("reference_match_score"),
+                confidence=feature_evaluation.get("confidence"),
             )
+
         completed.append(
             {
                 "director": decision,
                 "spec": revised.model_dump(),
                 "build": build,
-                "accepted": True,
+                "feature_evaluation": feature_evaluation,
+                "accepted": feature_passed,
             }
         )
+
+        if feature_task is not None and not feature_passed:
+            previous_model = previous_iteration_status.get("generic_model")
+            _write_status(
+                root,
+                state="ready",
+                stage=previous_iteration_status.get("stage") or "generic_needs_refinement",
+                modeling_strategy=previous_iteration_status.get("modeling_strategy") or "procedural",
+                generic_model=previous_model if isinstance(previous_model, dict) else None,
+                quality_gate=previous_iteration_status.get("quality_gate"),
+            )
+            append_history(
+                root,
+                "feature_candidate_rejected",
+                feature_id=feature_task.id,
+                feature_name=feature_task.name,
+                candidate_version=version,
+                preserved_version=current_version,
+                reason=str((feature_evaluation or {}).get("summary") or "strict feature QA failed"),
+            )
+            break
+
         current_spec = revised
         current_version = version
 

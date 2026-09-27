@@ -3,6 +3,7 @@ from app.feature_tasks import (
     active_or_next_feature,
     begin_feature,
     finish_feature,
+    invalidate_unverified_acceptances,
     load_feature_plan,
     normalize_feature_plan_payload,
     save_feature_plan,
@@ -68,7 +69,10 @@ def test_feature_subjobs_follow_dependencies(tmp_path):
         first.id,
         accepted=True,
         version=2,
-        summary="Body silhouette improved.",
+        summary="Body silhouette matches the references.",
+        verified=True,
+        acceptance_score=0.91,
+        acceptance_model="test-vision",
     )
 
     persisted = load_feature_plan(tmp_path)
@@ -165,3 +169,45 @@ def test_feature_queue_preserves_authored_build_order_over_numeric_priority():
 
     assert task is not None
     assert task.id == "body"
+
+
+
+def test_unverified_acceptance_is_not_accepted(tmp_path):
+    plan = _car_plan()
+    save_feature_plan(tmp_path, plan)
+    task = begin_feature(tmp_path)
+    assert task is not None
+
+    finish_feature(
+        tmp_path,
+        task.id,
+        accepted=True,
+        version=2,
+        summary="It got somewhat better, but no strict QA was performed.",
+    )
+
+    persisted = load_feature_plan(tmp_path)
+    assert persisted is not None
+    body = next(feature for feature in persisted.features if feature.id == "body-shell")
+    assert body.status == "retry"
+    assert body.accepted_version is None
+    assert body.acceptance_verified is False
+
+
+def test_legacy_accepted_features_are_requeued(tmp_path):
+    plan = _car_plan()
+    body = plan.features[0]
+    body.status = "accepted"
+    body.accepted_version = 2
+    body.acceptance_verified = False
+    save_feature_plan(tmp_path, plan)
+
+    reset = invalidate_unverified_acceptances(tmp_path)
+
+    assert reset == 1
+    persisted = load_feature_plan(tmp_path)
+    assert persisted is not None
+    body = next(feature for feature in persisted.features if feature.id == "body-shell")
+    assert body.status == "retry"
+    assert body.accepted_version is None
+    assert "strict" in body.last_error.lower()

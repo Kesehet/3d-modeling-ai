@@ -21,6 +21,8 @@ def test_auto_improve_requires_quality_and_feature_completion(tmp_path):
                     "priority": 10,
                     "status": "accepted",
                     "accepted_version": 4,
+                    "acceptance_verified": True,
+                    "acceptance_score": 0.90,
                 },
                 {
                     "id": "wheels",
@@ -38,6 +40,8 @@ def test_auto_improve_requires_quality_and_feature_completion(tmp_path):
 
     plan.features[1].status = "accepted"
     plan.features[1].accepted_version = 4
+    plan.features[1].acceptance_verified = True
+    plan.features[1].acceptance_score = 0.90
     save_feature_plan(tmp_path, plan)
 
     assert _auto_improve_goal_reached(tmp_path, status) is True
@@ -59,6 +63,8 @@ def test_auto_improve_progress_signature_tracks_model_and_feature_progress(tmp_p
                     "priority": 10,
                     "status": "accepted",
                     "accepted_version": 2,
+                    "acceptance_verified": True,
+                    "acceptance_score": 0.90,
                 },
                 {
                     "id": "windows",
@@ -78,6 +84,8 @@ def test_auto_improve_progress_signature_tracks_model_and_feature_progress(tmp_p
     status["quality_gate"]["subject_match_score"] = 0.56
     plan.features[1].status = "accepted"
     plan.features[1].accepted_version = 3
+    plan.features[1].acceptance_verified = True
+    plan.features[1].acceptance_score = 0.90
     save_feature_plan(tmp_path, plan)
 
     after = _auto_improve_progress_signature(tmp_path, status)
@@ -119,6 +127,8 @@ def test_auto_improve_does_not_call_blocked_required_features_complete(tmp_path)
                     "priority": 10,
                     "status": "accepted",
                     "accepted_version": 5,
+                    "acceptance_verified": True,
+                    "acceptance_score": 0.90,
                 },
                 {
                     "id": "wheels",

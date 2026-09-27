@@ -98,20 +98,78 @@ def _string_list(
     return [str(item).strip()[:240] for item in value if str(item).strip()][:limit]
 
 
-def normalize_feature_plan_payload(data: object, *, subject: str) -> dict:
+def _extract_feature_plan_payload(data: object) -> tuple[dict, list]:
+    """Accept common model wrappers while still requiring a concrete feature list."""
+    if isinstance(data, list):
+        return {}, data
     if not isinstance(data, dict):
-        raise TypeError("Feature plan response is not a JSON object.")
+        raise TypeError("Feature plan response is not a JSON object or list.")
 
-    raw_features = (
-        data.get("features")
-        or data.get("tasks")
-        or data.get("visible_features")
-        or data.get("feature_inventory")
+    feature_keys = (
+        "features",
+        "tasks",
+        "visible_features",
+        "feature_inventory",
+        "components",
+        "parts",
+        "subjobs",
+        "sub_jobs",
+        "work_items",
+        "children",
     )
-    if isinstance(raw_features, dict):
-        raw_features = list(raw_features.values())
-    if not isinstance(raw_features, list):
-        raise TypeError("Feature plan must include a feature list.")
+    wrapper_keys = (
+        "feature_plan",
+        "plan",
+        "build_plan",
+        "decomposition",
+        "result",
+        "output",
+        "response",
+        "data",
+        "analysis",
+        "payload",
+    )
+
+    queue: list[dict] = [data]
+    seen: set[int] = set()
+    while queue:
+        node = queue.pop(0)
+        node_id = id(node)
+        if node_id in seen:
+            continue
+        seen.add(node_id)
+
+        for key in feature_keys:
+            value = node.get(key)
+            if isinstance(value, list):
+                return node, value
+            if isinstance(value, dict):
+                nested_lists = [
+                    value.get(nested_key)
+                    for nested_key in feature_keys
+                    if isinstance(value.get(nested_key), list)
+                ]
+                if nested_lists:
+                    return value, nested_lists[0]
+                if value and all(isinstance(item, dict) for item in value.values()):
+                    return node, list(value.values())
+                queue.append(value)
+
+        for key in wrapper_keys:
+            child = node.get(key)
+            if isinstance(child, dict):
+                queue.append(child)
+            elif isinstance(child, list) and child and all(isinstance(item, dict) for item in child):
+                # Some models use {"plan": [{...feature...}, ...]}.
+                return node, child
+
+    raise TypeError(
+        "Feature plan must include a feature list under features/tasks/components/parts/subjobs."
+    )
+
+
+def normalize_feature_plan_payload(data: object, *, subject: str) -> dict:
+    plan_container, raw_features = _extract_feature_plan_payload(data)
 
     normalized: list[dict] = []
     used_ids: set[str] = set()
@@ -263,11 +321,17 @@ def normalize_feature_plan_payload(data: object, *, subject: str) -> dict:
 
     return {
         "plan_version": 3,
-        "subject": str(data.get("subject") or subject)[:160],
+        "subject": str(
+            plan_container.get("subject")
+            or (data.get("subject") if isinstance(data, dict) else None)
+            or subject
+        )[:160],
         "coordinator_notes": str(
-            data.get("coordinator_notes")
-            or data.get("notes")
-            or data.get("coordination")
+            plan_container.get("coordinator_notes")
+            or plan_container.get("notes")
+            or plan_container.get("coordination")
+            or (data.get("coordinator_notes") if isinstance(data, dict) else None)
+            or (data.get("notes") if isinstance(data, dict) else None)
             or ""
         )[:2000],
         "features": normalized,

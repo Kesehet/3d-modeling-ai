@@ -135,3 +135,33 @@ def test_dependency_cycle_is_recovered_instead_of_deadlocking():
     assert task is not None
     assert task.id == "a"
     assert "deadlock" in task.last_error.lower()
+
+
+
+def test_feature_queue_preserves_authored_build_order_over_numeric_priority():
+    payload = normalize_feature_plan_payload(
+        {
+            "subject": "Bugatti Veyron",
+            "features": [
+                {
+                    "id": "body",
+                    "name": "Primary Body Silhouette",
+                    "priority": 1,
+                    "strategy": "base_mesh_region",
+                },
+                {
+                    "id": "grille",
+                    "name": "Front Horseshoe Grille",
+                    "priority": 10,
+                    "strategy": "attachment",
+                },
+            ],
+        },
+        subject="Bugatti Veyron",
+    )
+    plan = FeaturePlan.model_validate(payload)
+
+    task = active_or_next_feature(plan)
+
+    assert task is not None
+    assert task.id == "body"

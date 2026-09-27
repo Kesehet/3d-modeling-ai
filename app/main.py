@@ -882,8 +882,9 @@ async def _build_feature_plan(
         "matching the FeaturePlan schema. Include the primary body/silhouette plus visible secondary features such "
         "as wheels, windows, lights, handles, mirrors, openings, trim, screens, feet, buttons, appendages, seams or "
         "other identity-bearing geometry when they are actually visible/relevant. Do not include hidden internals. "
-        "Each feature is a separate sub-job. Give every sub-job a stable lowercase id, priority, modeling strategy, "
-        "target regions, ownership scope, acceptance criteria and dependency ids. Dependencies must form a DAG. "
+        "Each feature is a separate sub-job. Return features in the intended BUILD ORDER. Give every sub-job a stable "
+        "lowercase id, priority, modeling strategy, target regions, ownership scope, acceptance criteria and dependency "
+        "ids. Priority uses 10=highest/most important and 1=lowest. Dependencies must form a DAG. "
         "The primary silhouette/body should normally be first; dependent details should wait for the supporting "
         "surface. Workers share one best-so-far model, so ownership scopes must be narrow enough to prevent one "
         "feature worker from unnecessarily rewriting unrelated geometry."
@@ -2607,11 +2608,15 @@ async def _compare_generic_versions(
             if path.is_file() and path.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp"}
         ],
         key=lambda path: path.stat().st_mtime,
-    )[-4:]
-    baseline_paths = [
-        root / "renders" / f"model-v{baseline_version}-{view}.png"
-        for view in views
-    ]
+    )[-3:]
+    baseline_paths = (
+        [
+            root / "renders" / f"model-v{baseline_version}-{view}.png"
+            for view in views
+        ]
+        if baseline_version is not None
+        else []
+    )
     candidate_paths = [
         root / "renders" / f"model-v{candidate_version}-{view}.png"
         for view in views
@@ -2688,16 +2693,36 @@ async def _compare_generic_versions(
 
 
 
+def _feature_diagnostic_views(feature_task: FeatureTask) -> tuple[str, ...]:
+    text = " ".join(
+        [
+            feature_task.name,
+            *feature_task.target_regions,
+            *feature_task.owner_scope,
+            *feature_task.acceptance_criteria,
+        ]
+    ).lower()
+    if any(token in text for token in ("rear", "back", "tail", "exhaust", "diffuser", "spoiler")):
+        return ("back", "back-right", "right")
+    if any(token in text for token in ("front", "headlight", "grille", "hood", "bumper", "nose")):
+        return ("front", "front-left", "left")
+    if any(token in text for token in ("side", "door", "wheel", "arch", "mirror", "window", "skirt")):
+        return ("left", "front-left", "back-left")
+    if any(token in text for token in ("roof", "top", "scoop")):
+        return ("top", "front-left", "back-right")
+    return ("front-left", "left", "back-right")
+
+
 async def _evaluate_feature_candidate(
     job_id: str,
     feature_task: FeatureTask,
     *,
-    baseline_version: int,
+    baseline_version: int | None,
     candidate_version: int,
 ) -> dict:
     root = _require_job(job_id)
     job_request = json.loads((root / "request.json").read_text(encoding="utf-8"))
-    views = ("front", "front-left", "left", "back", "right", "front-right")
+    views = _feature_diagnostic_views(feature_task)
     reference_paths = sorted(
         [
             path
@@ -2705,11 +2730,15 @@ async def _evaluate_feature_candidate(
             if path.is_file() and path.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp"}
         ],
         key=lambda path: path.stat().st_mtime,
-    )[-4:]
-    baseline_paths = [
-        root / "renders" / f"model-v{baseline_version}-{view}.png"
-        for view in views
-    ]
+    )[-3:]
+    baseline_paths = (
+        [
+            root / "renders" / f"model-v{baseline_version}-{view}.png"
+            for view in views
+        ]
+        if baseline_version is not None
+        else []
+    )
     candidate_paths = [
         root / "renders" / f"model-v{candidate_version}-{view}.png"
         for view in views
@@ -2732,20 +2761,25 @@ async def _evaluate_feature_candidate(
     labels = [f"{path.parent.name}/{path.name}" for path in image_paths]
     system = (
         "You are the visual QA reviewer for ONE feature sub-job in an autonomous 3D modeling pipeline. "
-        "Compare the baseline and candidate against the references, but judge the active feature's acceptance "
-        "criteria specifically. Set passed=true only when that feature is visibly improved or already convincingly "
-        "satisfied in the candidate AND unrelated protected geometry has not materially regressed. Minor changes to "
-        "supporting surfaces are allowed when required by dependencies. Do not require a tiny feature to cause a large "
-        "whole-object score change. Return JSON only matching the supplied schema."
+        "Compare the candidate against the references and, when supplied, the baseline; judge the active feature's "
+        "acceptance criteria specifically. Set passed=true only when that feature is visibly improved or already "
+        "convincingly satisfied in the candidate AND unrelated protected geometry has not materially regressed. "
+        "Minor changes to supporting surfaces are allowed when required by dependencies. Do not require a tiny "
+        "feature to cause a large whole-object score change. Return JSON only matching the supplied schema."
+    )
+    comparison_context = (
+        f"Reference images come first. Then BASELINE v{baseline_version} views {list(views)}. "
+        if baseline_version is not None
+        else "Reference images come first. There is no trusted baseline yet. "
     )
     prompt = (
         f"User request: {job_request.get('prompt', '')}\n"
         f"ACTIVE FEATURE SUB-JOB: {json.dumps(feature_task.model_dump(), ensure_ascii=False)}\n"
         f"Images in order: {labels}\n"
-        f"Reference images come first. Then BASELINE v{baseline_version} views {list(views)}. "
-        f"Then CANDIDATE v{candidate_version} views {list(views)}.\n"
-        "Check the feature's target_regions, owner_scope and acceptance_criteria. Mention any protected geometry "
-        "that regressed."
+        + comparison_context
+        + f"Then CANDIDATE v{candidate_version} views {list(views)}.\n"
+        + "Check the feature's target_regions, owner_scope and acceptance_criteria. Mention any protected geometry "
+        + "that regressed."
     )
 
     client = OllamaProxyClient()
@@ -3286,12 +3320,18 @@ def _normalize_adaptive_loft_payload(data: object, fallback_title: str) -> dict:
     return normalized
 
 
-async def _build_adaptive_loft_spec(job_id: str, *, reason: str) -> AdaptiveLoftSpec:
+async def _build_adaptive_loft_spec(
+    job_id: str,
+    *,
+    reason: str,
+    feature_task: FeatureTask | None = None,
+) -> AdaptiveLoftSpec:
     root = _require_job(job_id)
     job_request = json.loads((root / "request.json").read_text(encoding="utf-8"))
     inventory = _load_subject_inventory(root)
     feature_plan = await _ensure_feature_plan(job_id, inventory)
     feature_plan_context = feature_plan.model_dump() if feature_plan is not None else {}
+    feature_context = feature_task.model_dump() if feature_task is not None else {}
 
     latest_vision: dict = {}
     vision_path = root / "vision-latest.json"
@@ -3309,7 +3349,7 @@ async def _build_adaptive_loft_spec(job_id: str, *, reason: str) -> AdaptiveLoft
             stage="generic_mesh_reference_reconstruction",
             include_references=True,
             include_renders=True,
-            max_images=14,
+            max_images=8 if feature_task is not None else 14,
         ),
     )
     system = (
@@ -3333,9 +3373,12 @@ async def _build_adaptive_loft_spec(job_id: str, *, reason: str) -> AdaptiveLoft
         f"Reason for strategy switch: {reason}\n"
         f"Subject inventory: {json.dumps(inventory.model_dump() if inventory else {}, ensure_ascii=False)}\n"
         f"Visible-feature sub-job plan: {json.dumps(feature_plan_context, ensure_ascii=False)}\n"
+        f"ACTIVE FEATURE SUB-JOB: {json.dumps(feature_context, ensure_ascii=False)}\n"
         f"Latest visual critique: {json.dumps(latest_vision, ensure_ascii=False)}\n"
         f"Images in order: {labels}\n"
-        "Create a substantially more recognizable continuous base mesh. For an 8-point cross section, a useful "
+        "If an ACTIVE FEATURE SUB-JOB is supplied, make that feature the concrete goal of this pass while preserving "
+        "geometry outside its ownership scope. Create a substantially more recognizable continuous base mesh. For an "
+        "8-point cross section, a useful "
         "order is around the perimeter from lower-left -> mid-left -> upper-left/shoulder -> top-left -> "
         "top-right -> upper-right/shoulder -> mid-right -> lower-right, adjusted to the actual subject."
     )
@@ -3538,7 +3581,7 @@ async def _revise_adaptive_loft_spec(
             stage="adaptive_mesh_revision",
             include_references=True,
             include_renders=True,
-            max_images=14,
+            max_images=8 if feature_task is not None else 14,
         ),
     )
 
@@ -3617,7 +3660,12 @@ async def _revise_adaptive_loft_spec(
     )
 
 
-async def _refine_adaptive_mesh(job_id: str, *, decision: dict) -> dict:
+async def _refine_adaptive_mesh(
+    job_id: str,
+    *,
+    decision: dict,
+    feature_task: FeatureTask | None = None,
+) -> dict:
     root = _require_job(job_id)
     status_path = root / "status.json"
     try:
@@ -3632,12 +3680,13 @@ async def _refine_adaptive_mesh(job_id: str, *, decision: dict) -> dict:
             reason=(decision.get("summary") or "No reusable adaptive mesh spec was available.")
             + "\n"
             + "\n".join(decision.get("instructions") or []),
+            feature_task=feature_task,
         )
 
     baseline_version, current_spec = active
     previous_model = dict(previous_status.get("generic_model") or {})
-    feature_task = begin_feature(root)
-    if feature_task is not None:
+    feature_task = feature_task or begin_feature(root)
+    if feature_task is not None and feature_task.attempts > 0:
         append_history(
             root,
             "feature_subjob_started",
@@ -3715,46 +3764,66 @@ async def _refine_adaptive_mesh(job_id: str, *, decision: dict) -> dict:
 
     version = 1 + len(list((root / "scene").glob("model-v*.blend")))
     build = await _execute_adaptive_loft(job_id, revised, version=version)
-    comparison = await _compare_generic_versions(
-        root,
-        baseline_version=baseline_version,
-        candidate_version=version,
-    )
-    feature_evaluation = (
-        await _evaluate_feature_candidate(
+    if feature_task is not None:
+        feature_evaluation = await _evaluate_feature_candidate(
             job_id,
             feature_task,
             baseline_version=baseline_version,
             candidate_version=version,
         )
-        if feature_task is not None
-        else None
-    )
-
-    try:
-        quality = await _generic_recognizability_check(
-            job_id,
-            stage="adaptive_mesh_refinement_quality",
+        feature_passed = bool(
+            feature_evaluation.get("passed")
+            and not feature_evaluation.get("regression_detected")
         )
-    except HTTPException as exc:
-        append_history(root, "adaptive_mesh_quality_unavailable", error=str(exc.detail))
-        quality = {
-            "recognizable": None,
-            "subject_match_score": None,
-            "recommended_strategy": "base_mesh",
-            "summary": str(exc.detail),
-            "director_action": "refine_mesh",
-            "instructions": [],
+        comparison = {
+            "candidate_is_better": feature_passed,
+            "summary": feature_evaluation.get("summary") or "",
+            "improvements": [],
+            "regressions": feature_evaluation.get("protected_geometry_notes") or [],
+            "model": feature_evaluation.get("model"),
+            "baseline_version": baseline_version,
+            "candidate_version": version,
+            "focused_feature_qa": True,
         }
-
-    recognizable = quality.get("recognizable")
-    better = bool(comparison.get("candidate_is_better"))
-    feature_passed = bool(
-        feature_evaluation
-        and feature_evaluation.get("passed")
-        and not feature_evaluation.get("regression_detected")
-    )
-    accept_candidate = recognizable is True or better or feature_passed
+        previous_quality = (
+            previous_status.get("quality_gate")
+            if isinstance(previous_status.get("quality_gate"), dict)
+            else {}
+        )
+        quality = dict(previous_quality)
+        quality.setdefault("recognizable", False)
+        quality["summary"] = feature_evaluation.get("summary") or quality.get("summary")
+        quality["active_feature_id"] = feature_task.id
+        quality["active_feature_passed"] = feature_passed
+        recognizable = quality.get("recognizable")
+        better = feature_passed
+        accept_candidate = feature_passed
+    else:
+        feature_evaluation = None
+        comparison = await _compare_generic_versions(
+            root,
+            baseline_version=baseline_version,
+            candidate_version=version,
+        )
+        try:
+            quality = await _generic_recognizability_check(
+                job_id,
+                stage="adaptive_mesh_refinement_quality",
+            )
+        except HTTPException as exc:
+            append_history(root, "adaptive_mesh_quality_unavailable", error=str(exc.detail))
+            quality = {
+                "recognizable": None,
+                "subject_match_score": None,
+                "recommended_strategy": "base_mesh",
+                "summary": str(exc.detail),
+                "director_action": "refine_mesh",
+                "instructions": [],
+            }
+        recognizable = quality.get("recognizable")
+        better = bool(comparison.get("candidate_is_better"))
+        feature_passed = False
+        accept_candidate = recognizable is True or better
 
     if accept_candidate:
         stage = "adaptive_mesh_recognizable" if recognizable is True else "adaptive_mesh_needs_refinement"
@@ -3801,6 +3870,34 @@ async def _refine_adaptive_mesh(job_id: str, *, decision: dict) -> dict:
                 version=version,
                 comparison_summary=comparison.get("summary"),
             )
+            feature_summary = feature_plan_summary(root) or {}
+            if feature_summary.get("required_complete"):
+                try:
+                    final_quality = await _generic_recognizability_check(
+                        job_id,
+                        stage="feature_backlog_complete_quality",
+                    )
+                    quality = final_quality
+                    recognizable = final_quality.get("recognizable")
+                    stage = (
+                        "adaptive_mesh_recognizable"
+                        if recognizable is True
+                        else "adaptive_mesh_needs_refinement"
+                    )
+                    status = _write_status(
+                        root,
+                        state="ready",
+                        stage=stage,
+                        modeling_strategy="adaptive_loft",
+                        generic_model=active_model,
+                        quality_gate=final_quality,
+                    )
+                except HTTPException as exc:
+                    append_history(
+                        root,
+                        "feature_backlog_final_quality_unavailable",
+                        error=str(exc.detail),
+                    )
     else:
         status = _write_status(
             root,
@@ -3855,7 +3952,12 @@ async def _refine_adaptive_mesh(job_id: str, *, decision: dict) -> dict:
     return build
 
 
-async def _generate_adaptive_mesh_fallback(job_id: str, *, reason: str) -> dict:
+async def _generate_adaptive_mesh_fallback(
+    job_id: str,
+    *,
+    reason: str,
+    feature_task: FeatureTask | None = None,
+) -> dict:
     root = _require_job(job_id)
     status_path = root / "status.json"
     previous_status: dict = {}
@@ -3876,36 +3978,90 @@ async def _generate_adaptive_mesh_fallback(job_id: str, *, reason: str) -> dict:
         else None
     )
 
-    _write_status(root, state="running", stage="adaptive_mesh_planning")
-    spec = await _build_adaptive_loft_spec(job_id, reason=reason)
+    feature_task = feature_task or begin_feature(root)
+    if feature_task is not None:
+        append_history(
+            root,
+            "feature_subjob_started",
+            feature_id=feature_task.id,
+            feature_name=feature_task.name,
+            attempt=feature_task.attempts,
+            strategy=feature_task.strategy,
+            dependencies=feature_task.depends_on,
+            via="adaptive_mesh_fallback",
+        )
+
+    _write_status(
+        root,
+        state="running",
+        stage="adaptive_mesh_planning",
+        active_feature_id=feature_task.id if feature_task is not None else None,
+    )
+    spec = await _build_adaptive_loft_spec(
+        job_id,
+        reason=reason,
+        feature_task=feature_task,
+    )
     version = 1 + len(list((root / "scene").glob("model-v*.blend")))
     build = await _execute_adaptive_loft(job_id, spec, version=version)
 
     comparison: dict | None = None
-    if baseline_version is not None and baseline_version != version:
+    feature_evaluation: dict | None = None
+    if feature_task is not None:
+        feature_evaluation = await _evaluate_feature_candidate(
+            job_id,
+            feature_task,
+            baseline_version=baseline_version,
+            candidate_version=version,
+        )
+    elif baseline_version is not None and baseline_version != version:
         comparison = await _compare_generic_versions(
             root,
             baseline_version=baseline_version,
             candidate_version=version,
         )
 
-    try:
-        quality = await _generic_recognizability_check(
-            job_id,
-            stage="generic_mesh_fallback_quality",
+    if feature_task is not None:
+        previous_quality = (
+            previous_status.get("quality_gate")
+            if isinstance(previous_status.get("quality_gate"), dict)
+            else {}
         )
-    except HTTPException as exc:
-        append_history(root, "adaptive_mesh_quality_unavailable", error=str(exc.detail))
-        quality = {
-            "recognizable": None,
-            "subject_match_score": None,
-            "recommended_strategy": "hybrid",
-            "summary": str(exc.detail),
-        }
+        quality = dict(previous_quality)
+        feature_passed = bool(
+            feature_evaluation
+            and feature_evaluation.get("passed")
+            and not feature_evaluation.get("regression_detected")
+        )
+        quality["summary"] = (
+            (feature_evaluation or {}).get("summary")
+            or quality.get("summary")
+            or f"Worked feature {feature_task.name}."
+        )
+        quality["active_feature_id"] = feature_task.id
+        quality["active_feature_passed"] = feature_passed
+        recognizable = quality.get("recognizable")
+        better = feature_passed
+        accept_candidate = baseline_version is None or feature_passed
+    else:
+        try:
+            quality = await _generic_recognizability_check(
+                job_id,
+                stage="generic_mesh_fallback_quality",
+            )
+        except HTTPException as exc:
+            append_history(root, "adaptive_mesh_quality_unavailable", error=str(exc.detail))
+            quality = {
+                "recognizable": None,
+                "subject_match_score": None,
+                "recommended_strategy": "hybrid",
+                "summary": str(exc.detail),
+            }
 
-    recognizable = quality.get("recognizable")
-    better = bool(comparison and comparison.get("candidate_is_better"))
-    accept_candidate = recognizable is True or baseline_version is None or better
+        recognizable = quality.get("recognizable")
+        better = bool(comparison and comparison.get("candidate_is_better"))
+        feature_passed = False
+        accept_candidate = recognizable is True or baseline_version is None or better
 
     if not accept_candidate and previous_model is not None:
         active_renders = previous_model.get("renders")
@@ -3973,7 +4129,59 @@ async def _generate_adaptive_mesh_fallback(job_id: str, *, reason: str) -> dict:
             better_than_previous=better if comparison is not None else None,
         )
 
+    if feature_task is not None:
+        accepted_feature = bool(
+            feature_evaluation
+            and feature_evaluation.get("passed")
+            and not feature_evaluation.get("regression_detected")
+            and accept_candidate
+        )
+        finish_feature(
+            root,
+            feature_task.id,
+            accepted=accepted_feature,
+            version=version if accepted_feature else None,
+            summary=str((feature_evaluation or {}).get("summary") or quality.get("summary") or ""),
+            error="" if accepted_feature else "Focused feature QA did not pass.",
+        )
+        append_history(
+            root,
+            "feature_subjob_accepted" if accepted_feature else "feature_subjob_retry",
+            feature_id=feature_task.id,
+            feature_name=feature_task.name,
+            version=version if accepted_feature else None,
+            via="adaptive_mesh_fallback",
+        )
+        feature_summary = feature_plan_summary(root) or {}
+        if accepted_feature and feature_summary.get("required_complete"):
+            try:
+                final_quality = await _generic_recognizability_check(
+                    job_id,
+                    stage="feature_backlog_complete_quality",
+                )
+                quality = final_quality
+                recognizable = final_quality.get("recognizable")
+                status = _write_status(
+                    root,
+                    state="ready",
+                    stage=(
+                        "adaptive_mesh_recognizable"
+                        if recognizable is True
+                        else "adaptive_mesh_needs_refinement"
+                    ),
+                    modeling_strategy="adaptive_loft",
+                    generic_model=build["status"].get("generic_model"),
+                    quality_gate=final_quality,
+                )
+            except HTTPException as exc:
+                append_history(
+                    root,
+                    "feature_backlog_final_quality_unavailable",
+                    error=str(exc.detail),
+                )
+
     build["comparison"] = comparison
+    build["feature_evaluation"] = feature_evaluation
     build["quality_gate"] = quality
     build["status"] = status
     return build
@@ -4270,12 +4478,40 @@ async def refine_generic_scene(job_id: str, request: GenericRefineRequest) -> di
         "generic_needs_strategy_switch",
         "adaptive_mesh_needs_refinement",
     }:
-        decision = await _ask_modeling_director(
-            job_id,
-            stage="adaptive_mesh_continuation",
-            current_strategy="adaptive_loft",
-            include_renders=True,
-        )
+        feature_task = begin_feature(root)
+        if feature_task is not None:
+            append_history(
+                root,
+                "feature_subjob_started",
+                feature_id=feature_task.id,
+                feature_name=feature_task.name,
+                attempt=feature_task.attempts,
+                strategy=feature_task.strategy,
+                dependencies=feature_task.depends_on,
+                via="auto_feature_queue",
+            )
+            decision = {
+                "action": "refine_mesh",
+                "subject_match_score": (
+                    status_payload.get("quality_gate", {}).get("subject_match_score")
+                    if isinstance(status_payload.get("quality_gate"), dict)
+                    else None
+                ),
+                "summary": f"Work the queued feature sub-job: {feature_task.name}.",
+                "instructions": [
+                    *feature_task.acceptance_criteria,
+                    *[f"Target region: {region}" for region in feature_task.target_regions],
+                    *[f"Protect/own scope: {scope}" for scope in feature_task.owner_scope],
+                ],
+                "major_problems": [],
+            }
+        else:
+            decision = await _ask_modeling_director(
+                job_id,
+                stage="adaptive_mesh_continuation",
+                current_strategy="adaptive_loft",
+                include_renders=True,
+            )
         if decision["action"] == "accept":
             quality_gate = {
                 "recognizable": True,
@@ -4305,10 +4541,15 @@ async def refine_generic_scene(job_id: str, request: GenericRefineRequest) -> di
                 reason=(decision.get("summary") or "")
                 + "\n"
                 + "\n".join(decision.get("instructions") or []),
+                feature_task=feature_task,
             )
         # Once a usable mesh exists, build_mesh/revise_procedural/refine_mesh all mean
         # improve the existing best-so-far mesh rather than discarding it.
-        return await _refine_adaptive_mesh(job_id, decision=decision)
+        return await _refine_adaptive_mesh(
+            job_id,
+            decision=decision,
+            feature_task=feature_task,
+        )
 
     spec_files = sorted(root.glob("scene-spec-v*.json"), key=lambda path: path.stat().st_mtime)
     if not spec_files:
@@ -4379,6 +4620,7 @@ async def refine_generic_scene(job_id: str, request: GenericRefineRequest) -> di
                 reason=(decision.get("summary") or "")
                 + "\n"
                 + "\n".join(decision.get("instructions") or []),
+                feature_task=feature_task,
             )
 
         images, labels = _collect_images(

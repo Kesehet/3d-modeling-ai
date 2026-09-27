@@ -74,6 +74,8 @@ class VisionIssue(BaseModel):
 class VisionReport(BaseModel):
     summary: str
     recommended_modeling_strategy: Literal["procedural", "base_mesh", "hybrid"]
+    recognizable: bool | None = None
+    subject_match_score: float | None = Field(default=None, ge=0.0, le=1.0)
     observations: list[str] = Field(default_factory=list)
     issues: list[VisionIssue] = Field(default_factory=list)
     priority_actions: list[str] = Field(default_factory=list)
@@ -324,6 +326,51 @@ def _normalize_vision_report_payload(data: object) -> dict:
             return ""
         return str(value)
 
+    def find_value(keys: tuple[str, ...]) -> object | None:
+        queue: list[dict] = [data]
+        seen: set[int] = set()
+        while queue:
+            node = queue.pop(0)
+            node_id = id(node)
+            if node_id in seen:
+                continue
+            seen.add(node_id)
+            for key in keys:
+                if key in node:
+                    return node[key]
+            for key in ("analysis", "evaluation", "assessment", "result", "overall", "visual_quality"):
+                child = node.get(key)
+                if isinstance(child, dict):
+                    queue.append(child)
+        return None
+
+    def as_bool(value: object) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        return str(value).strip().lower() in {
+            "1", "true", "yes", "recognizable", "recognisable", "match", "matched", "pass", "passed",
+        }
+
+    recognizable_raw = find_value(
+        ("recognizable", "recognisable", "is_recognizable", "subject_recognizable", "subject_match")
+    )
+    recognizable = as_bool(recognizable_raw) if recognizable_raw is not None else None
+
+    score_raw = find_value(
+        ("subject_match_score", "match_score", "recognizability_score", "recognition_score")
+    )
+    subject_match_score: float | None = None
+    if score_raw is not None:
+        try:
+            subject_match_score = float(score_raw)
+            if subject_match_score > 1.0 and subject_match_score <= 100.0:
+                subject_match_score /= 100.0
+            subject_match_score = max(0.0, min(1.0, subject_match_score))
+        except (TypeError, ValueError):
+            subject_match_score = None
+
     observations: list[str] = []
     raw_observations = data.get("observations")
     if isinstance(raw_observations, list):
@@ -437,13 +484,14 @@ def _normalize_vision_report_payload(data: object) -> dict:
     if not priority_actions:
         priority_actions = [item["suggested_change"] for item in issues[:6]]
 
-    summary = text_value(data.get("summary") or data.get("overall_summary"))
+    summary = text_value(
+        find_value(("summary", "overall_summary", "overall_assessment", "assessment_summary", "verdict"))
+    )
     if not summary:
         summary = " ".join(observations[:3]).strip()[:1800] or "Visual analysis completed."
 
     strategy_raw = str(
-        data.get("recommended_modeling_strategy")
-        or data.get("modeling_strategy")
+        find_value(("recommended_modeling_strategy", "modeling_strategy", "recommended_strategy"))
         or "procedural"
     ).lower()
     if "hybrid" in strategy_raw:
@@ -456,6 +504,8 @@ def _normalize_vision_report_payload(data: object) -> dict:
     return {
         "summary": summary,
         "recommended_modeling_strategy": strategy,
+        "recognizable": recognizable,
+        "subject_match_score": subject_match_score,
         "observations": observations[:30],
         "issues": issues[:30],
         "priority_actions": priority_actions[:10],
@@ -501,6 +551,23 @@ class GenericRefineRequest(BaseModel):
     iterations: int = Field(default=1, ge=1, le=3)
 
 
+class SubjectPartSpec(BaseModel):
+    name: str = Field(min_length=1, max_length=100)
+    count: int = Field(default=1, ge=1, le=12)
+    importance: Literal["required", "important", "detail"] = "required"
+    shape_hint: str = Field(default="", max_length=160)
+    placement_hint: str = Field(default="", max_length=240)
+
+
+class SubjectInventory(BaseModel):
+    subject_family: str = Field(default="unknown", max_length=100)
+    silhouette_summary: str = Field(default="", max_length=1200)
+    complexity: Literal["simple", "moderate", "complex"] = "moderate"
+    recommended_strategy: Literal["procedural", "base_mesh", "hybrid"] = "procedural"
+    minimum_distinct_parts: int = Field(default=4, ge=2, le=32)
+    major_parts: list[SubjectPartSpec] = Field(min_length=2, max_length=24)
+
+
 class SceneObjectSpec(BaseModel):
     name: str = Field(min_length=1, max_length=80)
     shape: Literal["sphere", "cube", "cylinder", "cone", "torus", "rod", "beam", "frustum", "wedge"]
@@ -520,6 +587,135 @@ class GenericSceneSpec(BaseModel):
     rationale: str = Field(default="", max_length=2000)
     presentation_base: bool = True
     objects: list[SceneObjectSpec] = Field(min_length=1, max_length=40)
+
+
+def _semantic_name_tokens(value: str) -> set[str]:
+    ignored = {
+        "left", "right", "front", "rear", "back", "top", "bottom",
+        "upper", "lower", "inner", "outer", "main", "small", "large",
+        "primary", "secondary", "part", "object", "segment", "side",
+    }
+    normalized = "".join(character if character.isalnum() else " " for character in value.lower())
+    tokens: set[str] = set()
+    for raw in normalized.split():
+        if len(raw) < 3 or raw.isdigit() or raw in ignored:
+            continue
+        token = raw
+        if len(token) > 4 and token.endswith("ies"):
+            token = token[:-3] + "y"
+        elif len(token) > 4 and token.endswith("es"):
+            token = token[:-2]
+        elif len(token) > 3 and token.endswith("s"):
+            token = token[:-1]
+        if token and token not in ignored:
+            tokens.add(token)
+    return tokens
+
+
+def _scene_inventory_coverage(spec: GenericSceneSpec, inventory: SubjectInventory) -> dict:
+    object_tokens = [
+        (obj.name, _semantic_name_tokens(obj.name))
+        for obj in spec.objects
+    ]
+    part_rows = []
+    required_total = 0
+    required_covered = 0
+    for part in inventory.major_parts:
+        tokens = _semantic_name_tokens(part.name)
+        matches = [
+            name for name, candidate_tokens in object_tokens
+            if tokens and (tokens & candidate_tokens)
+        ]
+        needed = max(1, part.count)
+        covered_count = min(len(matches), needed)
+        covered = covered_count >= needed
+        if part.importance == "required":
+            required_total += needed
+            required_covered += covered_count
+        part_rows.append(
+            {
+                "name": part.name,
+                "importance": part.importance,
+                "required_count": needed,
+                "matched_count": len(matches),
+                "matched_objects": matches[:12],
+                "covered": covered,
+            }
+        )
+
+    ratio = 1.0 if required_total == 0 else required_covered / required_total
+    minimum_parts_ok = len(spec.objects) >= inventory.minimum_distinct_parts
+    missing_required = [
+        f"{row['name']} ({row['matched_count']}/{row['required_count']})"
+        for row in part_rows
+        if row["importance"] == "required" and not row["covered"]
+    ]
+    return {
+        "required_coverage": round(ratio, 4),
+        "minimum_distinct_parts": inventory.minimum_distinct_parts,
+        "object_count": len(spec.objects),
+        "minimum_parts_ok": minimum_parts_ok,
+        "missing_required": missing_required,
+        "parts": part_rows,
+        "passes": bool(ratio >= 0.80 and minimum_parts_ok),
+    }
+
+
+async def _build_subject_inventory(
+    root: Path,
+    job_request: dict,
+    visual_context: dict,
+    research_context: dict,
+) -> SubjectInventory | None:
+    system = (
+        "You create a subject-part inventory for a general 3D modeling agent. Return JSON only matching "
+        "the schema. Identify the minimum set of visually distinct major parts needed for an unfamiliar "
+        "viewer to recognize the requested subject. This is not a benchmark-specific checklist. Use the "
+        "prompt, reference analysis and research evidence together. Group micro-details, but keep separate "
+        "silhouette-defining masses, repeated structural parts, openings/windows/screens, wheels/feet/legs, "
+        "handles/appendages and other identity-critical features. Set counts for repeated parts when visible "
+        "identity depends on them. Recommend base_mesh or hybrid when rearranging simple primitives is unlikely "
+        "to reproduce the subject's silhouette accurately."
+    )
+    prompt = (
+        f"User request: {job_request.get('prompt', '')}\n"
+        f"Intended use: {job_request.get('intended_use', '')}\n"
+        f"Reference analysis: {json.dumps(visual_context, ensure_ascii=False)}\n"
+        f"Research context: {json.dumps(research_context, ensure_ascii=False)}\n"
+        "Return a conservative major-part inventory. Do not add brand trivia or invisible internal components."
+    )
+    try:
+        result = await OllamaProxyClient().chat_json(
+            model=REASONING_MODEL,
+            system=system,
+            prompt=prompt,
+            schema=SubjectInventory.model_json_schema(),
+            temperature=0.0,
+        )
+        inventory = SubjectInventory.model_validate(result.data)
+    except (OllamaProxyError, httpx.HTTPError, ValidationError, ValueError, TypeError) as exc:
+        append_history(root, "subject_inventory_failed", error=str(exc))
+        return None
+
+    payload = {
+        "model": REASONING_MODEL,
+        "inventory": inventory.model_dump(),
+        "created_at": datetime.now(UTC).isoformat(),
+    }
+    (root / "subject-inventory.json").write_text(
+        json.dumps(payload, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    append_history(
+        root,
+        "subject_inventory",
+        family=inventory.subject_family,
+        complexity=inventory.complexity,
+        strategy=inventory.recommended_strategy,
+        minimum_distinct_parts=inventory.minimum_distinct_parts,
+        major_parts=len(inventory.major_parts),
+    )
+    return inventory
 
 
 def _normalize_scene_spec_payload(data: object, fallback_title: str) -> dict:
@@ -1192,7 +1388,7 @@ def _collect_images(root: Path, request: VisionAnalyzeRequest) -> tuple[list[str
 
     # Generic refinement must critique one coherent model version. Mixing older model-vN
     # renders into the current set can make the vision model "fix" geometry that no longer exists.
-    if request.stage == "generic_visual_refinement" and renders:
+    if request.stage.startswith("generic_") and renders:
         versioned: list[tuple[int, Path]] = []
         for path in renders:
             stem = path.stem
@@ -1557,7 +1753,10 @@ async def analyze_vision(job_id: str, request: VisionAnalyzeRequest) -> dict:
         "You are the visual QA component of an autonomous Blender 3D modeling system. "
         "Compare all supplied reference/current-render images together. Focus on geometry, silhouette, "
         "proportions, spatial relationships, missing features, and whether procedural modeling, a generated "
-        "base mesh, or a hybrid workflow is appropriate. Return only JSON matching the supplied schema. "
+        "base mesh, or a hybrid workflow is appropriate. When current renders are supplied, explicitly set "
+        "recognizable=true only if the rendered model clearly reads as the user's requested subject without "
+        "needing the filename or prompt to explain what it is; otherwise set recognizable=false. Set "
+        "subject_match_score from 0.0 to 1.0 when possible. Return only JSON matching the supplied schema. "
         "Do not claim details that cannot be seen."
     )
     prompt = (
@@ -1986,8 +2185,11 @@ async def _build_generic_scene_spec(job_id: str, auto_research: bool) -> Generic
                     include_renders=False,
                     max_images=8,
                     instruction=(
-                        "Describe the subject as primitive-friendly 3D forms. Focus on silhouette, "
-                        "relative dimensions, part placement, major colors, and distinctive appendages."
+                        "Analyze the references for a general 3D reconstruction. State whether the subject is "
+                        "recognizable, describe its overall silhouette and relative dimensions, and explicitly "
+                        "name every major visually distinct part needed for recognition, including repeated "
+                        "structural parts and openings/windows/screens where relevant. Do not optimize the "
+                        "description around the primitive builder; describe the subject faithfully first."
                     ),
                 ),
             )
@@ -2012,6 +2214,14 @@ async def _build_generic_scene_spec(job_id: str, auto_research: bool) -> Generic
         except (OSError, json.JSONDecodeError):
             research_context = {}
 
+    inventory = await _build_subject_inventory(
+        root,
+        job_request,
+        visual_context,
+        research_context,
+    )
+    inventory_context = inventory.model_dump() if inventory is not None else {}
+
     system = (
         "You are a 3D blockout planner. Return a safe declarative scene made only from the allowed "
         "primitive types in the supplied JSON schema. Prefer beam for rectangular articulated segments, "
@@ -2025,10 +2235,12 @@ async def _build_generic_scene_spec(job_id: str, auto_research: bool) -> Generic
         "that are physically connected must touch or overlap their parent geometry; do not leave floating "
         "stems, necks, limbs, handles, shades, ears, tails, or connectors. Coordinates should normally stay "
         "within -8..8. Place the subject around the origin and keep its lowest major geometry near Z=0. "
-        "Use meaningful semantic object names and realistic relative proportions. Treat the provided spatial "
-        "guidance as hard geometry constraints, especially the negative-Y front-face convention. Before "
-        "returning JSON, mentally inventory every requested part and verify both that it exists and that it "
-        "will be visibly exposed from at least one standard QA camera view."
+        "Use meaningful semantic object names and realistic relative proportions. Treat the provided subject "
+        "inventory as an acceptance contract: every required major part and required repeated count must be "
+        "represented by clearly named objects unless the safe primitive vocabulary truly cannot represent it. "
+        "Treat the provided spatial guidance as hard geometry constraints, especially the negative-Y front-face "
+        "convention. Before returning JSON, verify that every required inventory part exists and will be visibly "
+        "exposed from at least one standard QA camera view."
     )
     prompt = (
         f"User request: {job_request.get('prompt', '')}\n"
@@ -2036,6 +2248,7 @@ async def _build_generic_scene_spec(job_id: str, auto_research: bool) -> Generic
         f"Target width mm: {job_request.get('target_width_mm')}\n"
         f"Visual reference analysis: {json.dumps(visual_context, ensure_ascii=False)}\n"
         f"Web research context: {json.dumps(research_context, ensure_ascii=False)}\n"
+        f"Required subject inventory: {json.dumps(inventory_context, ensure_ascii=False)}\n"
         f"Spatial/modeling guidance:\n{_generic_spatial_guidance(str(job_request.get('prompt') or ''))}\n"
         "Create a primitive-based blockout scene specification. If the subject is organic, approximate "
         "it with overlapping ellipsoids/cones while keeping distinct head/body/limb/appendage/face forms "
@@ -2067,17 +2280,95 @@ async def _build_generic_scene_spec(job_id: str, auto_research: bool) -> Generic
     except (OllamaProxyError, httpx.HTTPError, ValidationError, ValueError, TypeError) as exc:
         raise HTTPException(status_code=502, detail=f"Generic scene planning failed: {exc}") from exc
 
+    coverage: dict | None = None
+    if inventory is not None:
+        coverage = _scene_inventory_coverage(spec, inventory)
+        if not coverage["passes"]:
+            repair_system = (
+                "Repair a safe declarative SceneSpec so it covers the supplied general subject inventory. "
+                "Return the full SceneSpec JSON only. Preserve existing useful geometry, but add or split "
+                "objects needed for missing REQUIRED parts and repeated counts. Use semantic object names "
+                "that identify each part. Do not invent subject-specific shortcuts outside the allowed schema. "
+                "Favor silhouette and recognition over cosmetic detail."
+            )
+            repair_prompt = (
+                f"User request: {job_request.get('prompt', '')}\n"
+                f"Required inventory: {json.dumps(inventory.model_dump(), ensure_ascii=False)}\n"
+                f"Current SceneSpec: {json.dumps(spec.model_dump(), ensure_ascii=False)}\n"
+                f"Coverage failure: {json.dumps(coverage, ensure_ascii=False)}\n"
+                f"Spatial/modeling guidance:\n{_generic_spatial_guidance(str(job_request.get('prompt') or ''))}\n"
+                "Return a revised full SceneSpec that covers the missing required parts and counts."
+            )
+            try:
+                repair_result = await OllamaProxyClient().chat_json(
+                    model=REASONING_MODEL,
+                    system=repair_system,
+                    prompt=repair_prompt,
+                    schema=GenericSceneSpec.model_json_schema(),
+                    temperature=0.0,
+                )
+                repaired_payload = _normalize_scene_spec_payload(
+                    repair_result.data,
+                    str(job_request.get("prompt") or "Generated model"),
+                )
+                repaired_payload = _enforce_character_visibility(
+                    repaired_payload,
+                    str(job_request.get("prompt") or ""),
+                )
+                repaired_payload = _enforce_subject_geometry(
+                    repaired_payload,
+                    str(job_request.get("prompt") or ""),
+                )
+                repaired = GenericSceneSpec.model_validate(repaired_payload)
+                repaired_coverage = _scene_inventory_coverage(repaired, inventory)
+                if (
+                    repaired_coverage["passes"]
+                    or repaired_coverage["required_coverage"] > coverage["required_coverage"]
+                ):
+                    spec = repaired
+                    coverage = repaired_coverage
+                    append_history(
+                        root,
+                        "scene_inventory_repair",
+                        required_coverage=coverage["required_coverage"],
+                        object_count=len(spec.objects),
+                        missing_required=coverage["missing_required"],
+                    )
+            except (OllamaProxyError, httpx.HTTPError, ValidationError, ValueError, TypeError) as exc:
+                append_history(root, "scene_inventory_repair_failed", error=str(exc))
+
+        (root / "scene-inventory-coverage.json").write_text(
+            json.dumps(coverage, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        if not coverage["passes"]:
+            append_history(
+                root,
+                "scene_inventory_incomplete",
+                strategy=inventory.recommended_strategy,
+                required_coverage=coverage["required_coverage"],
+                missing_required=coverage["missing_required"],
+            )
+
     payload = {
         "job_id": job_id,
         "model": REASONING_MODEL,
         "endpoint": result.endpoint,
         "usage": result.usage,
+        "inventory": inventory.model_dump() if inventory is not None else None,
+        "inventory_coverage": coverage,
         "spec": spec.model_dump(),
         "created_at": datetime.now(UTC).isoformat(),
     }
     (root / "scene-spec.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
     _write_llm_log(root, "scene-spec", payload)
-    append_history(root, "scene_spec", title=spec.title, object_count=len(spec.objects))
+    append_history(
+        root,
+        "scene_spec",
+        title=spec.title,
+        object_count=len(spec.objects),
+        inventory_coverage=coverage.get("required_coverage") if coverage else None,
+    )
     return spec
 
 
@@ -2174,12 +2465,89 @@ async def _execute_generic_spec(
     }
 
 
+async def _generic_recognizability_check(job_id: str, *, stage: str) -> dict:
+    root = _require_job(job_id)
+    vision = await analyze_vision(
+        job_id,
+        VisionAnalyzeRequest(
+            stage=stage,
+            include_references=True,
+            include_renders=True,
+            max_images=12,
+            instruction=(
+                "This is a strict generic-model quality gate. Compare the ACTIVE model renders with the exact "
+                "user request and any reference images. Set recognizable=true only if an unfamiliar viewer "
+                "would identify the requested subject from the geometry alone. Missing the subject's main "
+                "silhouette, primary body masses, required repeated structural parts, or identity-defining "
+                "features means recognizable=false even if a few colors or primitive parts are plausible. "
+                "If the primitive SceneSpec approach is fundamentally inadequate, recommend base_mesh or hybrid."
+            ),
+        ),
+    )
+    report = vision.get("report") or {}
+    recognizable = report.get("recognizable")
+    append_history(
+        root,
+        "generic_recognizability_gate",
+        stage=stage,
+        recognizable=recognizable,
+        subject_match_score=report.get("subject_match_score"),
+        recommended_strategy=report.get("recommended_modeling_strategy"),
+        summary=report.get("summary"),
+    )
+    return {
+        "recognizable": recognizable,
+        "subject_match_score": report.get("subject_match_score"),
+        "recommended_strategy": report.get("recommended_modeling_strategy"),
+        "summary": report.get("summary"),
+        "vision": vision,
+    }
+
+
 async def generate_generic_scene(job_id: str, request: GenericGenerateRequest) -> dict:
     root = _require_job(job_id)
     _write_status(root, state="running", stage="planning_generic_scene")
     spec = await _build_generic_scene_spec(job_id, request.auto_research)
     version = 1 + len(list((root / "scene").glob("model-v*.blend")))
-    return await _execute_generic_spec(job_id, spec, version=version)
+    build = await _execute_generic_spec(job_id, spec, version=version)
+
+    quality_gate: dict | None = None
+    try:
+        quality_gate = await _generic_recognizability_check(
+            job_id,
+            stage="generic_initial_quality",
+        )
+    except HTTPException as exc:
+        append_history(root, "generic_initial_quality_unavailable", error=str(exc.detail))
+        status = _write_status(
+            root,
+            state="ready",
+            stage="generic_quality_unverified",
+            quality_gate={"recognizable": None, "error": str(exc.detail)},
+        )
+    else:
+        recognizable = quality_gate.get("recognizable")
+        if recognizable is True:
+            next_stage = "generic_initial_recognizable"
+        elif quality_gate.get("recommended_strategy") in {"base_mesh", "hybrid"}:
+            next_stage = "generic_needs_strategy_switch"
+        else:
+            next_stage = "generic_needs_refinement"
+        status = _write_status(
+            root,
+            state="ready",
+            stage=next_stage,
+            quality_gate={
+                "recognizable": recognizable,
+                "subject_match_score": quality_gate.get("subject_match_score"),
+                "recommended_strategy": quality_gate.get("recommended_strategy"),
+                "summary": quality_gate.get("summary"),
+            },
+        )
+
+    build["status"] = status
+    build["quality_gate"] = quality_gate
+    return build
 
 
 @app.post("/v1/jobs/{job_id}/generate", dependencies=[Depends(require_api_token)])
@@ -2189,6 +2557,29 @@ async def generate_generic_scene_api(job_id: str, request: GenericGenerateReques
 
 async def refine_generic_scene(job_id: str, request: GenericRefineRequest) -> dict:
     root = _require_job(job_id)
+    status_path = root / "status.json"
+    if status_path.exists():
+        try:
+            existing_status = json.loads(status_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            existing_status = {}
+        if existing_status.get("stage") == "generic_needs_strategy_switch":
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "The active primitive SceneSpec failed the recognizability gate. "
+                    "Further primitive refinement is disabled; this job needs a mesh/hybrid strategy."
+                ),
+            )
+        if existing_status.get("stage") == "generic_quality_unverified":
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "The active model could not be quality-verified. "
+                    "Refinement is disabled until visual QA is available again."
+                ),
+            )
+
     spec_files = sorted(
         root.glob("scene-spec-v*.json"),
         key=lambda path: path.stat().st_mtime,
@@ -2239,8 +2630,12 @@ async def refine_generic_scene(job_id: str, request: GenericRefineRequest) -> di
         issues = report.get("issues", [])
         high = sum(1 for issue in issues if issue.get("severity") == "high")
         medium = sum(1 for issue in issues if issue.get("severity") == "medium")
-        if high == 0 and medium <= 1:
-            append_history(root, "generic_refinement_stop", reason="visual severity threshold met")
+        if report.get("recognizable") is True and high == 0 and medium <= 1:
+            append_history(
+                root,
+                "generic_refinement_stop",
+                reason="recognizable subject with visual severity threshold met",
+            )
             break
 
         system = (
@@ -2364,7 +2759,7 @@ async def refine_generic_scene(job_id: str, request: GenericRefineRequest) -> di
                 "back-right", "right", "front-right", "top",
             )
         ]
-        status = _write_status(
+        _write_status(
             root,
             state="ready",
             stage="generic_refinement_preserved_previous",
@@ -2376,12 +2771,52 @@ async def refine_generic_scene(job_id: str, request: GenericRefineRequest) -> di
                 "qa": f"model-v{current_version}-qa.json",
             },
         )
+
+    final_quality: dict | None = None
+    try:
+        final_quality = await _generic_recognizability_check(
+            job_id,
+            stage="generic_final_quality",
+        )
+    except HTTPException as exc:
+        append_history(root, "generic_final_quality_unavailable", error=str(exc.detail))
+        final_stage = "generic_quality_unverified"
+        quality_gate = {"recognizable": None, "error": str(exc.detail)}
     else:
-        status = _write_status(root, state="ready", stage="generic_refinement_complete")
+        final_recognizable = final_quality.get("recognizable")
+        quality_gate = {
+            "recognizable": final_recognizable,
+            "subject_match_score": final_quality.get("subject_match_score"),
+            "recommended_strategy": final_quality.get("recommended_strategy"),
+            "summary": final_quality.get("summary"),
+        }
+        if final_recognizable is True:
+            final_stage = (
+                "generic_refinement_preserved_previous"
+                if rejected
+                else "generic_refinement_complete"
+            )
+        else:
+            final_stage = "generic_needs_strategy_switch"
+            append_history(
+                root,
+                "generic_strategy_switch_needed",
+                current_version=current_version,
+                recommended_strategy=final_quality.get("recommended_strategy"),
+                summary=final_quality.get("summary"),
+            )
+
+    status = _write_status(
+        root,
+        state="ready",
+        stage=final_stage,
+        quality_gate=quality_gate,
+    )
     return {
         "job_id": job_id,
         "iterations": completed,
         "rejected": rejected,
+        "quality_gate": final_quality,
         "status": status,
     }
 

@@ -159,6 +159,7 @@ def jobs_snapshot() -> dict:
                     "intended_use": request.get("intended_use", "unknown"),
                     "state": status.get("state", "unknown"),
                     "stage": status.get("stage", "unknown"),
+                    "quality_gate": status.get("quality_gate") if isinstance(status.get("quality_gate"), dict) else None,
                     "updated_at": status.get("updated_at"),
                     "renders": renders,
                     "references": references,
@@ -222,6 +223,7 @@ header{display:flex;align-items:center;justify-content:space-between;gap:16px;ma
 .thumb{aspect-ratio:1;background:#eef1f5;position:relative;overflow:hidden}.thumb img{width:100%;height:100%;object-fit:cover;display:block}.empty-thumb{width:100%;height:100%;display:grid;place-items:center;color:#98a2b3;font-weight:650}
 .card-body{padding:13px}.prompt{font-weight:700;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;min-height:42px}.meta{display:flex;justify-content:space-between;gap:8px;color:var(--muted);font-size:12px;margin-top:8px}.status{font-weight:700}.ready{color:var(--green)}.failed{color:var(--red)}.running{color:#b54708}
 .detail{display:none}.detail.show{display:block}.home.hidden{display:none}.detail-head{display:flex;justify-content:space-between;align-items:flex-start;gap:16px;margin-bottom:18px}.detail-head h2{margin:8px 0 4px;font-size:24px}.detail-head p{margin:0;color:var(--muted)}
+.quality-banner{display:none;margin:0 0 18px;padding:12px 14px;border-radius:10px;border:1px solid #fed7aa;background:#fff7ed;color:#9a3412}.quality-banner.show{display:block}.quality-banner strong{display:block;margin-bottom:3px}
 .render-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}.render{background:#fff;border:1px solid var(--line);border-radius:12px;overflow:hidden}.render img{width:100%;aspect-ratio:1;object-fit:cover;display:block}.render-name{padding:9px 11px;color:var(--muted);font-size:12px}
 .reference-panel{margin-top:22px;background:#fff;border:1px solid var(--line);border-radius:12px;padding:16px}.reference-panel h3{margin:0 0 4px}.reference-help{color:var(--muted);font-size:12px;margin:0 0 12px}.reference-grid{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:12px}.reference-card{border:1px solid var(--line);border-radius:10px;overflow:hidden;background:#fafafa}.reference-card img{display:block;width:100%;aspect-ratio:1;object-fit:cover}.reference-info{padding:8px 9px;font-size:11px;color:var(--muted)}.reference-info strong{display:block;color:var(--text);font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.reference-used{display:inline-block;margin-top:5px;padding:2px 6px;border-radius:999px;background:#dcfce7;color:#166534;font-weight:700;font-size:10px}
 .downloads{margin-top:22px;background:#fff;border:1px solid var(--line);border-radius:12px;padding:16px}.downloads h3{margin:0 0 10px}.file-list{display:flex;gap:8px;flex-wrap:wrap}.file{display:inline-flex;text-decoration:none;color:var(--text);border:1px solid var(--line);border-radius:8px;padding:8px 10px;background:#fafafa}.file b{margin-right:6px}
@@ -241,6 +243,7 @@ header{display:flex;align-items:center;justify-content:space-between;gap:16px;ma
     <div><button class="btn" id="backBtn">← Gallery</button><h2 id="detailTitle">Job</h2><p id="detailMeta"></p></div>
     <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn" id="improveBtn">Improve model</button><button class="btn danger" id="deleteBtn">Delete job</button></div>
   </div>
+  <div class="quality-banner" id="qualityBanner"></div>
   <div class="render-grid" id="renderGrid"></div>
   <section class="reference-panel"><h3>Reference images used</h3><p class="reference-help">These are the saved reference images attached to this job. Images included in the latest vision pass are marked below.</p><div class="reference-grid" id="referenceGrid"></div></section>
   <div class="downloads"><h3>Downloads</h3><div class="file-list" id="fileList"></div></div>
@@ -264,7 +267,7 @@ const byId=id=>document.getElementById(id);
 const esc=value=>String(value??"").replace(/[&<>"']/g,ch=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[ch]));
 const els={
   home:byId("homeView"),detail:byId("detailView"),gallery:byId("jobGallery"),
-  title:byId("detailTitle"),meta:byId("detailMeta"),renders:byId("renderGrid"),references:byId("referenceGrid"),files:byId("fileList"),json:byId("detailJson"),
+  title:byId("detailTitle"),meta:byId("detailMeta"),quality:byId("qualityBanner"),renders:byId("renderGrid"),references:byId("referenceGrid"),files:byId("fileList"),json:byId("detailJson"),
   newBtn:byId("newJobBtn"),dialog:byId("newJobDialog"),cancel:byId("cancelNew"),create:byId("createModel"),
   prompt:byId("jobPrompt"),use:byId("jobUse"),width:byId("jobWidth"),notice:byId("newNotice"),
   back:byId("backBtn"),improve:byId("improveBtn"),deleteBtn:byId("deleteBtn")
@@ -302,6 +305,19 @@ function renderGallery(){
 function renderDetail(job){
   els.title.textContent=job.prompt;
   els.meta.textContent=(job.state||"")+" · "+(job.stage||"")+" · "+job.job_id;
+  const quality=job.quality_gate||null;
+  const blocksRefinement=job.stage==="generic_needs_strategy_switch"||job.stage==="generic_quality_unverified";
+  if(quality?.recognizable===false){
+    const strategy=quality.recommended_strategy?(" Recommended next strategy: "+quality.recommended_strategy+"."):"";
+    els.quality.innerHTML='<strong>Quality gate: current model is not recognizable enough.</strong>'+esc(quality.summary||"The generated geometry does not sufficiently match the requested subject.")+esc(strategy);
+    els.quality.classList.add("show");
+  }else if(job.stage==="generic_quality_unverified"){
+    els.quality.innerHTML='<strong>Quality gate could not verify this model.</strong>Further automatic refinement is paused instead of making blind changes.';
+    els.quality.classList.add("show");
+  }else{
+    els.quality.classList.remove("show");
+    els.quality.textContent="";
+  }
   els.renders.innerHTML=(job.renders||[]).length
     ? job.renders.map(image=>'<div class="render"><a target="_blank" href="'+renderUrl(job.job_id,image.name,image.mtime)+'"><img loading="lazy" src="'+renderUrl(job.job_id,image.name,image.mtime)+'"></a><div class="render-name">'+esc(image.name)+'</div></div>').join("")
     : '<div class="empty-state" style="grid-column:1/-1">No renders yet. This page refreshes automatically while the job runs.</div>';
@@ -320,8 +336,9 @@ function renderDetail(job){
   els.files.innerHTML=files.length
     ? files.map(([category,file])=>'<a class="file" download href="'+fileUrl(job.job_id,category,file.name)+'"><b>↓</b>'+esc(file.name)+'</a>').join("")
     : '<span style="color:var(--muted)">No downloadable model files yet.</span>';
-  els.json.textContent=JSON.stringify({status:{state:job.state,stage:job.stage},references:job.references,latest_vision_images:job.latest_vision_images,qa:job.qa,history:job.history},null,2);
-  els.improve.disabled=busy||!scene.length;
+  els.json.textContent=JSON.stringify({status:{state:job.state,stage:job.stage,quality_gate:job.quality_gate},references:job.references,latest_vision_images:job.latest_vision_images,qa:job.qa,history:job.history},null,2);
+  els.improve.disabled=busy||!scene.length||blocksRefinement;
+  els.improve.title=blocksRefinement?"Primitive refinement is paused because this model needs a different modeling strategy.":"";
   els.deleteBtn.disabled=busy||job.state==="running";
 }
 async function refresh(){

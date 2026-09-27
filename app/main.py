@@ -20,6 +20,7 @@ from PIL import Image, UnidentifiedImageError
 from pydantic import BaseModel, Field, ValidationError
 
 from .builders import pikachu_script
+from .cage_edits import CageEditAction, apply_cage_edit_action
 from .component_assembly import component_assembly_script
 from .config import (
     JOBS_ROOT,
@@ -49,6 +50,7 @@ from .feature_tasks import (
     load_feature_plan,
     mark_component_ready,
     normalize_feature_plan_payload,
+    record_feature_progress,
     save_feature_plan,
 )
 from .generic_builder import generic_scene_script
@@ -894,7 +896,7 @@ class HardSurfaceCageSpec(BaseModel):
     bevel_width: float = Field(default=0.04, ge=0.0, le=0.3)
     bevel_segments: int = Field(default=2, ge=1, le=4)
     smooth: bool = True
-    presentation_base: bool = True
+    presentation_base: bool = False
     stations: list[CageStation] = Field(min_length=4, max_length=16)
     cutters: list[BooleanCutterSpec] = Field(default_factory=list, max_length=16)
     attachments: list[SceneObjectSpec] = Field(default_factory=list, max_length=24)
@@ -5116,7 +5118,12 @@ def _normalize_adaptive_loft_payload(data: object, fallback_title: str) -> dict:
 
 
 
-def _normalize_hard_surface_cage_payload(data: object, fallback_title: str) -> dict:
+def _normalize_hard_surface_cage_payload(
+    data: object,
+    fallback_title: str,
+    *,
+    complexity: str = "simple",
+) -> dict:
     if not isinstance(data, dict):
         raise TypeError("Hard-surface cage response is not a JSON object.")
 
@@ -5158,6 +5165,17 @@ def _normalize_hard_surface_cage_payload(data: object, fallback_title: str) -> d
     axis = str(normalized.get("axis") or normalized.get("length_axis") or "y").lower()
     normalized["axis"] = axis if axis in {"x", "y"} else "y"
 
+    complexity = str(complexity or "simple").lower()
+    if complexity == "complex":
+        min_stations = 8
+        min_profile_points = 6
+    elif complexity == "moderate":
+        min_stations = 6
+        min_profile_points = 5
+    else:
+        min_stations = 4
+        min_profile_points = 4
+
     color = str(normalized.get("color") or normalized.get("base_color") or "#B8BDC6")
     if not (
         len(color) == 7
@@ -5183,7 +5201,10 @@ def _normalize_hard_surface_cage_payload(data: object, fallback_title: str) -> d
         bevel_segments = 2
     normalized["bevel_segments"] = max(1, min(4, bevel_segments))
     normalized["smooth"] = bool(normalized.get("smooth", True))
-    normalized["presentation_base"] = bool(normalized.get("presentation_base", True))
+    # QA renders must contain only model geometry. A display pedestal changes
+    # silhouette judgments and previously made failed vehicle cages look like
+    # mushroom-shaped objects.
+    normalized["presentation_base"] = False
 
     raw_stations = None
     for key in station_keys:
@@ -5301,8 +5322,6 @@ def _normalize_hard_surface_cage_payload(data: object, fallback_title: str) -> d
             profile.append([max(-10.0, min(10.0, raw_width)), z])
 
         if saw_negative_width:
-            # Some models still emit a full symmetric contour. Convert it into
-            # the positive half a human would actually model before Mirror.
             positive = [[abs(width), height] for width, height in profile if width >= -0.001]
             if len(positive) < 3:
                 positive = [[abs(width), height] for width, height in profile]
@@ -5323,15 +5342,17 @@ def _normalize_hard_surface_cage_payload(data: object, fallback_title: str) -> d
             continue
         deduped.append(station)
 
-    # Three sections are common in terse model output. A human would add loop
-    # cuts between them, so synthesize midpoint stations instead of throwing
-    # away the whole plan.
+    # Keep the existing human-style midpoint behavior for terse three-section
+    # output, then apply a subject-dependent minimum geometry budget below.
     if 2 <= len(deduped) < 4:
         expanded: list[dict] = []
         for index, station in enumerate(deduped[:-1]):
             nxt = deduped[index + 1]
             expanded.append(station)
-            target_size = max(4, min(8, max(len(station["profile"]), len(nxt["profile"]))))
+            target_size = max(
+                min_profile_points,
+                min(8, max(len(station["profile"]), len(nxt["profile"]))),
+            )
             a = resample_profile(station["profile"], target_size)
             b = resample_profile(nxt["profile"], target_size)
             expanded.append(
@@ -5349,13 +5370,33 @@ def _normalize_hard_surface_cage_payload(data: object, fallback_title: str) -> d
     if len(deduped) < 4:
         raise ValueError("Hard-surface cage needs at least two usable reference stations.")
 
-    # Resample every profile to one stable row count instead of dropping valid
-    # stations just because a model used five points in one section and six in another.
-    target_size = max(4, min(8, round(sum(len(s["profile"]) for s in deduped) / len(deduped))))
+    target_size = max(
+        min_profile_points,
+        min(8, round(sum(len(s["profile"]) for s in deduped) / len(deduped))),
+    )
     for station in deduped:
         station["profile"] = resample_profile(station["profile"], target_size)
         station["profile"][0][0] = 0.0
         station["profile"][-1][0] = 0.0
+
+    # Do not fabricate missing shape information by interpolating a sparse
+    # cage. If the planner did not provide enough independent control sections
+    # for the declared complexity, reject the plan and let another model/pass
+    # produce a genuinely richer cage.
+    if len(deduped) < min_stations:
+        raise ValueError(
+            f"Hard-surface cage is under-specified for {complexity} geometry: "
+            f"{len(deduped)} stations supplied; at least {min_stations} required."
+        )
+
+    axis_span = deduped[-1]["position"] - deduped[0]["position"]
+    max_half_width = max(point[0] for station in deduped for point in station["profile"])
+    min_z = min(point[1] for station in deduped for point in station["profile"])
+    max_z = max(point[1] for station in deduped for point in station["profile"])
+    height_span = max_z - min_z
+    if axis_span < 0.5 or max_half_width < 0.1 or height_span < 0.2:
+        raise ValueError("Hard-surface cage has degenerate body dimensions.")
+
     normalized["stations"] = deduped[:16]
 
     raw_cutters = (
@@ -5396,7 +5437,43 @@ def _normalize_hard_surface_cage_payload(data: object, fallback_title: str) -> d
                 )
             except (TypeError, ValueError):
                 continue
-    normalized["cutters"] = cutters
+
+    # A planner that collapses several unrelated boolean operations onto the
+    # same point is emitting placeholder geometry. Reject it rather than
+    # silently guessing what the cutters were supposed to mean.
+    if len(cutters) >= 3:
+        cluster_tolerance = max(axis_span, max_half_width * 2.0, height_span) * 0.025
+        for index, first in enumerate(cutters):
+            collapsed = [first]
+            for second in cutters[index + 1:]:
+                distance = sum(
+                    (float(first["location"][axis]) - float(second["location"][axis])) ** 2
+                    for axis in range(3)
+                ) ** 0.5
+                if distance <= cluster_tolerance:
+                    collapsed.append(second)
+            if len(collapsed) >= 3:
+                names = ", ".join(item["name"] for item in collapsed[:4])
+                raise ValueError(
+                    "Hard-surface cage contains three or more cutters collapsed "
+                    f"onto one location ({names}); re-plan with deliberate cutter placement."
+                )
+
+    # Exact duplicate cutter transforms are redundant and can damage topology.
+    deduped_cutters: list[dict] = []
+    seen_cutters: set[tuple] = set()
+    for item in cutters:
+        key = (
+            item["shape"],
+            *(round(float(value), 4) for value in item["location"]),
+            *(round(float(value), 4) for value in item["scale"]),
+            *(round(float(value), 3) for value in item["rotation_deg"]),
+        )
+        if key in seen_cutters:
+            continue
+        seen_cutters.add(key)
+        deduped_cutters.append(item)
+    normalized["cutters"] = deduped_cutters
 
     attachments = (
         normalized.get("attachments")
@@ -5414,6 +5491,7 @@ def _normalize_hard_surface_cage_payload(data: object, fallback_title: str) -> d
     )
     normalized["attachments"] = normalized_attachments["objects"]
     return normalized
+
 
 def _active_hard_surface_cage_spec(
     root: Path,
@@ -5448,6 +5526,13 @@ async def _build_hard_surface_cage_spec(
     feature_plan = await _ensure_feature_plan(job_id, inventory)
     feature_plan_context = feature_plan.model_dump() if feature_plan is not None else {}
     feature_context = feature_task.model_dump() if feature_task is not None else {}
+    subject_complexity = inventory.complexity if inventory is not None else "moderate"
+    if subject_complexity == "complex":
+        min_cage_stations, min_profile_points = 8, 6
+    elif subject_complexity == "moderate":
+        min_cage_stations, min_profile_points = 6, 5
+    else:
+        min_cage_stations, min_profile_points = 4, 4
 
     status_payload = _read_status(root)
     active = _active_hard_surface_cage_spec(root, status_payload)
@@ -5485,7 +5570,12 @@ async def _build_hard_surface_cage_spec(
         "isolated child job and must NOT be faked as an attachment. Preserve accepted/best geometry. If a current cage "
         "is supplied, revise it rather than starting over unless its topology is fundamentally unsuitable. Front is "
         "negative Y and Z is up. Favor proportion, silhouette and major construction lines over surface decoration. "
-        "Emit AT LEAST 5 stations. Example SHAPE ONLY (not object-specific): "
+        f"Geometry budget for this subject: emit AT LEAST {min_cage_stations} stations and "
+        f"AT LEAST {min_profile_points} points per half-profile. Do not collapse distinct wheelbase, "
+        "cabin, nose and tail transitions into a five-section blob. "
+        "Every boolean cutter must have a deliberate non-placeholder location and orientation. Distinct cutters "
+        "must occupy distinct intended regions; do not collapse unrelated cuts onto a shared default coordinate. "
+        "Emit the requested geometry budget before cosmetic details. Example SHAPE ONLY (not object-specific): "
         "{\"stations\":[{\"position\":-3,\"profile\":[[0,-0.5],[1,-0.4],[1,0.4],[0.6,1.0],[0,1.2]]},"
         "{\"position\":-1,\"profile\":[[0,-0.5],[1.1,-0.4],[1.0,0.5],[0.7,1.1],[0,1.3]]},"
         "{\"position\":0,\"profile\":[[0,-0.5],[1.1,-0.4],[1.0,0.5],[0.7,1.1],[0,1.3]]},"
@@ -5537,6 +5627,7 @@ async def _build_hard_surface_cage_spec(
             normalized = _normalize_hard_surface_cage_payload(
                 result.data,
                 str(job_request.get("prompt") or "Hard-surface cage"),
+                complexity=subject_complexity,
             )
             spec = HardSurfaceCageSpec.model_validate(normalized)
             if job_request.get("component_job") is True:
@@ -5583,6 +5674,7 @@ async def _execute_hard_surface_cage(
     spec: HardSurfaceCageSpec,
     *,
     version: int,
+    activate_status: bool = True,
 ) -> dict:
     root = _require_job(job_id)
     prefix = f"model-v{version}"
@@ -5664,28 +5756,543 @@ async def _execute_hard_surface_cage(
         blend=blend_path.name,
         qa=qa_path.name,
     )
-    status = _write_status(
-        root,
-        state="ready",
-        stage=f"hard_surface_cage_rendered_v{version}",
-        modeling_strategy="hard_surface_cage",
-        generic_model={
-            "version": version,
-            "title": spec.title,
-            "blend": blend_path.name,
-            "renders": expected,
-            "qa": qa_path.name,
-            "strategy": "hard_surface_cage",
-        },
-    )
+    candidate_model = {
+        "version": version,
+        "title": spec.title,
+        "blend": blend_path.name,
+        "renders": expected,
+        "qa": qa_path.name,
+        "strategy": "hard_surface_cage",
+    }
+    status_values: dict[str, object] = {
+        "state": "ready",
+        "stage": f"hard_surface_cage_rendered_v{version}",
+        "modeling_strategy": "hard_surface_cage",
+    }
+    if activate_status:
+        status_values["generic_model"] = candidate_model
+    status = _write_status(root, **status_values)
     return {
         "job_id": job_id,
         "status": status,
+        "candidate_model": candidate_model,
         "strategy": "hard_surface_cage",
         "spec": spec.model_dump(),
         "renders": expected,
         "worker_result": result,
     }
+
+
+def _working_hard_surface_cage_spec(
+    root: Path,
+    status_payload: dict,
+) -> tuple[int, HardSurfaceCageSpec] | None:
+    """Return the editable cage track without confusing it with the best active model."""
+
+    candidates: list[int] = []
+    working_version = status_payload.get("working_cage_version")
+    if isinstance(working_version, int):
+        candidates.append(working_version)
+
+    active = _active_hard_surface_cage_spec(root, status_payload)
+    if active is not None and active[0] not in candidates:
+        candidates.append(active[0])
+
+    for path in sorted(
+        root.glob("cage-spec-v*.json"),
+        key=lambda item: item.stat().st_mtime,
+        reverse=True,
+    ):
+        match = re.search(r"cage-spec-v(\d+)\.json$", path.name)
+        if match:
+            version = int(match.group(1))
+            if version not in candidates:
+                candidates.append(version)
+
+    for version in candidates:
+        path = root / f"cage-spec-v{version}.json"
+        if not path.is_file():
+            continue
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            spec_payload = payload.get("spec") if isinstance(payload, dict) else None
+            return version, HardSurfaceCageSpec.model_validate(spec_payload)
+        except (OSError, json.JSONDecodeError, ValidationError, TypeError):
+            continue
+    return None
+
+
+def _recent_cage_edit_events(root: Path, limit: int = 6) -> list[dict]:
+    events = [
+        item
+        for item in load_history(root)
+        if item.get("event") in {
+            "cage_edit_decision",
+            "cage_edit_kept",
+            "cage_edit_rejected",
+        }
+    ]
+    return events[-limit:]
+
+
+async def _decide_hard_surface_cage_edit(
+    job_id: str,
+    *,
+    baseline_version: int,
+    spec: HardSurfaceCageSpec,
+    feature_task: FeatureTask | None,
+) -> CageEditAction:
+    root = _require_job(job_id)
+    job_request = json.loads((root / "request.json").read_text(encoding="utf-8"))
+    status_payload = _read_status(root)
+    quality_gate = (
+        status_payload.get("quality_gate")
+        if isinstance(status_payload.get("quality_gate"), dict)
+        else {}
+    )
+
+    views = (
+        _feature_diagnostic_views(feature_task)
+        if feature_task is not None
+        else ("front", "front-left", "left", "back", "right", "front-right", "top")
+    )
+
+    reference_paths: list[Path] = []
+    for record in _usable_reference_index(root):
+        stored_name = str(record.get("stored_name") or "")
+        if not stored_name:
+            continue
+        path = root / "references" / Path(stored_name).name
+        if path.is_file() and path.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp"}:
+            reference_paths.append(path)
+    reference_paths = sorted(reference_paths, key=lambda path: path.stat().st_mtime)[-4:]
+
+    baseline_paths = [
+        root / "renders" / f"model-v{baseline_version}-{view}.png"
+        for view in views
+    ]
+    if not reference_paths:
+        raise HTTPException(
+            status_code=409,
+            detail="Iterative visual editing requires at least one verified reference image.",
+        )
+    if not all(path.is_file() for path in baseline_paths):
+        raise HTTPException(
+            status_code=409,
+            detail="Iterative visual editing requires complete baseline renders.",
+        )
+
+    image_paths = reference_paths + baseline_paths
+    images = _encode_vision_images(image_paths)
+    labels = [f"{path.parent.name}/{path.name}" for path in image_paths]
+
+    station_summary = [
+        {
+            "index": index,
+            "position": station.position,
+            "profile": station.profile,
+        }
+        for index, station in enumerate(spec.stations)
+    ]
+    cutter_summary = [
+        {
+            "index": index,
+            "name": cutter.name,
+            "shape": cutter.shape,
+            "location": cutter.location,
+            "scale": cutter.scale,
+            "rotation_deg": cutter.rotation_deg,
+        }
+        for index, cutter in enumerate(spec.cutters)
+    ]
+    feature_context = feature_task.model_dump() if feature_task is not None else {}
+    recent_events = _recent_cage_edit_events(root)
+
+    system = (
+        "You are the visual edit director for an iterative Blender modeling agent. "
+        "You are NOT generating a replacement mesh. Inspect the verified references and the CURRENT baseline renders, "
+        "identify the single highest-impact visible geometric error, and choose exactly ONE bounded edit from the "
+        "CageEditAction schema. The editing vocabulary is generic and index-based. Prefer the smallest edit likely to "
+        "make a visible improvement. Use relative factors/fractions instead of inventing absolute coordinates. "
+        "reshape_station changes one entire cross-section; reshape_profile_point changes one local profile point; "
+        "insert_station adds control where silhouette curvature is under-resolved; remove_station removes a harmful "
+        "intermediate section; adjust_cutter changes one existing opening/cut; remove_cutter removes a clearly harmful "
+        "cut. Choose replan_representation only when the current cage topology/representation cannot plausibly be "
+        "improved with bounded edits. Protect unrelated good geometry. Do not repeat a recent rejected edit with "
+        "effectively the same target and parameters. Return JSON only matching the schema."
+    )
+    prompt = (
+        f"Exact user request: {job_request.get('prompt', '')}\n"
+        f"Intended use: {job_request.get('intended_use', '')}\n"
+        f"Working baseline version: {baseline_version}\n"
+        f"ACTIVE FEATURE (if any): {json.dumps(feature_context, ensure_ascii=False)}\n"
+        f"Current quality critique: {json.dumps(quality_gate, ensure_ascii=False)}\n"
+        f"Station indices and geometry: {json.dumps(station_summary, ensure_ascii=False)}\n"
+        f"Cutter indices and geometry: {json.dumps(cutter_summary, ensure_ascii=False)}\n"
+        f"Recent edit outcomes: {json.dumps(recent_events, ensure_ascii=False)}\n"
+        f"Images in order: {labels}\n"
+        "Reference images come first, followed by CURRENT baseline renders. Choose one change only. "
+        "State the visible error in reason and the expected improvement in expected_visual_effect."
+    )
+
+    client = OllamaProxyClient()
+    errors: list[str] = []
+    for candidate_model in VISION_MODELS:
+        try:
+            result = await client.chat_json(
+                model=candidate_model,
+                system=system,
+                prompt=prompt,
+                images=images,
+                schema=CageEditAction.model_json_schema(),
+                temperature=0.0,
+                num_predict=2048,
+            )
+            action = CageEditAction.model_validate(result.data)
+        except (OllamaProxyError, httpx.HTTPError, ValidationError, ValueError, TypeError) as exc:
+            errors.append(f"{candidate_model}: {exc}")
+            continue
+
+        payload = {
+            "job_id": job_id,
+            "model": candidate_model,
+            "baseline_version": baseline_version,
+            "images": labels,
+            "feature": feature_context,
+            "action": action.model_dump(),
+            "created_at": datetime.now(UTC).isoformat(),
+        }
+        _write_llm_log(root, "cage-edit-decision", payload)
+        append_history(
+            root,
+            "cage_edit_decision",
+            baseline_version=baseline_version,
+            feature_id=feature_task.id if feature_task is not None else None,
+            operation=action.operation,
+            target_index=action.target_index,
+            point_index=action.point_index,
+            reason=action.reason,
+            expected_visual_effect=action.expected_visual_effect,
+            model=candidate_model,
+        )
+        return action
+
+    raise HTTPException(
+        status_code=502,
+        detail="Visual cage edit decision failed across configured vision models: "
+        + " | ".join(errors[-4:]),
+    )
+
+
+async def _refine_hard_surface_cage_incrementally(
+    job_id: str,
+    *,
+    feature_task: FeatureTask | None,
+) -> dict:
+    """Run one observe -> edit -> render -> compare -> keep/revert iteration."""
+
+    root = _require_job(job_id)
+    previous_status = _read_status(root)
+    working = _working_hard_surface_cage_spec(root, previous_status)
+    if working is None:
+        return await _generate_hard_surface_cage(
+            job_id,
+            reason=(
+                "No editable hard-surface cage baseline exists yet. Create the initial "
+                "reference-driven cage before iterative visual editing."
+            ),
+            feature_task=feature_task,
+        )
+
+    baseline_version, baseline_spec = working
+    stall_count = int(previous_status.get("cage_edit_stall_count") or 0)
+    if stall_count >= 4:
+        append_history(
+            root,
+            "cage_edit_escalation",
+            working_version=baseline_version,
+            stall_count=stall_count,
+            reason="Four bounded visual edits failed to improve the working cage.",
+        )
+        return await _generate_hard_surface_cage(
+            job_id,
+            reason=(
+                "Bounded visual editing stalled for four consecutive candidates. "
+                "Re-plan the hard-surface representation from the references, preserving "
+                "the best active model and addressing the accumulated visual critiques."
+            ),
+            feature_task=feature_task,
+        )
+
+    action = await _decide_hard_surface_cage_edit(
+        job_id,
+        baseline_version=baseline_version,
+        spec=baseline_spec,
+        feature_task=feature_task,
+    )
+    if action.operation == "replan_representation":
+        append_history(
+            root,
+            "cage_edit_escalation",
+            working_version=baseline_version,
+            stall_count=stall_count,
+            reason=action.reason,
+        )
+        return await _generate_hard_surface_cage(
+            job_id,
+            reason=(
+                "The visual edit director determined that bounded edits are not sufficient. "
+                + action.reason
+            ),
+            feature_task=feature_task,
+        )
+
+    try:
+        edited_payload = apply_cage_edit_action(
+            baseline_spec.model_dump(),
+            action,
+        )
+        candidate_spec = HardSurfaceCageSpec.model_validate(edited_payload)
+    except (ValidationError, ValueError, TypeError) as exc:
+        append_history(
+            root,
+            "cage_edit_rejected",
+            baseline_version=baseline_version,
+            candidate_version=None,
+            operation=action.operation,
+            reason=f"Edit could not be applied safely: {exc}",
+        )
+        status = _write_status(
+            root,
+            state="ready",
+            stage="hard_surface_cage_needs_refinement",
+            modeling_strategy="hard_surface_cage",
+            working_cage_version=baseline_version,
+            cage_edit_stall_count=stall_count + 1,
+        )
+        return {
+            "job_id": job_id,
+            "strategy": "hard_surface_cage",
+            "baseline_version": baseline_version,
+            "candidate_version": None,
+            "kept": False,
+            "action": action.model_dump(),
+            "comparison": None,
+            "status": status,
+        }
+
+    version = 1 + max(
+        [
+            int(match.group(1))
+            for path in (root / "scene").glob("model-v*.blend")
+            if (match := re.search(r"model-v(\d+)\.blend$", path.name))
+        ]
+        or [0]
+    )
+    build = await _execute_hard_surface_cage(
+        job_id,
+        candidate_spec,
+        version=version,
+        activate_status=False,
+    )
+    comparison = await _compare_generic_versions(
+        root,
+        baseline_version=baseline_version,
+        candidate_version=version,
+    )
+    improved = comparison.get("candidate_is_better") is True
+
+    feature_evaluation: dict | None = None
+    feature_complete = False
+    recognizability: dict | None = None
+    if feature_task is not None:
+        feature_evaluation = await _evaluate_feature_candidate(
+            job_id,
+            feature_task,
+            baseline_version=baseline_version,
+            candidate_version=version,
+        )
+        feature_complete = _feature_evaluation_accepts(feature_task, feature_evaluation)
+    elif improved:
+        try:
+            recognizability = await _generic_recognizability_check(
+                job_id,
+                stage="iterative_cage_quality",
+            )
+        except HTTPException as exc:
+            recognizability = {
+                "recognizable": None,
+                "subject_match_score": None,
+                "summary": str(exc.detail),
+                "director_action": "refine_mesh",
+            }
+
+    active_model = (
+        dict(previous_status.get("generic_model"))
+        if isinstance(previous_status.get("generic_model"), dict)
+        else None
+    )
+    active_version = (
+        active_model.get("version")
+        if isinstance(active_model, dict) and isinstance(active_model.get("version"), int)
+        else None
+    )
+
+    better_than_active = False
+    if improved:
+        if active_version is None or active_version == baseline_version:
+            better_than_active = True
+        elif active_version != version:
+            active_comparison = await _compare_generic_versions(
+                root,
+                baseline_version=active_version,
+                candidate_version=version,
+            )
+            better_than_active = active_comparison.get("candidate_is_better") is True
+
+    if improved:
+        candidate_model = build.get("candidate_model")
+        if recognizability and recognizability.get("recognizable") is True:
+            better_than_active = True
+        next_active_model = candidate_model if better_than_active else active_model
+        quality = dict(
+            previous_status.get("quality_gate")
+            if isinstance(previous_status.get("quality_gate"), dict)
+            else {}
+        )
+        if feature_evaluation:
+            quality["summary"] = feature_evaluation.get("summary") or comparison.get("summary")
+            quality["active_feature_id"] = feature_task.id
+            quality["active_feature_passed"] = feature_complete
+            if feature_evaluation.get("subject_recognizable") is not None:
+                quality["recognizable"] = bool(feature_evaluation.get("subject_recognizable"))
+            if feature_evaluation.get("reference_match_score") is not None:
+                quality["subject_match_score"] = feature_evaluation.get("reference_match_score")
+        elif recognizability:
+            quality.update(recognizability)
+            quality["summary"] = recognizability.get("summary") or comparison.get("summary")
+        else:
+            quality["summary"] = comparison.get("summary") or quality.get("summary")
+        quality["representation"] = "hard_surface_cage"
+        quality["working_cage_version"] = version
+        quality["candidate_improved"] = True
+
+        status = _write_status(
+            root,
+            state="ready",
+            stage=(
+                "hard_surface_cage_recognizable"
+                if recognizability and recognizability.get("recognizable") is True
+                else "hard_surface_cage_feature_complete"
+                if feature_complete
+                else "hard_surface_cage_needs_refinement"
+            ),
+            modeling_strategy="hard_surface_cage",
+            generic_model=next_active_model,
+            working_cage_version=version,
+            cage_edit_stall_count=0,
+            quality_gate=quality,
+        )
+        append_history(
+            root,
+            "cage_edit_kept",
+            baseline_version=baseline_version,
+            candidate_version=version,
+            active_version=(
+                next_active_model.get("version")
+                if isinstance(next_active_model, dict)
+                else None
+            ),
+            operation=action.operation,
+            target_index=action.target_index,
+            point_index=action.point_index,
+            feature_id=feature_task.id if feature_task is not None else None,
+            feature_complete=feature_complete,
+            summary=comparison.get("summary"),
+        )
+
+        if feature_task is not None:
+            if feature_complete:
+                finish_feature(
+                    root,
+                    feature_task.id,
+                    accepted=True,
+                    version=version,
+                    summary=str(feature_evaluation.get("summary") or ""),
+                    verified=True,
+                    acceptance_score=float(
+                        feature_evaluation.get("reference_match_score") or 0.0
+                    ),
+                    acceptance_model=(
+                        str(feature_evaluation.get("model"))
+                        if feature_evaluation.get("model")
+                        else None
+                    ),
+                )
+            else:
+                record_feature_progress(
+                    root,
+                    feature_task.id,
+                    version=version,
+                    summary=str(
+                        (feature_evaluation or {}).get("summary")
+                        or comparison.get("summary")
+                        or action.expected_visual_effect
+                    ),
+                )
+    else:
+        status = _write_status(
+            root,
+            state="ready",
+            stage="hard_surface_cage_needs_refinement",
+            modeling_strategy="hard_surface_cage",
+            generic_model=active_model,
+            working_cage_version=baseline_version,
+            cage_edit_stall_count=stall_count + 1,
+            quality_gate={
+                **(
+                    previous_status.get("quality_gate")
+                    if isinstance(previous_status.get("quality_gate"), dict)
+                    else {}
+                ),
+                "representation": "hard_surface_cage",
+                "working_cage_version": baseline_version,
+                "candidate_improved": False,
+                "last_rejected_candidate_version": version,
+                "summary": comparison.get("summary"),
+            },
+        )
+        append_history(
+            root,
+            "cage_edit_rejected",
+            baseline_version=baseline_version,
+            candidate_version=version,
+            operation=action.operation,
+            target_index=action.target_index,
+            point_index=action.point_index,
+            feature_id=feature_task.id if feature_task is not None else None,
+            reason=comparison.get("summary"),
+        )
+        if feature_task is not None:
+            record_feature_progress(
+                root,
+                feature_task.id,
+                version=baseline_version,
+                summary=(
+                    "Candidate reverted; feature remains active. "
+                    + str(comparison.get("summary") or "")
+                ),
+            )
+
+    build["baseline_version"] = baseline_version
+    build["candidate_version"] = version
+    build["kept"] = improved
+    build["action"] = action.model_dump()
+    build["comparison"] = comparison
+    build["feature_evaluation"] = feature_evaluation
+    build["recognizability"] = recognizability
+    build["status"] = status
+    return build
 
 
 async def _generate_hard_surface_cage(
@@ -5805,6 +6412,8 @@ async def _generate_hard_surface_cage(
             ),
             modeling_strategy="hard_surface_cage",
             generic_model=active_model,
+            working_cage_version=version,
+            cage_edit_stall_count=0,
             quality_gate={
                 **quality,
                 "representation": "hard_surface_cage",
@@ -5829,6 +6438,8 @@ async def _generate_hard_surface_cage(
             stage="hard_surface_cage_needs_replan",
             modeling_strategy="hard_surface_cage",
             generic_model=previous_model,
+            working_cage_version=version,
+            cage_edit_stall_count=0,
             quality_gate={
                 **quality,
                 "recognizable": False,
@@ -7099,59 +7710,14 @@ async def refine_generic_scene(job_id: str, request: GenericRefineRequest) -> di
     if current_strategy == "hard_surface_cage" or status_payload.get("stage") in {
         "hard_surface_cage_needs_refinement",
         "hard_surface_cage_needs_replan",
+        "hard_surface_cage_feature_complete",
     }:
         feature_task = begin_feature(root)
         if feature_task is not None and feature_task.build_mode == "component_job":
             return await _build_and_install_component_feature(job_id, feature_task)
 
-        if feature_task is not None:
-            reason = (
-                f"Work the queued feature sub-job with human-style Blender cage editing: {feature_task.name}.\n"
-                + "\n".join(
-                    [
-                        *feature_task.acceptance_criteria,
-                        *[f"Target region: {region}" for region in feature_task.target_regions],
-                        *[f"Protect/own scope: {scope}" for scope in feature_task.owner_scope],
-                    ]
-                )
-            )
-        else:
-            decision = await _ask_modeling_director(
-                job_id,
-                stage="hard_surface_cage_continuation",
-                current_strategy="hard_surface_cage",
-                include_renders=True,
-            )
-            if decision["action"] == "accept":
-                quality_gate = {
-                    "recognizable": True,
-                    "subject_match_score": decision.get("subject_match_score"),
-                    "recommended_strategy": "base_mesh",
-                    "summary": decision.get("summary"),
-                    "director_action": "accept",
-                    "instructions": decision.get("instructions") or [],
-                }
-                status = _write_status(
-                    root,
-                    state="ready",
-                    stage="hard_surface_cage_recognizable",
-                    modeling_strategy="hard_surface_cage",
-                    quality_gate=quality_gate,
-                )
-                return {
-                    "job_id": job_id,
-                    "iterations": [],
-                    "rejected": None,
-                    "quality_gate": quality_gate,
-                    "status": status,
-                }
-            reason = (decision.get("summary") or "") + "\n" + "\n".join(
-                decision.get("instructions") or []
-            )
-
-        return await _generate_hard_surface_cage(
+        return await _refine_hard_surface_cage_incrementally(
             job_id,
-            reason=reason,
             feature_task=feature_task,
         )
 

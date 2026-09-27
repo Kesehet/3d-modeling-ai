@@ -143,6 +143,51 @@ def build_cage():
     return body
 
 
+def object_bounds(obj):
+    corners = [obj.matrix_world @ Vector(corner) for corner in obj.bound_box]
+    return (
+        Vector((
+            min(point.x for point in corners),
+            min(point.y for point in corners),
+            min(point.z for point in corners),
+        )),
+        Vector((
+            max(point.x for point in corners),
+            max(point.y for point in corners),
+            max(point.z for point in corners),
+        )),
+    )
+
+
+def bounds_overlap(a_min, a_max, b_min, b_max, margin=0.01):
+    return all(
+        a_min[index] <= b_max[index] + margin
+        and b_min[index] <= a_max[index] + margin
+        for index in range(3)
+    )
+
+
+def cleanup_body_mesh(body):
+    bpy.context.view_layer.objects.active = body
+    body.select_set(True)
+    if bpy.context.object.mode != "OBJECT":
+        bpy.ops.object.mode_set(mode="OBJECT")
+    # Repair duplicated/degenerate vertices created by mirrored boolean passes
+    # before export/QA. This is a cleanup pass, not a substitute for visual QA.
+    mesh = body.data
+    mesh.validate(verbose=False, clean_customdata=True)
+    bm = bmesh.new()
+    bm.from_mesh(mesh)
+    if bm.verts:
+        bmesh.ops.remove_doubles(bm, verts=bm.verts, dist=0.0005)
+    if bm.faces:
+        bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
+    bm.to_mesh(mesh)
+    bm.free()
+    mesh.validate(verbose=False, clean_customdata=True)
+    mesh.update()
+
+
 def add_cutter(body, item):
     shape = str(item.get("shape") or "cube").lower()
     location = tuple(float(v) for v in item.get("location", [0, 0, 0]))
@@ -162,6 +207,12 @@ def add_cutter(body, item):
     cutter.rotation_euler = rotation
     bpy.ops.object.transform_apply(location=False, rotation=False, scale=True)
 
+    body_min, body_max = object_bounds(body)
+    cutter_min, cutter_max = object_bounds(cutter)
+    if not bounds_overlap(body_min, body_max, cutter_min, cutter_max):
+        bpy.data.objects.remove(cutter, do_unlink=True)
+        return False
+
     bpy.context.view_layer.objects.active = body
     body.select_set(True)
     modifier = body.modifiers.new("Boolean " + cutter.name, "BOOLEAN")
@@ -170,6 +221,9 @@ def add_cutter(body, item):
     modifier.object = cutter
     try:
         bpy.ops.object.modifier_apply(modifier=modifier.name)
+        body.data.validate(verbose=False, clean_customdata=True)
+        body.data.update()
+        return True
     finally:
         bpy.data.objects.remove(cutter, do_unlink=True)
 
@@ -236,14 +290,17 @@ def add_attachment(item):
 
 
 body = build_cage()
+applied_cutters = 0
 for item in (SPEC.get("cutters") or [])[:16]:
-    add_cutter(body, item)
+    if add_cutter(body, item):
+        applied_cutters += 1
+cleanup_body_mesh(body)
 
 objects = [body]
 for item in (SPEC.get("attachments") or [])[:24]:
     objects.append(add_attachment(item))
 
-if SPEC.get("presentation_base", True):
+if SPEC.get("presentation_base", False):
     all_points = []
     for obj in objects:
         all_points.extend(obj.matrix_world @ Vector(corner) for corner in obj.bound_box)
@@ -350,6 +407,9 @@ qa = {
     "loose_vertices": loose_vertices,
     "scene_dimensions_blender_units": [round(float(value), 4) for value in size],
     "print_ready": bool(len(objects) == 1 and non_manifold == 0 and loose_vertices == 0),
+    "requested_cutters": len((SPEC.get("cutters") or [])[:16]),
+    "applied_cutters": applied_cutters,
+    "presentation_base": bool(SPEC.get("presentation_base", False)),
     "note": "Hard-surface cage QA. Separate attachments may require union/repair for printing.",
 }
 Path(QA_PATH).write_text(json.dumps(qa, indent=2), encoding="utf-8")

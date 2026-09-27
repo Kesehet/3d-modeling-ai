@@ -542,6 +542,34 @@ def begin_feature(root: Path) -> FeatureTask | None:
     return task
 
 
+def record_feature_progress(
+    root: Path,
+    feature_id: str,
+    *,
+    version: int,
+    summary: str = "",
+) -> FeaturePlan | None:
+    """Keep an improving feature active without falsely accepting or failing it."""
+
+    plan = load_feature_plan(root)
+    if plan is None:
+        return None
+    task = next((feature for feature in plan.features if feature.id == feature_id), None)
+    if task is None:
+        return plan
+
+    task.status = "running"
+    task.last_summary = summary[:1000]
+    task.last_error = ""
+    task.accepted_version = None
+    task.acceptance_verified = False
+    task.acceptance_score = 0.0
+    task.acceptance_model = None
+    plan.active_feature_id = task.id
+    save_feature_plan(root, plan)
+    return plan
+
+
 def finish_feature(
     root: Path,
     feature_id: str,

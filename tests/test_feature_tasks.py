@@ -8,6 +8,7 @@ from app.feature_tasks import (
     load_feature_plan,
     mark_component_ready,
     normalize_feature_plan_payload,
+    record_feature_progress,
     save_feature_plan,
 )
 
@@ -470,3 +471,32 @@ def test_feature_plan_recovers_repeated_instance_intent():
     plan = FeaturePlan.model_validate(payload)
     assert plan.features[0].count == 4
     assert plan.features[1].count == 2
+
+
+
+def test_feature_can_keep_partial_progress_without_consuming_another_attempt(tmp_path):
+    plan = _car_plan()
+    save_feature_plan(tmp_path, plan)
+
+    first = begin_feature(tmp_path)
+    assert first is not None
+    assert first.attempts == 1
+
+    record_feature_progress(
+        tmp_path,
+        first.id,
+        version=2,
+        summary="Silhouette improved but still needs another visual correction.",
+    )
+
+    persisted = load_feature_plan(tmp_path)
+    assert persisted is not None
+    body = next(feature for feature in persisted.features if feature.id == first.id)
+    assert body.status == "running"
+    assert body.attempts == 1
+    assert persisted.active_feature_id == first.id
+
+    again = begin_feature(tmp_path)
+    assert again is not None
+    assert again.id == first.id
+    assert again.attempts == 1

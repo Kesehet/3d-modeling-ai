@@ -1026,6 +1026,19 @@ async def _build_feature_plan(
                 temperature=0.0,
                 num_predict=8192,
             )
+            _write_llm_log(
+                root,
+                "feature-plan-raw",
+                {
+                    "job_id": job_id,
+                    "model": candidate_model,
+                    "endpoint": result.endpoint,
+                    "usage": result.usage,
+                    "images": reference_labels,
+                    "raw_response": result.data,
+                    "created_at": datetime.now(UTC).isoformat(),
+                },
+            )
             normalized = normalize_feature_plan_payload(
                 result.data,
                 subject=str(job_request.get("prompt") or ""),

@@ -3081,6 +3081,12 @@ async def research_job(job_id: str, request: ResearchRequest) -> dict:
         reference_count=len(usable),
         reference_search_query=plan.primary_query,
         rejected_reference_count=len(rejected),
+        reference_gate={
+            "required": True,
+            "state": "ready" if usable else "blocked",
+            "usable_reference_count": len(usable),
+            "reason": "" if usable else "Reference research returned no usable verified images.",
+        },
     )
     return {
         "job_id": job_id,
@@ -3104,6 +3110,16 @@ async def _ensure_reference_pack(
     root = _require_job(job_id)
     usable = _usable_reference_index(root)
     if usable:
+        _write_status(
+            root,
+            reference_count=len(usable),
+            reference_gate={
+                "required": True,
+                "state": "ready",
+                "usable_reference_count": len(usable),
+                "reason": "",
+            },
+        )
         return usable
 
     job_request = json.loads((root / "request.json").read_text(encoding="utf-8"))

@@ -930,7 +930,7 @@ def _normalize_scene_spec_payload(data: object, fallback_title: str) -> dict:
         "tube": "cylinder",
         "ring": "torus",
         "strut": "rod",
-        "beam": "rod",
+        "beam": "beam",
         "limb": "rod",
         "bar": "rod",
         "box_beam": "beam",
@@ -1002,13 +1002,48 @@ def _normalize_scene_spec_payload(data: object, fallback_title: str) -> dict:
             key = "".join(character for character in text.lower() if character.isalnum())
             return named.get(key, "#808080")
 
+        object_name = str(item.get("name") or f"{shape}-{index + 1}")[:80]
+        normalized_location = vec3(location, [0.0, 0.0, 0.0])
+        normalized_scale = vec3(scale, [1.0, 1.0, 1.0])
+        normalized_rotation = vec3(rotation, [0.0, 0.0, 0.0])
+        has_connector_endpoints = item.get("start") is not None and item.get("end") is not None
+
+        # Rods/beams are endpoint-defined geometry in the Blender executor. An LLM
+        # occasionally emits a broad body panel or wheel as a rod with only location/scale;
+        # executing that literally discards its scale and creates a default vertical stick.
+        if shape in {"rod", "beam"} and not has_connector_endpoints:
+            semantic_name = " ".join(
+                "".join(
+                    character if character.isalnum() else " "
+                    for character in object_name.lower()
+                ).split()
+            )
+            if any(term in semantic_name for term in ("wheel", "caster", "tire", "tyre", "ring")):
+                shape = "torus"
+            elif shape == "beam":
+                shape = "cube"
+            else:
+                ordered_scale = sorted(abs(value) for value in normalized_scale)
+                is_panel_like = (
+                    ordered_scale[0] > 0
+                    and ordered_scale[1] / ordered_scale[0] >= 2.0
+                )
+                broad_terms = (
+                    "body", "torso", "chassis", "panel", "window", "windshield",
+                    "windscreen", "roof", "door", "bumper", "screen", "seat",
+                    "backrest", "hood", "bonnet", "trunk", "boot",
+                )
+                shape = "cube" if is_panel_like or any(
+                    term in semantic_name for term in broad_terms
+                ) else "cylinder"
+
         objects.append(
             {
-                "name": str(item.get("name") or f"{shape}-{index + 1}")[:80],
+                "name": object_name,
                 "shape": shape,
-                "location": vec3(location, [0.0, 0.0, 0.0]),
-                "scale": vec3(scale, [1.0, 1.0, 1.0]),
-                "rotation_deg": vec3(rotation, [0.0, 0.0, 0.0]),
+                "location": normalized_location,
+                "scale": normalized_scale,
+                "rotation_deg": normalized_rotation,
                 "start": (
                     vec3(item.get("start"), [0.0, 0.0, 0.0])
                     if item.get("start") is not None
@@ -2442,7 +2477,9 @@ async def _build_generic_scene_spec(job_id: str, auto_research: bool) -> Generic
         "title, objects, name, shape, "
         "location, scale, rotation_deg, start, end, radius, color, bevel, and smooth. Use shape='rod' "
         "with start/end/radius for limbs, handles, stems, necks, struts, antennas, and connectors because "
-        "it aligns itself between two points. Do not output Python. Build a recognizable model with enough "
+        "it aligns itself between two points. CRITICAL: never emit shape='rod' or shape='beam' unless BOTH "
+        "start and end are present. Broad masses, panels, windows, body shells and wheels are not rods. "
+        "Do not output Python. Build a recognizable model with enough "
         "separate primitives to represent EVERY requested major part and silhouette-defining feature. Never "
         "collapse distinct requested parts into a generic blob merely to reduce primitive count. Major parts "
         "that are physically connected must touch or overlap their parent geometry; do not leave floating "

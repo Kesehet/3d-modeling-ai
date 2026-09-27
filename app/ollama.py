@@ -68,7 +68,7 @@ class OllamaProxyClient:
         *,
         api_key: str = OLLAMA_PROXY_API_KEY,
         base_url: str = OLLAMA_PROXY_BASE_URL,
-        timeout_seconds: float = 240.0,
+        timeout_seconds: float = 600.0,
     ) -> None:
         self.api_key = api_key.strip()
         self.base_url = base_url.rstrip("/")
@@ -109,10 +109,15 @@ class OllamaProxyClient:
         images: list[str] | None = None,
         schema: dict[str, Any] | None = None,
         temperature: float = 0.1,
+        num_predict: int | None = None,
     ) -> OllamaJSONResult:
         user_message: dict[str, Any] = {"role": "user", "content": prompt}
         if images:
             user_message["images"] = images
+
+        options: dict[str, Any] = {"temperature": temperature}
+        if num_predict is not None:
+            options["num_predict"] = int(num_predict)
 
         payload: dict[str, Any] = {
             "model": model,
@@ -122,7 +127,7 @@ class OllamaProxyClient:
                 user_message,
             ],
             "format": schema or "json",
-            "options": {"temperature": temperature},
+            "options": options,
         }
 
         response = await self._post("/api/chat", payload)
@@ -150,7 +155,7 @@ class OllamaProxyClient:
             "stream": False,
             "prompt": f"[SYSTEM]\n{system}\n\n[USER]\n{prompt}\n\nReturn valid JSON only.",
             "format": schema or "json",
-            "options": {"temperature": temperature},
+            "options": options,
         }
         if images:
             generate_payload["images"] = images

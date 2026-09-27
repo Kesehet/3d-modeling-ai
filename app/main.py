@@ -2980,7 +2980,7 @@ async def generate_generic_scene(job_id: str, request: GenericGenerateRequest) -
                     "summary": quality_gate.get("summary"),
                 },
             )
-        elif quality_gate.get("recommended_strategy") in {"base_mesh", "hybrid"}:
+        elif recognizable is False:
             append_history(
                 root,
                 "automatic_strategy_switch",
@@ -3027,10 +3027,13 @@ async def refine_generic_scene(job_id: str, request: GenericRefineRequest) -> di
             existing_status = json.loads(status_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             existing_status = {}
-        if existing_status.get("stage") in {
-            "generic_needs_strategy_switch",
-            "adaptive_mesh_needs_refinement",
-        }:
+        if (
+            existing_status.get("modeling_strategy") == "adaptive_loft"
+            or existing_status.get("stage") in {
+                "generic_needs_strategy_switch",
+                "adaptive_mesh_needs_refinement",
+            }
+        ):
             return await _generate_adaptive_mesh_fallback(
                 job_id,
                 reason=(

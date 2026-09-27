@@ -16,9 +16,20 @@ This file is the working definition of "done" for the project. A level is only c
 
 ### Observed regression
 - Generic `v2` can be materially worse than `v1` while still ending in `generic_refinement_complete`.
+- A real holdout prompt, **"A toyota prius"**, produced an unrecognizable wedge/slab with a few wheel-like cylinders while the job still reported `generic_refinement_complete`.
 - The Pikachu regression can collapse into a few blob primitives and antenna-like rods instead of retaining defining character parts.
 - The desk-lamp regression can collapse into disconnected stacked primitives instead of a round base + connected angled neck + dome shade.
-- Current live regression mainly proves that files/renders exist; it does not prove that the candidate is visually or structurally better.
+- The recent recovery work has become **benchmark-overfit**: generic generation now contains subject-specific geometry assemblies for the fixed benchmark families (characters, lamps, sneakers, chairs and quadruped robots). Passing those five prompts is therefore not sufficient evidence that the autonomous pipeline generalizes.
+- Current live regression mainly proves that known benchmark prompts can be patched; it does not prove that unseen subjects remain recognizable.
+
+### Generalization recovery — do before more roadmap work
+- [ ] Add a structured subject-part inventory from prompt + reference images before SceneSpec planning, and require the generated SceneSpec to cover the major inventory instead of trusting free-form planner prose.
+- [ ] Add an **initial recognizability gate** immediately after `v1`; an unrecognizable blockout must not be reported as complete or treated as a good baseline.
+- [ ] Require the generic refinement stop rule to confirm subject recognizability; "few parsed issues" alone is not success.
+- [ ] Add a strategy-switch state for subjects that primitive SceneSpec cannot represent adequately; stop endlessly rearranging primitives when a mesh/hybrid workflow is required.
+- [ ] Quarantine benchmark-specific geometry helpers from being the proof of generic quality. Keep them as deterministic benchmark fixtures, not as the main route to "generalization."
+- [ ] Add **unseen holdout prompts** that are not allowed to gain subject-specific fixers: Toyota Prius / compact car, teapot, desk fan, bicycle, and one household appliance.
+- [ ] A holdout failure must fail the quality gate or end as `needs_strategy_switch`; it must never end as `generic_refinement_complete`.
 
 ### P0 recovery tasks
 - [x] Freeze new roadmap feature work until the quality regression gate passes.

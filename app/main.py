@@ -8,6 +8,7 @@ import uuid
 from datetime import UTC, datetime
 from io import BytesIO
 from pathlib import Path
+from collections.abc import Awaitable, Callable
 from typing import Annotated, Literal
 
 import httpx
@@ -25,7 +26,13 @@ from .config import (
     VISION_MODELS,
     WORKER_URL,
 )
-from .dashboard import dashboard_page, jobs_snapshot, public_artifact, public_render
+from .dashboard import (
+    dashboard_page,
+    jobs_snapshot,
+    public_artifact,
+    public_render,
+    reconcile_all_running_jobs,
+)
 from .generic_builder import generic_scene_script
 from .history import append_history, load_history
 from .mesh_builder import adaptive_loft_script
@@ -36,6 +43,15 @@ from .research import research_web_references, write_research_manifest
 from .security import require_api_token
 
 app = FastAPI(title="3D Modeling AI", version="0.2.0")
+
+
+
+@app.on_event("startup")
+async def reconcile_interrupted_jobs_after_restart() -> None:
+    # Any persisted running state predates this process and therefore cannot
+    # represent an operation still executing in this API process.
+    reconcile_all_running_jobs(force=True)
+
 
 Image.MAX_IMAGE_PIXELS = 40_000_000
 
@@ -988,6 +1004,42 @@ def _write_status(path: Path, **values: object) -> dict:
     return current
 
 
+async def _guard_job_action(
+    job_id: str,
+    action: Callable[[], Awaitable[dict]],
+) -> dict:
+    """Ensure a failed dashboard/API action cannot strand a job in running."""
+    try:
+        return await action()
+    except Exception as exc:
+        root = _job_dir(job_id)
+        status_path = root / "status.json"
+        if root.is_dir() and status_path.is_file():
+            try:
+                status = json.loads(status_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                status = {}
+            if isinstance(status, dict) and status.get("state") == "running":
+                detail = str(exc.detail) if isinstance(exc, HTTPException) else str(exc)
+                stage = str(status.get("stage") or "failed")
+                _write_status(
+                    root,
+                    state="failed",
+                    stage=stage,
+                    error=detail or exc.__class__.__name__,
+                    interrupted=True,
+                    interrupted_stage=stage,
+                )
+                append_history(
+                    root,
+                    "job_action_failed",
+                    stage=stage,
+                    error=detail or exc.__class__.__name__,
+                    exception_type=exc.__class__.__name__,
+                )
+        raise
+
+
 def _write_llm_log(root: Path, prefix: str, payload: dict) -> str:
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
     filename = f"{prefix}-{stamp}.json"
@@ -1160,27 +1212,27 @@ async def dashboard_create_job(payload: JobCreate) -> dict:
 
 @app.post("/dashboard/jobs/{job_id}/pikachu", include_in_schema=False)
 async def dashboard_run_pikachu(job_id: str) -> dict:
-    return await generate_pikachu_test(job_id)
+    return await _guard_job_action(job_id, lambda: generate_pikachu_test(job_id))
 
 
 @app.post("/dashboard/jobs/{job_id}/research", include_in_schema=False)
 async def dashboard_research(job_id: str, request: ResearchRequest) -> dict:
-    return await research_job(job_id, request)
+    return await _guard_job_action(job_id, lambda: research_job(job_id, request))
 
 
 @app.post("/dashboard/jobs/{job_id}/generate", include_in_schema=False)
 async def dashboard_generate_generic(job_id: str, request: GenericGenerateRequest) -> dict:
-    return await generate_generic_scene(job_id, request)
+    return await _guard_job_action(job_id, lambda: generate_generic_scene(job_id, request))
 
 
 @app.post("/dashboard/jobs/{job_id}/improve", include_in_schema=False)
 async def dashboard_improve_generic(job_id: str, request: GenericRefineRequest) -> dict:
-    return await refine_generic_scene(job_id, request)
+    return await _guard_job_action(job_id, lambda: refine_generic_scene(job_id, request))
 
 
 @app.post("/dashboard/jobs/{job_id}/quality-benchmark", include_in_schema=False)
 async def dashboard_quality_benchmark(job_id: str, request: QualityBenchmarkRequest) -> dict:
-    return await evaluate_quality_benchmark(job_id, request)
+    return await _guard_job_action(job_id, lambda: evaluate_quality_benchmark(job_id, request))
 
 
 @app.delete("/dashboard/jobs/{job_id}", include_in_schema=False)
@@ -1190,7 +1242,7 @@ async def dashboard_delete_job(job_id: str) -> dict:
 
 @app.post("/dashboard/jobs/{job_id}/refine-pikachu", include_in_schema=False)
 async def dashboard_refine_pikachu(job_id: str, request: PikachuRefineRequest) -> dict:
-    return await refine_pikachu(job_id, request)
+    return await _guard_job_action(job_id, lambda: refine_pikachu(job_id, request))
 
 
 @app.get("/dashboard/jobs/{job_id}/history", include_in_schema=False)
@@ -1201,7 +1253,7 @@ async def dashboard_history(job_id: str) -> dict:
 
 @app.post("/dashboard/jobs/{job_id}/repair-print", include_in_schema=False)
 async def dashboard_repair_print(job_id: str, request: PrintRepairRequest) -> dict:
-    return await repair_print_model(job_id, request)
+    return await _guard_job_action(job_id, lambda: repair_print_model(job_id, request))
 
 
 @app.get("/health")
@@ -1438,7 +1490,7 @@ async def research_job(job_id: str, request: ResearchRequest) -> dict:
 
 @app.post("/v1/jobs/{job_id}/research", dependencies=[Depends(require_api_token)])
 async def research_job_api(job_id: str, request: ResearchRequest) -> dict:
-    return await research_job(job_id, request)
+    return await _guard_job_action(job_id, lambda: research_job(job_id, request))
 
 
 @app.get("/v1/jobs/{job_id}/history", dependencies=[Depends(require_api_token)])
@@ -2797,7 +2849,7 @@ async def generate_generic_scene(job_id: str, request: GenericGenerateRequest) -
 
 @app.post("/v1/jobs/{job_id}/generate", dependencies=[Depends(require_api_token)])
 async def generate_generic_scene_api(job_id: str, request: GenericGenerateRequest) -> dict:
-    return await generate_generic_scene(job_id, request)
+    return await _guard_job_action(job_id, lambda: generate_generic_scene(job_id, request))
 
 
 async def refine_generic_scene(job_id: str, request: GenericRefineRequest) -> dict:
@@ -3035,12 +3087,12 @@ async def refine_generic_scene(job_id: str, request: GenericRefineRequest) -> di
 
 @app.post("/v1/jobs/{job_id}/improve", dependencies=[Depends(require_api_token)])
 async def refine_generic_scene_api(job_id: str, request: GenericRefineRequest) -> dict:
-    return await refine_generic_scene(job_id, request)
+    return await _guard_job_action(job_id, lambda: refine_generic_scene(job_id, request))
 
 
 @app.post("/v1/jobs/{job_id}/quality-benchmark", dependencies=[Depends(require_api_token)])
 async def quality_benchmark_api(job_id: str, request: QualityBenchmarkRequest) -> dict:
-    return await evaluate_quality_benchmark(job_id, request)
+    return await _guard_job_action(job_id, lambda: evaluate_quality_benchmark(job_id, request))
 
 
 async def _execute_pikachu(
@@ -3310,7 +3362,7 @@ async def repair_print_model(job_id: str, request: PrintRepairRequest) -> dict:
 
 @app.post("/v1/jobs/{job_id}/repair-print", dependencies=[Depends(require_api_token)])
 async def repair_print_model_api(job_id: str, request: PrintRepairRequest) -> dict:
-    return await repair_print_model(job_id, request)
+    return await _guard_job_action(job_id, lambda: repair_print_model(job_id, request))
 
 
 @app.post("/v1/jobs/{job_id}/smoke-test", dependencies=[Depends(require_api_token)])

@@ -493,7 +493,14 @@ function render(){
   if(!data)return;
   els.home.classList.toggle("hidden",!!currentJob);
   els.detail.classList.toggle("show",!!currentJob);
-  if(!currentJob){renderGallery();return}
+  if(!currentJob){
+    // Release the GLB/WebGL scene when the user returns to the gallery. This is
+    // especially important on phones with tight GPU memory.
+    els.viewer.removeAttribute("src");
+    delete els.viewer.dataset.src;
+    renderGallery();
+    return;
+  }
   renderDetail(currentJob);
 }
 function renderGallery(){

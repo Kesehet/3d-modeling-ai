@@ -61,6 +61,6 @@ def test_character_visibility_repair_moves_face_to_front_and_fixes_ears_tail():
     assert by_name["left ear tip"]["color"] == "#111111"
     assert by_name["left arm"]["shape"] == "sphere"
     assert by_name["left foot"]["shape"] == "sphere"
-    assert by_name["tail segment 1"]["shape"] == "rod"
+    assert by_name["tail segment 1"]["shape"] == "beam"
     assert by_name["tail segment 1"]["start"] != by_name["tail segment 1"]["end"]
     assert by_name["tail segment 3"]["end"][0] > by_name["tail segment 3"]["start"][0]

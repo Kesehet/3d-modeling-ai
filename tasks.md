@@ -29,8 +29,9 @@ This file is the working definition of "done" for the project. A level is only c
 - [x] Make refinement surgical: fix the 1–3 highest-priority defects while preserving unaffected geometry instead of rewriting the whole model.
 - [x] Ensure generic visual QA evaluates only the newest `model-vN` render set with references instead of mixing stale iterations into the current model.
 - [x] Compare candidate `vN` against the previous accepted version with a dedicated multimodal regression gate; reject it and restore the previous accepted version when quality regresses.
-- [ ] Add quality regression subjects: stylized Pikachu, articulated retro desk lamp, sneaker, office chair, and a complex creature/robot.
-- [ ] Make deploy quality regression fail on structural/visual degradation, not merely successful HTTP responses and generated files.
+- [x] Add semantic geometry assemblies and richer safe primitives (beam/frustum/wedge) for recognizable tails, lamps, shoes, chairs, and articulated robots.
+- [x] Add quality regression subjects: stylized Pikachu, articulated retro desk lamp, sneaker, office chair, and a complex creature/robot.
+- [x] Make deploy quality regression fail on structural/visual degradation, not merely successful HTTP responses and generated files.
 
 ### P0 acceptance
 A refinement may only become the accepted/latest model when it preserves required parts and does not regress visibly or structurally from the previous accepted version. The Pikachu and articulated desk-lamp benchmarks must remain recognizable from front, side, rear and isometric views.
@@ -52,7 +53,7 @@ A refinement may only become the accepted/latest model when it preserves require
 - [x] Traditional tabbed dashboard: Overview / New Job / Gallery / Files / Jobs.
 - [x] VPS CPU limits match the actual 2-vCPU host.
 - [x] Add a deploy regression that validates a complex quadruped robot through v1 + visual critique + v2, while retaining the cube only as a hidden infrastructure heartbeat.
-- [ ] Add automatic rollback to the previous healthy image when deployment smoke tests fail.
+- [x] Add automatic rollback to the previous healthy image when deployment smoke/quality tests fail.
 
 ### Acceptance
 A new deployment must create a job, execute Blender through MCP, save a .blend, render a valid PNG, and serve the artifact publicly.

@@ -77,6 +77,40 @@ class VisionReport(BaseModel):
     priority_actions: list[str] = Field(default_factory=list)
 
 
+class RefinementComparison(BaseModel):
+    candidate_is_better: bool
+    summary: str = ""
+    improvements: list[str] = Field(default_factory=list)
+    regressions: list[str] = Field(default_factory=list)
+
+
+def _normalize_refinement_comparison_payload(data: object) -> dict:
+    if not isinstance(data, dict):
+        raise TypeError("Refinement comparison response is not a JSON object.")
+    normalized = dict(data)
+    if "candidate_is_better" not in normalized:
+        for key in ("candidate_better", "is_better", "improved", "accept_candidate", "accepted"):
+            if key not in normalized:
+                continue
+            value = normalized[key]
+            if isinstance(value, bool):
+                normalized["candidate_is_better"] = value
+            else:
+                normalized["candidate_is_better"] = str(value).strip().lower() in {
+                    "1", "true", "yes", "better", "improved", "accept", "accepted"
+                }
+            break
+    normalized.setdefault("candidate_is_better", False)
+    normalized.setdefault("summary", "")
+    for key in ("improvements", "regressions"):
+        value = normalized.get(key)
+        if isinstance(value, str):
+            normalized[key] = [value]
+        elif not isinstance(value, list):
+            normalized[key] = []
+    return normalized
+
+
 def _normalize_vision_report_payload(data: object) -> dict:
     if not isinstance(data, dict):
         raise TypeError("Vision response is not a JSON object.")
@@ -577,6 +611,22 @@ def _collect_images(root: Path, request: VisionAnalyzeRequest) -> tuple[list[str
     references = images_in("references") if request.include_references else []
     renders = images_in("renders") if request.include_renders else []
 
+    # Generic refinement must critique one coherent model version. Mixing older model-vN
+    # renders into the current set can make the vision model "fix" geometry that no longer exists.
+    if request.stage == "generic_visual_refinement" and renders:
+        versioned: list[tuple[int, Path]] = []
+        for path in renders:
+            stem = path.stem
+            if not stem.startswith("model-v"):
+                continue
+            remainder = stem[len("model-v"):]
+            number_text = remainder.split("-", 1)[0]
+            if number_text.isdigit():
+                versioned.append((int(number_text), path))
+        if versioned:
+            latest_version = max(version for version, _ in versioned)
+            renders = [path for version, path in versioned if version == latest_version]
+
     if references and renders:
         reference_budget = min(len(references), max(2, request.max_images // 3))
         render_budget = max(1, request.max_images - reference_budget)
@@ -980,6 +1030,100 @@ async def analyze_vision(job_id: str, request: VisionAnalyzeRequest) -> dict:
     return payload
 
 
+async def _compare_generic_versions(
+    root: Path,
+    *,
+    baseline_version: int,
+    candidate_version: int,
+) -> dict:
+    job_request = json.loads((root / "request.json").read_text(encoding="utf-8"))
+    views = ("front", "front-left", "left", "back", "right", "front-right")
+    reference_paths = sorted(
+        [
+            path
+            for path in (root / "references").glob("*")
+            if path.is_file() and path.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp"}
+        ],
+        key=lambda path: path.stat().st_mtime,
+    )[-2:]
+    baseline_paths = [
+        root / "renders" / f"model-v{baseline_version}-{view}.png"
+        for view in views
+    ]
+    candidate_paths = [
+        root / "renders" / f"model-v{candidate_version}-{view}.png"
+        for view in views
+    ]
+    if not all(path.is_file() for path in baseline_paths + candidate_paths):
+        return {
+            "candidate_is_better": False,
+            "summary": "Visual regression comparison could not run because one or more comparison renders are missing.",
+            "improvements": [],
+            "regressions": ["missing comparison renders"],
+            "model": None,
+        }
+
+    image_paths = reference_paths + baseline_paths + candidate_paths
+    images = [base64.b64encode(path.read_bytes()).decode("ascii") for path in image_paths]
+    labels = [f"{path.parent.name}/{path.name}" for path in image_paths]
+    system = (
+        "You are a strict visual regression gate for an autonomous 3D modeling system. "
+        "Compare the BASELINE model against the CANDIDATE model for the user's exact request. "
+        "Set candidate_is_better=true only when the candidate preserves all important recognizable parts "
+        "and makes a clear net improvement in silhouette, proportions, connectivity or requested features. "
+        "Reject the candidate if it loses a major part, turns detailed geometry into generic blobs, creates "
+        "floating/disconnected parts, or is merely different without being clearly better. If uncertain, "
+        "set candidate_is_better=false. Return only JSON matching the schema."
+    )
+    prompt = (
+        f"User request: {job_request.get('prompt', '')}\n"
+        f"Intended use: {job_request.get('intended_use', '')}\n"
+        f"Image order/labels: {labels}\n"
+        f"Reference images (if any) come first. Next are BASELINE v{baseline_version} views in this order: "
+        f"{list(views)}. Last are CANDIDATE v{candidate_version} views in the same order.\n"
+        "Judge recognizability and requested-part preservation before cosmetic changes."
+    )
+
+    client = OllamaProxyClient()
+    errors: list[str] = []
+    for candidate_model in VISION_MODELS:
+        try:
+            result = await client.chat_json(
+                model=candidate_model,
+                system=system,
+                prompt=prompt,
+                images=images,
+                schema=RefinementComparison.model_json_schema(),
+                temperature=0.0,
+            )
+            normalized = _normalize_refinement_comparison_payload(result.data)
+            comparison = RefinementComparison.model_validate(normalized)
+        except (OllamaProxyError, httpx.HTTPError, ValidationError, ValueError, TypeError) as exc:
+            errors.append(f"{candidate_model}: {exc}")
+            continue
+
+        payload = {
+            **comparison.model_dump(),
+            "model": candidate_model,
+            "baseline_version": baseline_version,
+            "candidate_version": candidate_version,
+            "images": labels,
+            "created_at": datetime.now(UTC).isoformat(),
+        }
+        _write_llm_log(root, "generic-version-compare", payload)
+        return payload
+
+    return {
+        "candidate_is_better": False,
+        "summary": "Visual regression comparison failed across configured vision models; preserving the previous version.",
+        "improvements": [],
+        "regressions": errors[-4:] or ["visual comparison unavailable"],
+        "model": None,
+        "baseline_version": baseline_version,
+        "candidate_version": candidate_version,
+    }
+
+
 @app.post("/v1/jobs/{job_id}/plan", dependencies=[Depends(require_api_token)])
 async def build_plan(job_id: str, request: PlanRequest) -> dict:
     root = _require_job(job_id)
@@ -1255,6 +1399,7 @@ async def refine_generic_scene(job_id: str, request: GenericRefineRequest) -> di
 
     current_payload = json.loads(spec_files[-1].read_text(encoding="utf-8"))
     current_spec = GenericSceneSpec.model_validate(current_payload["spec"])
+    current_version = int(current_payload.get("version") or 1)
     completed = []
     rejected: dict | None = None
 
@@ -1336,6 +1481,40 @@ async def refine_generic_scene(job_id: str, request: GenericRefineRequest) -> di
 
         version = 1 + len(list((root / "scene").glob("model-v*.blend")))
         build = await _execute_generic_spec(job_id, revised, version=version)
+        comparison = await _compare_generic_versions(
+            root,
+            baseline_version=current_version,
+            candidate_version=version,
+        )
+        accepted = bool(comparison.get("candidate_is_better"))
+        completed.append(
+            {
+                "vision": vision,
+                "spec": revised.model_dump(),
+                "build": build,
+                "comparison": comparison,
+                "accepted": accepted,
+            }
+        )
+        if not accepted:
+            rejected = {
+                "reasons": comparison.get("regressions") or [comparison.get("summary") or "candidate did not improve"],
+                "summary": comparison.get("summary"),
+                "baseline_version": current_version,
+                "candidate_version": version,
+                "current_object_count": len(current_spec.objects),
+                "candidate_object_count": len(revised.objects),
+            }
+            append_history(
+                root,
+                "generic_refinement_visual_rejected",
+                baseline_version=current_version,
+                candidate_version=version,
+                summary=comparison.get("summary"),
+                regressions=comparison.get("regressions") or [],
+            )
+            break
+
         append_history(
             root,
             "generic_revision",
@@ -1343,12 +1522,33 @@ async def refine_generic_scene(job_id: str, request: GenericRefineRequest) -> di
             high_issues=high,
             medium_issues=medium,
             object_count=len(revised.objects),
+            comparison_summary=comparison.get("summary"),
         )
-        completed.append({"vision": vision, "spec": revised.model_dump(), "build": build})
         current_spec = revised
+        current_version = version
 
-    stage = "generic_refinement_preserved_previous" if rejected else "generic_refinement_complete"
-    status = _write_status(root, state="ready", stage=stage)
+    if rejected:
+        active_renders = [
+            f"model-v{current_version}-{view}.png"
+            for view in (
+                "front", "front-left", "left", "back-left", "back",
+                "back-right", "right", "front-right", "top",
+            )
+        ]
+        status = _write_status(
+            root,
+            state="ready",
+            stage="generic_refinement_preserved_previous",
+            generic_model={
+                "version": current_version,
+                "title": current_spec.title,
+                "blend": f"model-v{current_version}.blend",
+                "renders": active_renders,
+                "qa": f"model-v{current_version}-qa.json",
+            },
+        )
+    else:
+        status = _write_status(root, state="ready", stage="generic_refinement_complete")
     return {
         "job_id": job_id,
         "iterations": completed,

@@ -8,6 +8,7 @@ from fastapi import HTTPException
 from fastapi.responses import HTMLResponse
 
 from .config import JOBS_ROOT
+from .feature_tasks import feature_plan_summary
 from .history import append_history
 
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
@@ -282,6 +283,7 @@ def jobs_snapshot() -> dict:
                     "stage": status.get("stage", "unknown"),
                     "modeling_strategy": status.get("modeling_strategy"),
                     "quality_gate": status.get("quality_gate") if isinstance(status.get("quality_gate"), dict) else None,
+                    "feature_plan": feature_plan_summary(root),
                     "updated_at": status.get("updated_at"),
                     "renders": renders,
                     "references": references,
@@ -346,12 +348,13 @@ header{display:flex;align-items:center;justify-content:space-between;gap:16px;ma
 .card-body{padding:13px}.prompt{font-weight:700;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;min-height:42px}.meta{display:flex;justify-content:space-between;gap:8px;color:var(--muted);font-size:12px;margin-top:8px}.status{font-weight:700}.ready{color:var(--green)}.failed{color:var(--red)}.running{color:#b54708}
 .detail{display:none}.detail.show{display:block}.home.hidden{display:none}.detail-head{display:flex;justify-content:space-between;align-items:flex-start;gap:16px;margin-bottom:18px}.detail-head h2{margin:8px 0 4px;font-size:24px}.detail-head p{margin:0;color:var(--muted)}
 .quality-banner{display:none;margin:0 0 18px;padding:12px 14px;border-radius:10px;border:1px solid #fed7aa;background:#fff7ed;color:#9a3412}.quality-banner.show{display:block}.quality-banner strong{display:block;margin-bottom:3px}
+.feature-panel{display:none;margin:0 0 18px;background:#fff;border:1px solid var(--line);border-radius:12px;padding:16px}.feature-panel.show{display:block}.feature-head{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin-bottom:12px}.feature-head h3{margin:0 0 3px}.feature-progress{color:var(--muted);font-size:12px}.feature-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:9px}.feature-card{border:1px solid var(--line);border-radius:9px;padding:10px;background:#fafafa}.feature-card.running{border-color:#fdba74;background:#fff7ed}.feature-card.accepted{border-color:#bbf7d0;background:#f0fdf4}.feature-card.retry{border-color:#fde68a;background:#fffbeb}.feature-card.blocked,.feature-card.failed{border-color:#fecaca;background:#fff5f5}.feature-name{font-weight:750}.feature-meta{font-size:11px;color:var(--muted);margin-top:3px}.feature-state{font-size:10px;text-transform:uppercase;letter-spacing:.04em;font-weight:800}.feature-criteria{margin-top:6px;font-size:11px;color:#475467}
 .render-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}.render{background:#fff;border:1px solid var(--line);border-radius:12px;overflow:hidden}.render img{width:100%;aspect-ratio:1;object-fit:cover;display:block}.render-name{padding:9px 11px;color:var(--muted);font-size:12px}
 .reference-panel{margin-top:22px;background:#fff;border:1px solid var(--line);border-radius:12px;padding:16px}.reference-panel h3{margin:0 0 4px}.reference-help{color:var(--muted);font-size:12px;margin:0 0 12px}.reference-grid{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:12px}.reference-card{border:1px solid var(--line);border-radius:10px;overflow:hidden;background:#fafafa}.reference-card img{display:block;width:100%;aspect-ratio:1;object-fit:cover}.reference-info{padding:8px 9px;font-size:11px;color:var(--muted)}.reference-info strong{display:block;color:var(--text);font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.reference-used{display:inline-block;margin-top:5px;padding:2px 6px;border-radius:999px;background:#dcfce7;color:#166534;font-weight:700;font-size:10px}
 .downloads{margin-top:22px;background:#fff;border:1px solid var(--line);border-radius:12px;padding:16px}.downloads h3{margin:0 0 10px}.file-list{display:flex;gap:8px;flex-wrap:wrap}.file{display:inline-flex;text-decoration:none;color:var(--text);border:1px solid var(--line);border-radius:8px;padding:8px 10px;background:#fafafa}.file b{margin-right:6px}
 .details{margin-top:16px;background:#fff;border:1px solid var(--line);border-radius:12px;padding:14px}.details summary{cursor:pointer;font-weight:700}.details pre{white-space:pre-wrap;word-break:break-word;background:#f8fafc;padding:12px;border-radius:8px;max-height:320px;overflow:auto}
 .dialog-backdrop{display:none;position:fixed;inset:0;background:#11182788;z-index:50;padding:20px;align-items:center;justify-content:center}.dialog-backdrop.show{display:flex}.dialog{width:min(620px,100%);background:#fff;border-radius:14px;padding:20px;box-shadow:0 25px 80px #0003}.dialog h2{margin:0 0 14px}.field{margin-bottom:12px}.field label{display:block;font-weight:650;margin-bottom:5px}.field textarea,.field input,.field select{width:100%;border:1px solid #cfd4dc;border-radius:8px;padding:10px}.field textarea{min-height:110px;resize:vertical}.actions{display:flex;justify-content:flex-end;gap:8px}.notice{margin-top:10px;color:var(--muted)}.empty-state{padding:50px;text-align:center;color:var(--muted)}
-@media(max-width:980px){.gallery{grid-template-columns:repeat(3,1fr)}.render-grid{grid-template-columns:repeat(2,1fr)}.reference-grid{grid-template-columns:repeat(3,1fr)}}@media(max-width:680px){.wrap{padding:14px}.gallery{grid-template-columns:repeat(2,1fr);gap:10px}.render-grid{grid-template-columns:1fr}.reference-grid{grid-template-columns:repeat(2,1fr)}.brand h1{font-size:20px}.job-card{border-radius:10px}}
+@media(max-width:980px){.gallery{grid-template-columns:repeat(3,1fr)}.render-grid{grid-template-columns:repeat(2,1fr)}.reference-grid{grid-template-columns:repeat(3,1fr)}.feature-grid{grid-template-columns:repeat(2,1fr)}}@media(max-width:680px){.wrap{padding:14px}.gallery{grid-template-columns:repeat(2,1fr);gap:10px}.render-grid{grid-template-columns:1fr}.reference-grid{grid-template-columns:repeat(2,1fr)}.feature-grid{grid-template-columns:1fr}.brand h1{font-size:20px}.job-card{border-radius:10px}}
 </style>
 </head>
 <body>
@@ -366,6 +369,7 @@ header{display:flex;align-items:center;justify-content:space-between;gap:16px;ma
     <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn" id="improveBtn">Improve model</button><button class="btn danger" id="deleteBtn">Delete job</button></div>
   </div>
   <div class="quality-banner" id="qualityBanner"></div>
+  <section class="feature-panel" id="featurePanel"><div class="feature-head"><div><h3>AI feature sub-jobs</h3><div class="feature-progress" id="featureProgress"></div></div></div><div class="feature-grid" id="featureGrid"></div></section>
   <div class="render-grid" id="renderGrid"></div>
   <section class="reference-panel"><h3>Reference images used</h3><p class="reference-help">These are the saved reference images attached to this job. Images included in the latest vision pass are marked below.</p><div class="reference-grid" id="referenceGrid"></div></section>
   <div class="downloads"><h3>Downloads</h3><div class="file-list" id="fileList"></div></div>
@@ -389,7 +393,7 @@ const byId=id=>document.getElementById(id);
 const esc=value=>String(value??"").replace(/[&<>"']/g,ch=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[ch]));
 const els={
   home:byId("homeView"),detail:byId("detailView"),gallery:byId("jobGallery"),
-  title:byId("detailTitle"),meta:byId("detailMeta"),quality:byId("qualityBanner"),renders:byId("renderGrid"),references:byId("referenceGrid"),files:byId("fileList"),json:byId("detailJson"),
+  title:byId("detailTitle"),meta:byId("detailMeta"),quality:byId("qualityBanner"),featurePanel:byId("featurePanel"),featureProgress:byId("featureProgress"),featureGrid:byId("featureGrid"),renders:byId("renderGrid"),references:byId("referenceGrid"),files:byId("fileList"),json:byId("detailJson"),
   newBtn:byId("newJobBtn"),dialog:byId("newJobDialog"),cancel:byId("cancelNew"),create:byId("createModel"),
   prompt:byId("jobPrompt"),use:byId("jobUse"),width:byId("jobWidth"),notice:byId("newNotice"),
   back:byId("backBtn"),improve:byId("improveBtn"),deleteBtn:byId("deleteBtn")
@@ -445,6 +449,23 @@ function renderDetail(job){
     els.quality.innerHTML='<strong>Visual QA needs another pass.</strong>Improve will ask the AI modeling director to judge the current renders again and choose whether to revise the procedural model or rebuild it as a mesh.';
     els.quality.classList.add("show");
   }
+  const plan=job.feature_plan||null;
+  if(plan&&Array.isArray(plan.features)&&plan.features.length){
+    const counts=plan.counts||{};
+    const accepted=counts.accepted||0;
+    const terminal=accepted+(counts.blocked||0)+(counts.failed||0);
+    els.featureProgress.textContent=accepted+" accepted · "+terminal+"/"+plan.features.length+" resolved"+(plan.next_feature_id?" · next: "+plan.next_feature_id:"");
+    els.featureGrid.innerHTML=plan.features.map(feature=>{
+      const deps=(feature.depends_on||[]).length?" · after "+feature.depends_on.join(", "):"";
+      const criteria=(feature.acceptance_criteria||[]).slice(0,2).join(" · ");
+      return '<div class="feature-card '+esc(feature.status)+'"><div style="display:flex;justify-content:space-between;gap:8px"><div class="feature-name">'+esc(feature.name)+'</div><div class="feature-state">'+esc(feature.status)+'</div></div><div class="feature-meta">P'+esc(feature.priority)+' · '+esc(feature.strategy)+deps+' · attempts '+esc(feature.attempts||0)+'</div>'+(criteria?'<div class="feature-criteria">'+esc(criteria)+'</div>':'')+'</div>';
+    }).join("");
+    els.featurePanel.classList.add("show");
+  }else{
+    els.featurePanel.classList.remove("show");
+    els.featureGrid.innerHTML="";
+    els.featureProgress.textContent="";
+  }
   els.renders.innerHTML=(job.renders||[]).length
     ? job.renders.map(image=>'<div class="render"><a target="_blank" href="'+renderUrl(job.job_id,image.name,image.mtime)+'"><img loading="lazy" src="'+renderUrl(job.job_id,image.name,image.mtime)+'"></a><div class="render-name">'+esc(image.name)+'</div></div>').join("")
     : '<div class="empty-state" style="grid-column:1/-1">No renders yet. This page refreshes automatically while the job runs.</div>';
@@ -463,7 +484,7 @@ function renderDetail(job){
   els.files.innerHTML=files.length
     ? files.map(([category,file])=>'<a class="file" download href="'+fileUrl(job.job_id,category,file.name)+'"><b>↓</b>'+esc(file.name)+'</a>').join("")
     : '<span style="color:var(--muted)">No downloadable model files yet.</span>';
-  els.json.textContent=JSON.stringify({status:{state:job.state,stage:job.stage,modeling_strategy:job.modeling_strategy,quality_gate:job.quality_gate},references:job.references,latest_vision_images:job.latest_vision_images,qa:job.qa,history:job.history},null,2);
+  els.json.textContent=JSON.stringify({status:{state:job.state,stage:job.stage,modeling_strategy:job.modeling_strategy,quality_gate:job.quality_gate},feature_plan:job.feature_plan,references:job.references,latest_vision_images:job.latest_vision_images,qa:job.qa,history:job.history},null,2);
   els.improve.disabled=busy||!scene.length;
   if(!busy){
     els.improve.textContent=retryingQuality?"Ask AI director again":(needsMesh?"AI rebuild as mesh":(improvingMesh?"AI improve mesh":"AI improve model"));

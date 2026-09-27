@@ -4,6 +4,7 @@ from app.main import (
     GenericRefineRequest,
     ModelingDirectorDecision,
     VisionAnalyzeRequest,
+    _catastrophic_visual_failure,
     _collect_images,
     _normalize_refinement_comparison_payload,
 )
@@ -84,3 +85,19 @@ def test_generic_visual_refinement_prefers_accepted_status_version(tmp_path):
     )
     assert labels
     assert all("model-v1-" in label for label in labels)
+
+
+def test_catastrophic_visual_failure_switches_representation_immediately():
+    severe, score = _catastrophic_visual_failure(
+        {"recognizable": False, "subject_match_score": 0.0}
+    )
+    assert severe is True
+    assert score == 0.0
+
+
+def test_marginal_visual_failure_allows_one_same_strategy_retry():
+    severe, score = _catastrophic_visual_failure(
+        {"recognizable": False, "subject_match_score": 0.45}
+    )
+    assert severe is False
+    assert score == 0.45

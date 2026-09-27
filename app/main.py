@@ -59,6 +59,7 @@ from .security import require_api_token
 
 app = FastAPI(title="3D Modeling AI", version="0.2.0")
 AUTO_IMPROVE_TASKS: dict[str, asyncio.Task[None]] = {}
+REFERENCE_RECOVERY_TASKS: dict[str, asyncio.Task[None]] = {}
 FEATURE_MAX_ATTEMPTS = 3
 AUTO_IMPROVE_HARD_ROUND_CAP = 60
 
@@ -127,6 +128,7 @@ async def reconcile_interrupted_jobs_after_restart() -> None:
                     reason="strict reference-based acceptance enabled",
                 )
     _resume_auto_improve_jobs()
+    _resume_interrupted_reference_jobs()
 
 
 Image.MAX_IMAGE_PIXELS = 40_000_000
@@ -1361,13 +1363,25 @@ async def _run_auto_improve(job_id: str, max_rounds: int) -> None:
     if not _usable_reference_index(root):
         append_history(root, "reference_research_retry", reason="auto-improve had no usable references")
         try:
-            await research_job(job_id, ResearchRequest(max_images=5))
+            await _ensure_reference_pack(job_id, max_images=5, attempts=2)
         except HTTPException as exc:
+            _write_status(
+                root,
+                state="ready",
+                stage="waiting_for_references",
+                auto_improve=_auto_improve_payload(
+                    state="waiting_for_references",
+                    current_round=0,
+                    max_rounds=max_rounds,
+                    reason=str(exc.detail),
+                ),
+            )
             append_history(
                 root,
-                "reference_research_retry_failed",
+                "auto_improve_waiting_for_references",
                 error=str(exc.detail),
             )
+            return
 
     requested_rounds = max(1, min(30, int(max_rounds)))
     round_limit = requested_rounds
@@ -1620,6 +1634,65 @@ async def _run_auto_improve(job_id: str, max_rounds: int) -> None:
         round=round_number,
         reason="hard safety cap reached",
     )
+
+
+async def _recover_interrupted_reference_job(job_id: str) -> None:
+    root = _job_dir(job_id)
+    if not root.is_dir():
+        return
+    append_history(root, "reference_gated_job_recovery_started")
+    try:
+        await generate_generic_scene(
+            job_id,
+            GenericGenerateRequest(auto_research=True, auto_improve_rounds=0),
+        )
+    except Exception as exc:  # noqa: BLE001 - recovery must persist failure state
+        detail = str(exc.detail) if isinstance(exc, HTTPException) else str(exc)
+        append_history(root, "reference_gated_job_recovery_failed", error=detail)
+        return
+
+    append_history(root, "reference_gated_job_recovery_completed")
+    _schedule_auto_improve(job_id, 30)
+
+
+def _resume_interrupted_reference_jobs() -> None:
+    if not JOBS_ROOT.exists():
+        return
+
+    recoverable_stages = {
+        "researching_references",
+        "waiting_for_references",
+        "agent_selected_procedural",
+        "agent_selected_mesh",
+    }
+    for root in JOBS_ROOT.iterdir():
+        if not root.is_dir() or not (root / "request.json").is_file():
+            continue
+        status = _read_status(root)
+        if status.get("interrupted") is not True:
+            continue
+        if str(status.get("stage") or "") not in recoverable_stages:
+            continue
+        if _usable_reference_index(root):
+            continue
+        if list((root / "renders").glob("*.png")) if (root / "renders").is_dir() else []:
+            continue
+        if list((root / "scene").glob("model-v*.blend")) if (root / "scene").is_dir() else []:
+            continue
+
+        job_id = root.name
+        existing = REFERENCE_RECOVERY_TASKS.get(job_id)
+        if existing is not None and not existing.done():
+            continue
+
+        task = asyncio.create_task(_recover_interrupted_reference_job(job_id))
+        REFERENCE_RECOVERY_TASKS[job_id] = task
+
+        def _cleanup(completed: asyncio.Task[None], *, recovery_job_id: str = job_id) -> None:
+            if REFERENCE_RECOVERY_TASKS.get(recovery_job_id) is completed:
+                REFERENCE_RECOVERY_TASKS.pop(recovery_job_id, None)
+
+        task.add_done_callback(_cleanup)
 
 
 def _schedule_auto_improve(job_id: str, max_rounds: int = 30) -> bool:
@@ -2687,6 +2760,105 @@ async def research_job(job_id: str, request: ResearchRequest) -> dict:
         "research_errors": research_errors,
         "status": status,
     }
+
+
+async def _ensure_reference_pack(
+    job_id: str,
+    *,
+    max_images: int = 5,
+    attempts: int = 2,
+) -> list[dict]:
+    """Acquire verified references before any modeling/feature-planning work."""
+    root = _require_job(job_id)
+    usable = _usable_reference_index(root)
+    if usable:
+        return usable
+
+    job_request = json.loads((root / "request.json").read_text(encoding="utf-8"))
+    requested_query = str(job_request.get("prompt") or "").strip()
+    errors: list[str] = []
+
+    for attempt in range(1, max(1, attempts) + 1):
+        _write_status(
+            root,
+            state="running",
+            stage="researching_references",
+            reference_gate={
+                "required": True,
+                "state": "searching",
+                "attempt": attempt,
+                "max_attempts": attempts,
+                "usable_reference_count": 0,
+            },
+        )
+        query = requested_query
+        if attempt > 1:
+            query = f"{requested_query} reference photo exterior multiple views".strip()
+        try:
+            result = await research_job(
+                job_id,
+                ResearchRequest(query=query or None, max_images=max_images),
+            )
+            usable = _usable_reference_index(root)
+            if usable:
+                append_history(
+                    root,
+                    "reference_gate_passed",
+                    attempt=attempt,
+                    usable_reference_count=len(usable),
+                )
+                _write_status(
+                    root,
+                    state="ready",
+                    stage="references_ready",
+                    reference_count=len(usable),
+                    reference_gate={
+                        "required": True,
+                        "state": "ready",
+                        "attempt": attempt,
+                        "max_attempts": attempts,
+                        "usable_reference_count": len(usable),
+                    },
+                )
+                return usable
+            detail = (
+                f"Reference research returned zero verified images on attempt {attempt}. "
+                f"Rejected={len(result.get('rejected') or [])}; "
+                f"errors={len(result.get('research_errors') or [])}."
+            )
+            errors.append(detail)
+        except HTTPException as exc:
+            errors.append(str(exc.detail))
+
+    reason = " | ".join(errors[-attempts:]) or "No verified reference images were found."
+    append_history(
+        root,
+        "reference_gate_blocked",
+        attempts=attempts,
+        reason=reason,
+    )
+    _write_status(
+        root,
+        state="ready",
+        stage="waiting_for_references",
+        reference_count=0,
+        reference_gate={
+            "required": True,
+            "state": "blocked",
+            "attempt": attempts,
+            "max_attempts": attempts,
+            "usable_reference_count": 0,
+            "reason": reason[:1200],
+        },
+    )
+    raise HTTPException(
+        status_code=424,
+        detail=(
+            "Modeling paused because no verified reference images are available. "
+            "Reference research was retried automatically and will not be bypassed. "
+            + reason
+        ),
+    )
 
 
 @app.post("/v1/jobs/{job_id}/research", dependencies=[Depends(require_api_token)])
@@ -4773,11 +4945,26 @@ async def _generic_recognizability_check(job_id: str, *, stage: str) -> dict:
 async def generate_generic_scene(job_id: str, request: GenericGenerateRequest) -> dict:
     root = _require_job(job_id)
 
-    if request.auto_research and not _usable_reference_index(root):
-        try:
-            await research_job(job_id, ResearchRequest(max_images=5))
-        except HTTPException:
-            append_history(root, "research_skipped", reason="automatic research did not return usable references")
+    if request.auto_research:
+        await _ensure_reference_pack(job_id, max_images=5, attempts=2)
+    elif not _usable_reference_index(root):
+        _write_status(
+            root,
+            state="ready",
+            stage="waiting_for_references",
+            reference_gate={
+                "required": True,
+                "state": "blocked",
+                "usable_reference_count": 0,
+                "reason": "auto_research is disabled and no user reference was uploaded.",
+            },
+        )
+        raise HTTPException(
+            status_code=424,
+            detail="Modeling requires at least one verified or user-uploaded reference image.",
+        )
+
+    await _ensure_feature_plan(job_id, _load_subject_inventory(root))
 
     initial_decision = await _ask_modeling_director(
         job_id,
@@ -4884,14 +5071,7 @@ async def refine_generic_scene(job_id: str, request: GenericRefineRequest) -> di
     root = _require_job(job_id)
     if not _usable_reference_index(root):
         append_history(root, "reference_research_retry", reason="refinement had no usable references")
-        try:
-            await research_job(job_id, ResearchRequest(max_images=5))
-        except HTTPException as exc:
-            append_history(
-                root,
-                "reference_research_retry_failed",
-                error=str(exc.detail),
-            )
+        await _ensure_reference_pack(job_id, max_images=5, attempts=2)
     await _ensure_feature_plan(job_id, _load_subject_inventory(root))
     status_path = root / "status.json"
     status_payload: dict = {}

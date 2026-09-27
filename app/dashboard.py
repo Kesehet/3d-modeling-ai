@@ -309,6 +309,7 @@ def jobs_snapshot() -> dict:
                     "quality_gate": status.get("quality_gate") if isinstance(status.get("quality_gate"), dict) else None,
                     "feature_plan": feature_plan_summary(root),
                     "auto_improve": status.get("auto_improve") if isinstance(status.get("auto_improve"), dict) else None,
+                    "reference_gate": status.get("reference_gate") if isinstance(status.get("reference_gate"), dict) else None,
                     "updated_at": status.get("updated_at"),
                     "renders": renders,
                     "references": references,
@@ -464,7 +465,11 @@ function renderDetail(job){
   const needsMesh=job.stage==="generic_needs_strategy_switch";
   const improvingMesh=job.stage==="adaptive_mesh_needs_refinement";
   const retryingQuality=job.stage==="generic_quality_unverified";
-  if(quality?.recognizable===false){
+  if(job.stage==="waiting_for_references"||job.stage==="researching_references"){
+    const gate=job.reference_gate||{};
+    els.quality.innerHTML='<strong>Reference images required before modeling.</strong>'+esc(gate.reason||"The system is searching for verified references. Geometry generation is paused until at least one usable reference is available.");
+    els.quality.classList.add("show");
+  }else if(quality?.recognizable===false){
     if(needsMesh){
       els.quality.innerHTML='<strong>Primitive model is not recognizable enough.</strong>'+esc(quality.summary||"The primitive blockout does not sufficiently match the requested subject.")+' The next improvement will switch to the adaptive mesh builder.';
     }else if(improvingMesh){
@@ -519,7 +524,7 @@ function renderDetail(job){
   els.files.innerHTML=files.length
     ? files.map(([category,file])=>'<a class="file" download href="'+fileUrl(job.job_id,category,file.name)+'"><b>↓</b>'+esc(file.name)+'</a>').join("")
     : '<span style="color:var(--muted)">No downloadable model files yet.</span>';
-  els.json.textContent=JSON.stringify({status:{state:job.state,stage:job.stage,modeling_strategy:job.modeling_strategy,quality_gate:job.quality_gate,auto_improve:job.auto_improve},feature_plan:job.feature_plan,references:job.references,latest_vision_images:job.latest_vision_images,qa:job.qa,history:job.history},null,2);
+  els.json.textContent=JSON.stringify({status:{state:job.state,stage:job.stage,modeling_strategy:job.modeling_strategy,quality_gate:job.quality_gate,auto_improve:job.auto_improve,reference_gate:job.reference_gate},feature_plan:job.feature_plan,references:job.references,latest_vision_images:job.latest_vision_images,qa:job.qa,history:job.history},null,2);
   const autoRunning=auto&&["scheduled","running","retrying"].includes(auto.state);
   els.improve.disabled=busy||!scene.length||autoRunning;
   if(!busy){
@@ -546,20 +551,31 @@ async function createModel(){
   const prompt=els.prompt.value.trim();
   if(!prompt){els.notice.textContent="Please describe what to make.";return}
   busy=true;els.create.disabled=true;els.notice.textContent="Creating model...";
+  let created=null;
   try{
     const body={prompt,intended_use:els.use.value};
     if(els.width.value)body.target_width_mm=Number(els.width.value);
     let response=await fetch("/dashboard/jobs",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
     if(!response.ok)throw new Error(await response.text());
-    const created=await response.json();
+    created=await response.json();
     els.dialog.classList.remove("show");
     await refresh();
     openJob(created.job_id);
     response=await fetch("/dashboard/jobs/"+encodeURIComponent(created.job_id)+"/generate",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({auto_research:true,auto_improve_rounds:30})});
-    if(!response.ok)throw new Error(await response.text());
+    if(!response.ok){
+      await refresh();
+      return;
+    }
     await refresh();
-  }catch(error){els.notice.textContent="Error: "+error.message;els.dialog.classList.add("show")}
-  finally{busy=false;els.create.disabled=false}
+  }catch(error){
+    if(created){
+      await refresh();
+      openJob(created.job_id);
+    }else{
+      els.notice.textContent="Error: "+error.message;
+      els.dialog.classList.add("show");
+    }
+  }finally{busy=false;els.create.disabled=false}
 }
 async function improve(){
   if(!currentJob||busy)return;

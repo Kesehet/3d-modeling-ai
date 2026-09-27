@@ -109,6 +109,8 @@ def add_object(item):
         obj = bpy.data.objects.new("Wedge", mesh)
         bpy.context.collection.objects.link(obj)
         obj.location = location
+        bpy.context.view_layer.objects.active = obj
+        obj.select_set(True)
     elif shape == "sphere":
         bpy.ops.mesh.primitive_uv_sphere_add(segments=40, ring_count=20, location=location)
     elif shape == "cylinder":

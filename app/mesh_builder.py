@@ -239,7 +239,7 @@ maximum = Vector((
 center = (minimum + maximum) / 2
 size = maximum - minimum
 span = max(size.x, size.y, size.z, 1.0)
-distance = span * 2.8 + 2.0
+distance = span * 2.2 + 1.0
 
 scene = bpy.context.scene
 scene.render.engine = "BLENDER_WORKBENCH"
@@ -255,7 +255,8 @@ scene.render.image_settings.file_format = "PNG"
 bpy.ops.object.camera_add()
 camera = bpy.context.object
 camera.name = "QA Camera"
-camera.data.lens = 55
+camera.data.type = "ORTHO"
+camera.data.ortho_scale = max(span * 1.18, 1.0)
 scene.camera = camera
 
 z_eye = center.z + span * 0.16

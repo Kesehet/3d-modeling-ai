@@ -2460,9 +2460,7 @@ async def _evaluate_benchmark_visual(
     key: str,
 ) -> dict:
     profile = get_benchmark(key)
-    # Four diagnostic views are enough for a focused feature pass and materially
-    # reduce multimodal token/image cost compared with re-sending six full views.
-    views = ("front", "front-left", "left", "back-right")
+    views = _feature_diagnostic_views(feature_task)
     render_paths = [root / "renders" / f"model-v{version}-{view}.png" for view in views]
     if not all(path.is_file() for path in render_paths):
         return {
@@ -2693,6 +2691,26 @@ async def _compare_generic_versions(
     }
 
 
+
+
+def _feature_diagnostic_views(feature_task: FeatureTask) -> tuple[str, ...]:
+    text = " ".join(
+        [
+            feature_task.name,
+            *feature_task.target_regions,
+            *feature_task.owner_scope,
+            *feature_task.acceptance_criteria,
+        ]
+    ).lower()
+    if any(token in text for token in ("rear", "back", "tail", "exhaust", "diffuser", "spoiler")):
+        return ("back", "back-right", "right")
+    if any(token in text for token in ("front", "headlight", "grille", "hood", "bumper", "nose")):
+        return ("front", "front-left", "left")
+    if any(token in text for token in ("side", "door", "wheel", "arch", "mirror", "window", "skirt")):
+        return ("left", "front-left", "back-left")
+    if any(token in text for token in ("roof", "top", "scoop")):
+        return ("top", "front-left", "back-right")
+    return ("front-left", "left", "back-right")
 
 
 async def _evaluate_feature_candidate(
@@ -3326,7 +3344,7 @@ async def _build_adaptive_loft_spec(
             stage="generic_mesh_reference_reconstruction",
             include_references=True,
             include_renders=True,
-            max_images=14,
+            max_images=8 if feature_task is not None else 14,
         ),
     )
     system = (
@@ -3558,7 +3576,7 @@ async def _revise_adaptive_loft_spec(
             stage="adaptive_mesh_revision",
             include_references=True,
             include_renders=True,
-            max_images=14,
+            max_images=8 if feature_task is not None else 14,
         ),
     )
 

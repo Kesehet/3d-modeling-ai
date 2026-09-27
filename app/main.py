@@ -1228,6 +1228,71 @@ def _load_reference_index(root: Path) -> list[dict]:
     return data if isinstance(data, list) else []
 
 
+def _is_auto_reference_record(record: dict) -> bool:
+    provider = str(record.get("provider") or "").lower()
+    stored_name = str(record.get("stored_name") or "")
+    return (
+        provider in {"wikipedia", "wikimedia_commons", "wikimedia"}
+        or stored_name.startswith("web-")
+        or stored_name.startswith("candidate-")
+    )
+
+
+def _is_usable_reference_record(record: dict) -> bool:
+    # User uploads are authoritative. Automatically researched images are trusted
+    # only after a multimodal verifier has inspected their actual pixels.
+    if record.get("uploaded_at"):
+        return True
+    if not _is_auto_reference_record(record):
+        return bool(record.get("stored_name"))
+    if record.get("verified") is not True:
+        return False
+    try:
+        score = float(record.get("match_score") or 0.0)
+    except (TypeError, ValueError):
+        score = 0.0
+    return score >= 0.70 and bool(record.get("exact_identity_match", True))
+
+
+def _usable_reference_index(root: Path) -> list[dict]:
+    return [
+        record
+        for record in _load_reference_index(root)
+        if isinstance(record, dict) and _is_usable_reference_record(record)
+    ]
+
+
+def _prune_unverified_auto_references(root: Path, index: list[dict]) -> list[dict]:
+    kept: list[dict] = []
+    removed = 0
+    for record in index:
+        if not isinstance(record, dict):
+            continue
+        if _is_auto_reference_record(record) and not _is_usable_reference_record(record):
+            stored_name = str(record.get("stored_name") or "")
+            if stored_name:
+                path = root / "references" / Path(stored_name).name
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            removed += 1
+            continue
+        kept.append(record)
+
+    # Also remove abandoned candidate files from an interrupted research run.
+    for path in (root / "references").glob("candidate-*"):
+        if path.is_file() and not any(record.get("stored_name") == path.name for record in kept):
+            try:
+                path.unlink()
+            except OSError:
+                pass
+
+    if removed:
+        append_history(root, "reference_cleanup", removed=removed, reason="unverified automatic references")
+    return kept
+
+
 def _encode_vision_image(path: Path, *, max_side: int = 640, quality: int = 70) -> str:
     """Encode a compact vision-only copy without modifying the persisted artifact."""
     try:
@@ -1284,6 +1349,23 @@ def _collect_images(root: Path, request: VisionAnalyzeRequest) -> tuple[list[str
         return sorted(paths, key=lambda item: item.stat().st_mtime)
 
     references = images_in("references") if request.include_references else []
+    if references:
+        reference_index = {
+            str(record.get("stored_name")): record
+            for record in _load_reference_index(root)
+            if isinstance(record, dict) and record.get("stored_name")
+        }
+        references = [
+            path
+            for path in references
+            if (
+                path.name.startswith("ref-")
+                or (
+                    path.name in reference_index
+                    and _is_usable_reference_record(reference_index[path.name])
+                )
+            )
+        ]
     renders = images_in("renders") if request.include_renders else []
 
     # Generic refinement must critique one coherent model version. Mixing older model-vN

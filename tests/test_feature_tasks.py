@@ -421,3 +421,52 @@ def test_feature_plan_normalizer_accepts_plan_list_wrapper_and_top_level_list():
 
     assert FeaturePlan.model_validate(wrapped).features[1].build_mode == "component_job"
     assert FeaturePlan.model_validate(direct).features[1].build_mode == "component_job"
+
+
+def test_feature_plan_preserves_semantic_id_when_model_emits_generic_name():
+    payload = normalize_feature_plan_payload(
+        {
+            "subject": "Toyota Prius",
+            "features": [
+                {
+                    "id": "main-body-shell",
+                    "name": "Feature 1",
+                    "target_regions": ["body"],
+                },
+                {
+                    "id": "wheel-assembly",
+                    "name": "Feature 2",
+                    "quantity": 4,
+                    "build_mode": "component_job",
+                },
+            ],
+        },
+        subject="Toyota Prius",
+    )
+    plan = FeaturePlan.model_validate(payload)
+    assert plan.features[0].name == "main body shell"
+    assert plan.features[1].name == "wheel assembly"
+    assert plan.features[1].count == 4
+
+
+def test_feature_plan_recovers_repeated_instance_intent():
+    payload = normalize_feature_plan_payload(
+        {
+            "features": [
+                {
+                    "id": "wheel-assembly",
+                    "name": "Feature 1",
+                    "target_region": "all_four_wheels",
+                },
+                {
+                    "id": "side-mirrors",
+                    "name": "Feature 2",
+                    "symmetry": "bilateral",
+                },
+            ]
+        },
+        subject="car",
+    )
+    plan = FeaturePlan.model_validate(payload)
+    assert plan.features[0].count == 4
+    assert plan.features[1].count == 2

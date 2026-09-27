@@ -117,6 +117,7 @@ class ModelingDirectorDecision(BaseModel):
         "build_procedural",
         "revise_procedural",
         "build_mesh",
+        "refine_mesh",
         "rebuild_mesh",
     ]
     subject_match_score: float = Field(default=0.0, ge=0.0, le=1.0)
@@ -142,6 +143,11 @@ def _normalize_modeling_director_payload(data: object) -> dict:
         "improve": "revise_procedural",
         "mesh": "build_mesh",
         "base_mesh": "build_mesh",
+        "refine_mesh": "refine_mesh",
+        "refine mesh": "refine_mesh",
+        "mesh_refine": "refine_mesh",
+        "improve_mesh": "refine_mesh",
+        "revise_mesh": "refine_mesh",
         "rebuild": "rebuild_mesh",
     }
     raw_action = str(
@@ -2506,6 +2512,251 @@ async def _execute_adaptive_loft(
     }
 
 
+def _active_adaptive_loft_spec(
+    root: Path,
+    status_payload: dict,
+) -> tuple[int, AdaptiveLoftSpec] | None:
+    model = status_payload.get("generic_model")
+    if not isinstance(model, dict):
+        return None
+    version = model.get("version")
+    if not isinstance(version, int):
+        return None
+    path = root / f"mesh-spec-v{version}.json"
+    if not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        spec_payload = payload.get("spec") if isinstance(payload, dict) else None
+        return version, AdaptiveLoftSpec.model_validate(spec_payload)
+    except (OSError, json.JSONDecodeError, ValidationError, TypeError):
+        return None
+
+
+async def _revise_adaptive_loft_spec(
+    job_id: str,
+    current_spec: AdaptiveLoftSpec,
+    decision: dict,
+) -> AdaptiveLoftSpec:
+    root = _require_job(job_id)
+    job_request = json.loads((root / "request.json").read_text(encoding="utf-8"))
+    inventory = _load_subject_inventory(root)
+    images, labels = _collect_images(
+        root,
+        VisionAnalyzeRequest(
+            stage="adaptive_mesh_revision",
+            include_references=True,
+            include_renders=True,
+            max_images=14,
+        ),
+    )
+
+    system = (
+        "You revise an EXISTING adaptive loft mesh for an autonomous Blender system. Keep the useful topology and "
+        "coordinate frame of the current AdaptiveLoftSpec and improve it toward the reference images. Return the full "
+        "replacement AdaptiveLoftSpec JSON. Prefer targeted edits to section positions/contours and attachments over "
+        "starting from an unrelated shape. Preserve good geometry. You may add/remove/reposition cross-sections and "
+        "attachments when the director critique requires it, but keep exactly 8 consistently ordered contour points "
+        "per section. The loft must remain the main continuous body. Use attachments for visually separate parts. "
+        "Front is negative Y and Z is up. Return JSON only matching the schema."
+    )
+    prompt = (
+        f"Exact user request: {job_request.get('prompt', '')}\n"
+        f"Current AdaptiveLoftSpec: {json.dumps(current_spec.model_dump(), ensure_ascii=False)}\n"
+        f"Modeling director critique/instructions: {json.dumps(decision, ensure_ascii=False)}\n"
+        f"Subject inventory: {json.dumps(inventory.model_dump() if inventory else {}, ensure_ascii=False)}\n"
+        f"Images in order: {labels}\n"
+        "Make the smallest set of meaningful geometric changes that clearly improves resemblance. Do not discard "
+        "a recognizable body just because it is imperfect."
+    )
+
+    client = OllamaProxyClient()
+    errors: list[str] = []
+    for candidate_model in VISION_MODELS:
+        try:
+            result = await client.chat_json(
+                model=candidate_model,
+                system=system,
+                prompt=prompt,
+                images=images or None,
+                schema=AdaptiveLoftSpec.model_json_schema(),
+                temperature=0.0,
+                num_predict=8192,
+            )
+            normalized = _normalize_adaptive_loft_payload(
+                result.data,
+                str(job_request.get("prompt") or current_spec.title),
+            )
+            revised = AdaptiveLoftSpec.model_validate(normalized)
+        except (OllamaProxyError, httpx.HTTPError, ValidationError, ValueError, TypeError) as exc:
+            errors.append(f"{candidate_model}: {exc}")
+            continue
+
+        payload = {
+            "job_id": job_id,
+            "model": candidate_model,
+            "endpoint": result.endpoint,
+            "usage": result.usage,
+            "images": labels,
+            "director": decision,
+            "previous_spec": current_spec.model_dump(),
+            "spec": revised.model_dump(),
+            "created_at": datetime.now(UTC).isoformat(),
+        }
+        _write_llm_log(root, "adaptive-loft-revision", payload)
+        append_history(
+            root,
+            "adaptive_mesh_revision_planned",
+            model=candidate_model,
+            sections=len(revised.sections),
+            attachments=len(revised.attachments),
+            director_summary=decision.get("summary"),
+        )
+        return revised
+
+    raise HTTPException(
+        status_code=502,
+        detail="Adaptive mesh revision failed across configured vision models: "
+        + " | ".join(errors[-4:]),
+    )
+
+
+async def _refine_adaptive_mesh(job_id: str, *, decision: dict) -> dict:
+    root = _require_job(job_id)
+    status_path = root / "status.json"
+    try:
+        previous_status = json.loads(status_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        previous_status = {}
+
+    active = _active_adaptive_loft_spec(root, previous_status)
+    if active is None:
+        return await _generate_adaptive_mesh_fallback(
+            job_id,
+            reason=(decision.get("summary") or "No reusable adaptive mesh spec was available.")
+            + "\n"
+            + "\n".join(decision.get("instructions") or []),
+        )
+
+    baseline_version, current_spec = active
+    previous_model = dict(previous_status.get("generic_model") or {})
+    _write_status(
+        root,
+        state="running",
+        stage="adaptive_mesh_refining",
+        modeling_strategy="adaptive_loft",
+    )
+    revised = await _revise_adaptive_loft_spec(job_id, current_spec, decision)
+    if revised.model_dump() == current_spec.model_dump():
+        append_history(
+            root,
+            "adaptive_mesh_refinement_stop",
+            version=baseline_version,
+            reason="AI returned an unchanged adaptive mesh spec",
+        )
+        return {
+            "job_id": job_id,
+            "status": _write_status(
+                root,
+                state="ready",
+                stage="adaptive_mesh_needs_refinement",
+                modeling_strategy="adaptive_loft",
+                generic_model=previous_model,
+                quality_gate=previous_status.get("quality_gate"),
+            ),
+            "strategy": "adaptive_loft",
+            "unchanged": True,
+        }
+
+    version = 1 + len(list((root / "scene").glob("model-v*.blend")))
+    build = await _execute_adaptive_loft(job_id, revised, version=version)
+    comparison = await _compare_generic_versions(
+        root,
+        baseline_version=baseline_version,
+        candidate_version=version,
+    )
+
+    try:
+        quality = await _generic_recognizability_check(
+            job_id,
+            stage="adaptive_mesh_refinement_quality",
+        )
+    except HTTPException as exc:
+        append_history(root, "adaptive_mesh_quality_unavailable", error=str(exc.detail))
+        quality = {
+            "recognizable": None,
+            "subject_match_score": None,
+            "recommended_strategy": "base_mesh",
+            "summary": str(exc.detail),
+            "director_action": "refine_mesh",
+            "instructions": [],
+        }
+
+    recognizable = quality.get("recognizable")
+    better = bool(comparison.get("candidate_is_better"))
+    accept_candidate = recognizable is True or better
+
+    if accept_candidate:
+        stage = "adaptive_mesh_recognizable" if recognizable is True else "adaptive_mesh_needs_refinement"
+        active_model = build["status"].get("generic_model")
+        status = _write_status(
+            root,
+            state="ready",
+            stage=stage,
+            modeling_strategy="adaptive_loft",
+            generic_model=active_model,
+            quality_gate={
+                **quality,
+                "better_than_previous": better,
+                "baseline_version": baseline_version,
+                "candidate_version": version,
+            },
+        )
+        append_history(
+            root,
+            "adaptive_mesh_refinement_accepted",
+            baseline_version=baseline_version,
+            candidate_version=version,
+            recognizable=recognizable,
+            comparison_summary=comparison.get("summary"),
+        )
+    else:
+        status = _write_status(
+            root,
+            state="ready",
+            stage="adaptive_mesh_needs_refinement",
+            modeling_strategy="adaptive_loft",
+            generic_model=previous_model,
+            quality_gate={
+                "recognizable": False,
+                "subject_match_score": previous_status.get("quality_gate", {}).get("subject_match_score")
+                if isinstance(previous_status.get("quality_gate"), dict)
+                else None,
+                "recommended_strategy": "base_mesh",
+                "summary": (
+                    "The candidate refinement was not a clear improvement, so the best previous mesh was preserved. "
+                    + str(comparison.get("summary") or "")
+                ).strip(),
+                "director_action": "refine_mesh",
+                "candidate_rejected": True,
+                "baseline_version": baseline_version,
+                "candidate_version": version,
+            },
+        )
+        append_history(
+            root,
+            "adaptive_mesh_refinement_rejected",
+            baseline_version=baseline_version,
+            candidate_version=version,
+            comparison_summary=comparison.get("summary"),
+        )
+
+    build["comparison"] = comparison
+    build["quality_gate"] = quality
+    build["status"] = status
+    return build
+
+
 async def _generate_adaptive_mesh_fallback(job_id: str, *, reason: str) -> dict:
     root = _require_job(job_id)
     status_path = root / "status.json"
@@ -2571,7 +2822,11 @@ async def _generate_adaptive_mesh_fallback(job_id: str, *, reason: str) -> dict:
         status = _write_status(
             root,
             state="ready",
-            stage="generic_needs_strategy_switch",
+            stage=(
+                "adaptive_mesh_needs_refinement"
+                if previous_status.get("modeling_strategy") == "adaptive_loft"
+                else "generic_needs_strategy_switch"
+            ),
             modeling_strategy=previous_status.get("modeling_strategy") or "procedural",
             generic_model=previous_model,
             quality_gate={
@@ -2650,23 +2905,44 @@ async def _ask_modeling_director(
         "You are the lead 3D modeling director. Make the next modeling decision from the actual user request, "
         "reference images and current renders. You are responsible for visual judgment; the Python application "
         "only orchestrates your decision. Choose exactly one action: accept, build_procedural, revise_procedural, "
-        "build_mesh, or rebuild_mesh. Before renders exist, choose build_procedural or build_mesh. After renders "
-        "exist, choose accept only when the object is clearly recognizable as the requested subject and its main "
-        "silhouette/proportions/identity-critical parts are credible. Choose revise_procedural when the existing "
-        "declarative primitive strategy can plausibly be corrected. Choose rebuild_mesh when the primary silhouette "
-        "needs a continuous surface or the current strategy is fundamentally wrong. Ignore filenames and object "
-        "names as proof of correctness: judge the visible geometry. Return JSON only matching the schema."
+        "build_mesh, refine_mesh, or rebuild_mesh. Before renders exist, choose build_procedural or build_mesh. "
+        "After renders exist, choose accept only when the object is clearly recognizable as the requested subject "
+        "and its main silhouette/proportions/identity-critical parts are credible. Choose revise_procedural when "
+        "the existing declarative primitive strategy can plausibly be corrected. When the current strategy is an "
+        "adaptive mesh and the visible result already has the correct broad subject/category and a usable body, "
+        "prefer refine_mesh: keep the best-so-far mesh and correct its proportions, silhouette, roof/upper profile, "
+        "front/rear shape, wheel/attachment placement and other visible geometry. Do NOT request rebuild_mesh merely "
+        "because the current mesh is crude, low-detail, or has inaccurate proportions. Use rebuild_mesh only when "
+        "the main topology/axis/body concept is fundamentally wrong enough that editing the current mesh is unlikely "
+        "to converge. Ignore filenames and object names as proof of correctness: judge the visible geometry. "
+        "Return JSON only matching the schema."
     )
+    status_payload: dict = {}
+    status_path = root / "status.json"
+    if status_path.exists():
+        try:
+            status_payload = json.loads(status_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            status_payload = {}
+    recent_director_history = [
+        event
+        for event in load_history(root)[-40:]
+        if event.get("event") == "modeling_director"
+    ][-6:]
+
     prompt = (
         f"Exact user request: {job_request.get('prompt', '')}\n"
         f"Intended use: {job_request.get('intended_use', '')}\n"
         f"Current strategy: {current_strategy}\n"
         f"Current stage: {stage}\n"
+        f"Current quality gate: {json.dumps(status_payload.get('quality_gate') or {}, ensure_ascii=False)}\n"
+        f"Recent director decisions: {json.dumps(recent_director_history, ensure_ascii=False)}\n"
         f"AI-generated subject inventory: "
         f"{json.dumps(inventory.model_dump() if inventory else {}, ensure_ascii=False)}\n"
         f"Images in order: {labels}\n"
-        "Give concrete instructions for the next modeling pass. Spend the available reasoning budget on visual "
-        "comparison and geometry decisions rather than generic commentary."
+        "Give concrete instructions for the next modeling pass. Preserve geometry that is already moving toward "
+        "the reference instead of repeatedly restarting. Spend the available reasoning budget on visual comparison "
+        "and specific geometry decisions rather than generic commentary."
     )
 
     client = OllamaProxyClient()
@@ -2743,7 +3019,7 @@ async def _generic_recognizability_check(job_id: str, *, stage: str) -> dict:
     recognizable = action == "accept"
     recommended_strategy = (
         "base_mesh"
-        if action in {"build_mesh", "rebuild_mesh"}
+        if action in {"build_mesh", "refine_mesh", "rebuild_mesh"}
         else "procedural"
     )
     return {
@@ -2890,12 +3166,22 @@ async def refine_generic_scene(job_id: str, request: GenericRefineRequest) -> di
                 quality_gate=quality_gate,
             )
             return {"job_id": job_id, "iterations": [], "rejected": None, "quality_gate": quality_gate, "status": status}
-        return await _generate_adaptive_mesh_fallback(
-            job_id,
-            reason=(decision.get("summary") or "")
-            + "\n"
-            + "\n".join(decision.get("instructions") or []),
-        )
+        if decision["action"] == "rebuild_mesh":
+            append_history(
+                root,
+                "adaptive_mesh_rebuild_requested",
+                score=decision.get("subject_match_score"),
+                reason=decision.get("summary"),
+            )
+            return await _generate_adaptive_mesh_fallback(
+                job_id,
+                reason=(decision.get("summary") or "")
+                + "\n"
+                + "\n".join(decision.get("instructions") or []),
+            )
+        # Once a usable mesh exists, build_mesh/revise_procedural/refine_mesh all mean
+        # improve the existing best-so-far mesh rather than discarding it.
+        return await _refine_adaptive_mesh(job_id, decision=decision)
 
     spec_files = sorted(root.glob("scene-spec-v*.json"), key=lambda path: path.stat().st_mtime)
     if not spec_files:

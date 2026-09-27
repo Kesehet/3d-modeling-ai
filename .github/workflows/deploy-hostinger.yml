@@ -363,6 +363,73 @@ jobs:
 
           echo "All P0 structural + visual quality benchmarks passed."
 
+      - name: Roll back failed deployment
+        if: ${{ failure() && github.event_name == 'push' && github.event.before != '0000000000000000000000000000000000000000' }}
+        env:
+          HOSTINGER_API_KEY: ${{ secrets.HOSTINGER_API_KEY }}
+          THREED_API_TOKEN_B64: ${{ steps.encoded.outputs.threed }}
+          OLLAMA_PROXY_API_KEY_B64: ${{ steps.encoded.outputs.ollama }}
+          THREED_HOSTNAME: ${{ vars.THREED_HOSTNAME || '3d-modeling-ai.srv1058562.hstgr.cloud' }}
+          PREVIOUS_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          if [ ! -s "$RUNNER_TEMP/bootstrap.yml" ]; then
+            echo "Rollback bootstrap definition is unavailable; nothing was deployed yet."
+            exit 0
+          fi
+          test -n "$HOSTINGER_API_KEY"
+          test -n "$THREED_API_TOKEN_B64"
+          test -n "$OLLAMA_PROXY_API_KEY_B64"
+          test -n "$PREVIOUS_SHA"
+
+          echo "Deployment validation failed. Rolling production back to $PREVIOUS_SHA."
+          runtime_env=$(printf '%s\n' \
+            "GITHUB_REPOSITORY=$GITHUB_REPOSITORY" \
+            "GITHUB_SHA=$PREVIOUS_SHA" \
+            "THREED_API_TOKEN_B64=$THREED_API_TOKEN_B64" \
+            "OLLAMA_PROXY_API_KEY_B64=$OLLAMA_PROXY_API_KEY_B64" \
+            "THREED_HOSTNAME=$THREED_HOSTNAME")
+          jq -n \
+            --arg project_name "$BOOTSTRAP_PROJECT" \
+            --rawfile content "$RUNNER_TEMP/bootstrap.yml" \
+            --arg environment "$runtime_env" \
+            '{project_name:$project_name,content:$content,environment:$environment}' \
+            > "$RUNNER_TEMP/rollback-payload.json"
+
+          base="https://developers.hostinger.com/api/vps/v1/virtual-machines/$VPS_ID/docker"
+          curl --silent --show-error --request DELETE \
+            --header "Authorization: Bearer $HOSTINGER_API_KEY" \
+            "$base/$BOOTSTRAP_PROJECT/down" >/dev/null 2>&1 || true
+          sleep 3
+          curl --fail --silent --show-error \
+            --request POST \
+            --header "Authorization: Bearer $HOSTINGER_API_KEY" \
+            --header 'Content-Type: application/json' \
+            --data-binary @"$RUNNER_TEMP/rollback-payload.json" \
+            "$base" >/dev/null
+
+          for attempt in $(seq 1 180); do
+            containers=$(curl --silent --show-error --header "Authorization: Bearer $HOSTINGER_API_KEY" \
+              "$base/$BOOTSTRAP_PROJECT/containers" 2>/dev/null || echo '[]')
+            logs=$(curl --silent --show-error --header "Authorization: Bearer $HOSTINGER_API_KEY" \
+              "$base/$BOOTSTRAP_PROJECT/logs" 2>/dev/null || echo '[]')
+            if echo "$logs" | jq -e '[.[]?.entries[]?.line // ""] | any(. == "THREED_BOOTSTRAP_OK")' >/dev/null 2>&1; then
+              echo "Rollback completed successfully to $PREVIOUS_SHA."
+              exit 0
+            fi
+            state=$(echo "$containers" | jq -r 'if type == "array" and length > 0 then .[0].state // "unknown" else "pending" end' 2>/dev/null || echo pending)
+            echo "Rollback attempt $attempt/180: state=$state"
+            if [ "$state" = exited ] || [ "$state" = dead ]; then
+              echo "Rollback bootstrap failed." >&2
+              echo "$logs" | jq -r '.[]?.entries[-240:][]? | "\(.timestamp // "") \(.line // "")"' || true
+              exit 1
+            fi
+            sleep 5
+          done
+
+          echo "Rollback timed out." >&2
+          exit 1
+
       - name: Remove disposable bootstrap
         if: always()
         env:

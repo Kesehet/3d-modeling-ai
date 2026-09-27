@@ -6165,6 +6165,8 @@ async def refine_generic_scene(job_id: str, request: GenericRefineRequest) -> di
         "adaptive_mesh_needs_refinement",
     }:
         feature_task = begin_feature(root)
+        if feature_task is not None and feature_task.build_mode == "component_job":
+            return await _build_and_install_component_feature(job_id, feature_task)
         if feature_task is not None:
             append_history(
                 root,
@@ -6259,6 +6261,8 @@ async def refine_generic_scene(job_id: str, request: GenericRefineRequest) -> di
 
     for offset in range(request.iterations):
         feature_task = begin_feature(root)
+        if feature_task is not None and feature_task.build_mode == "component_job":
+            return await _build_and_install_component_feature(job_id, feature_task)
         if feature_task is not None:
             append_history(
                 root,
@@ -6376,6 +6380,8 @@ async def refine_generic_scene(job_id: str, request: GenericRefineRequest) -> di
                 )
                 normalized = _normalize_scene_spec_payload(result.data, current_spec.title)
                 revised = GenericSceneSpec.model_validate(normalized)
+                if job_request.get("component_job") is True:
+                    revised.presentation_base = False
             except (OllamaProxyError, httpx.HTTPError, ValidationError, ValueError, TypeError) as exc:
                 errors.append(f"{candidate_model}: {exc}")
                 continue

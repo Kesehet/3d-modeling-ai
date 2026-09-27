@@ -741,6 +741,7 @@ class ReferenceCandidateDecision(BaseModel):
     stored_name: str = Field(min_length=1, max_length=220)
     accept: bool = False
     match_score: float = Field(default=0.0, ge=0.0, le=1.0)
+    score_inferred: bool = False
     exact_identity_match: bool = False
     useful_for_geometry: bool = False
     reason: str = Field(default="", max_length=1200)
@@ -2370,10 +2371,11 @@ def _normalize_reference_pack_payload(
             continue
         used_names.add(stored_name)
 
-        raw_score = (
-            raw.get("match_score")
-            if "match_score" in raw
-            else raw.get("score", raw.get("confidence", raw.get("similarity", 0.0)))
+        score_keys = ("match_score", "score", "confidence", "similarity")
+        score_present = any(key in raw and raw.get(key) is not None for key in score_keys)
+        raw_score = next(
+            (raw.get(key) for key in score_keys if key in raw and raw.get(key) is not None),
+            0.0,
         )
         try:
             score = float(raw_score or 0.0)
@@ -2396,8 +2398,15 @@ def _normalize_reference_pack_payload(
         accept_raw = raw.get("accept", raw.get("accepted", raw.get("relevant")))
         accepted = _reference_bool(
             accept_raw,
-            default=bool(score >= 0.70 and exact and useful),
+            default=bool(exact and useful),
         )
+        score_inferred = False
+        if not score_present and accepted and exact and useful:
+            # Gemma often returns the strict booleans correctly but omits the
+            # redundant numeric score. Preserve that decision, while marking
+            # the score as inferred so acceptance can require stronger metadata.
+            score = 0.85
+            score_inferred = True
         if exact_raw is None and accepted and score >= 0.85:
             exact = True
         if useful_raw is None and accepted:
@@ -2414,6 +2423,7 @@ def _normalize_reference_pack_payload(
                 "stored_name": stored_name,
                 "accept": accepted,
                 "match_score": score,
+                "score_inferred": score_inferred,
                 "exact_identity_match": exact,
                 "useful_for_geometry": useful,
                 "reason": reason,
@@ -2448,6 +2458,29 @@ def _metadata_supports_reference_identity(
     ).lower()
     metadata_tokens = set(tokens(metadata_text))
     return all(term in metadata_tokens for term in identity_terms)
+
+
+def _metadata_title_supports_reference_identity(
+    plan: ReferenceSearchPlan,
+    record: dict,
+) -> bool:
+    ignored = {
+        "a", "an", "the", "car", "vehicle", "model", "image", "photo",
+        "front", "rear", "side", "exterior", "view", "of",
+    }
+    identity_terms = [
+        token
+        for token in re.findall(r"[a-z0-9]+", str(plan.primary_query or "").lower())
+        if len(token) > 1 and token not in ignored
+    ]
+    if not identity_terms:
+        return False
+    title_text = " ".join(
+        str(record.get(key) or "")
+        for key in ("title", "source_title")
+    ).lower()
+    title_tokens = set(re.findall(r"[a-z0-9]+", title_text))
+    return all(term in title_tokens for term in identity_terms)
 
 
 def _archive_reference_candidate(root: Path, stored_name: str) -> str | None:
@@ -2571,6 +2604,7 @@ async def _verify_reference_batch(
             **record,
             "verified": True,
             "match_score": decision.match_score,
+            "score_inferred": decision.score_inferred,
             "exact_identity_match": decision.exact_identity_match,
             "useful_for_geometry": decision.useful_for_geometry,
             "verification_reason": decision.reason,
@@ -2580,6 +2614,7 @@ async def _verify_reference_batch(
             "verified_at": datetime.now(UTC).isoformat(),
         }
         metadata_identity = _metadata_supports_reference_identity(plan, record)
+        title_identity = _metadata_title_supports_reference_identity(plan, record)
         should_accept = (
             decision.accept
             and decision.useful_for_geometry
@@ -2587,6 +2622,10 @@ async def _verify_reference_batch(
             and (
                 decision.exact_identity_match
                 or (metadata_identity and decision.match_score >= 0.78)
+            )
+            and (
+                not decision.score_inferred
+                or (decision.exact_identity_match and title_identity)
             )
         )
         if should_accept:
@@ -2667,6 +2706,14 @@ async def research_job(job_id: str, request: ResearchRequest) -> dict:
 
     _write_status(root, state="running", stage="researching_references")
     plan = await _plan_reference_search(job_request, requested_query)
+    normalized_primary = re.sub(
+        r"^(?:a|an|the)\\s+",
+        "",
+        str(plan.primary_query or requested_query).strip(),
+        flags=re.IGNORECASE,
+    ).strip()
+    if normalized_primary and normalized_primary != plan.primary_query:
+        plan = plan.model_copy(update={"primary_query": normalized_primary})
 
     # Keep user-uploaded references, but remove old automatic references that were
     # never verified or previously failed identity matching.
@@ -2678,6 +2725,18 @@ async def research_job(job_id: str, request: ResearchRequest) -> dict:
         value = str(value or "").strip()
         if value and value.casefold() not in {item.casefold() for item in queries}:
             queries.append(value)
+
+    # Some reasoning models legitimately return no alternate searches. Do not then
+    # spend the entire reference budget on one broad Wikimedia query: add deterministic
+    # orthographic-ish views that work for vehicles, furniture, products and characters.
+    if len(queries) < 4:
+        base_query = str(plan.primary_query or requested_query).strip()
+        for suffix in ("front view", "side view", "rear view"):
+            value = f"{base_query} {suffix}".strip()
+            if value.casefold() not in {item.casefold() for item in queries}:
+                queries.append(value)
+            if len(queries) >= 4:
+                break
     queries = queries[:4]
 
     accepted_new: list[dict] = []

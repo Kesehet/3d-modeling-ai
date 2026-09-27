@@ -4667,20 +4667,41 @@ async def refine_generic_scene(job_id: str, request: GenericRefineRequest) -> di
         )
         if decision["action"] == "accept":
             if feature_task is not None:
+                feature_evaluation = await _evaluate_feature_candidate(
+                    job_id,
+                    feature_task,
+                    baseline_version=None,
+                    candidate_version=current_version,
+                )
+                feature_passed = _feature_evaluation_accepts(
+                    feature_task,
+                    feature_evaluation,
+                )
                 finish_feature(
                     root,
                     feature_task.id,
-                    accepted=True,
-                    version=current_version,
-                    summary=str(decision.get("summary") or "Director accepted the current feature."),
+                    accepted=feature_passed,
+                    version=current_version if feature_passed else None,
+                    summary=str(feature_evaluation.get("summary") or decision.get("summary") or ""),
+                    error="" if feature_passed else "Strict feature QA rejected the current geometry.",
+                    verified=feature_passed,
+                    acceptance_score=float(
+                        feature_evaluation.get("reference_match_score") or 0.0
+                    ),
+                    acceptance_model=(
+                        str(feature_evaluation.get("model"))
+                        if feature_evaluation.get("model")
+                        else None
+                    ),
                 )
                 append_history(
                     root,
-                    "feature_subjob_accepted",
+                    "feature_subjob_accepted" if feature_passed else "feature_subjob_retry",
                     feature_id=feature_task.id,
                     feature_name=feature_task.name,
-                    version=current_version,
+                    version=current_version if feature_passed else None,
                     accepted_without_rebuild=True,
+                    strict_qa=True,
                 )
             break
         if decision["action"] in {"build_mesh", "rebuild_mesh"}:
@@ -4788,6 +4809,7 @@ async def refine_generic_scene(job_id: str, request: GenericRefineRequest) -> di
                 )
             break
 
+        previous_iteration_status = _read_status(root)
         version = 1 + len(list((root / "scene").glob("model-v*.blend")))
         build = await _execute_generic_spec(job_id, revised, version=version)
         append_history(
@@ -4798,29 +4820,79 @@ async def refine_generic_scene(job_id: str, request: GenericRefineRequest) -> di
             object_count=len(revised.objects),
             director_summary=decision.get("summary"),
         )
+
+        feature_evaluation = None
+        feature_passed = True
         if feature_task is not None:
+            feature_evaluation = await _evaluate_feature_candidate(
+                job_id,
+                feature_task,
+                baseline_version=current_version,
+                candidate_version=version,
+            )
+            feature_passed = _feature_evaluation_accepts(
+                feature_task,
+                feature_evaluation,
+            )
             finish_feature(
                 root,
                 feature_task.id,
-                accepted=True,
-                version=version,
-                summary=str(decision.get("summary") or ""),
+                accepted=feature_passed,
+                version=version if feature_passed else None,
+                summary=str(feature_evaluation.get("summary") or ""),
+                error="" if feature_passed else "Strict feature QA rejected the candidate.",
+                verified=feature_passed,
+                acceptance_score=float(
+                    feature_evaluation.get("reference_match_score") or 0.0
+                ),
+                acceptance_model=(
+                    str(feature_evaluation.get("model"))
+                    if feature_evaluation.get("model")
+                    else None
+                ),
             )
             append_history(
                 root,
-                "feature_subjob_accepted",
+                "feature_subjob_accepted" if feature_passed else "feature_subjob_retry",
                 feature_id=feature_task.id,
                 feature_name=feature_task.name,
-                version=version,
+                version=version if feature_passed else None,
+                strict_qa=True,
+                reference_match_score=feature_evaluation.get("reference_match_score"),
+                confidence=feature_evaluation.get("confidence"),
             )
+
         completed.append(
             {
                 "director": decision,
                 "spec": revised.model_dump(),
                 "build": build,
-                "accepted": True,
+                "feature_evaluation": feature_evaluation,
+                "accepted": feature_passed,
             }
         )
+
+        if feature_task is not None and not feature_passed:
+            previous_model = previous_iteration_status.get("generic_model")
+            _write_status(
+                root,
+                state="ready",
+                stage=previous_iteration_status.get("stage") or "generic_needs_refinement",
+                modeling_strategy=previous_iteration_status.get("modeling_strategy") or "procedural",
+                generic_model=previous_model if isinstance(previous_model, dict) else None,
+                quality_gate=previous_iteration_status.get("quality_gate"),
+            )
+            append_history(
+                root,
+                "feature_candidate_rejected",
+                feature_id=feature_task.id,
+                feature_name=feature_task.name,
+                candidate_version=version,
+                preserved_version=current_version,
+                reason=str((feature_evaluation or {}).get("summary") or "strict feature QA failed"),
+            )
+            break
+
         current_spec = revised
         current_version = version
 

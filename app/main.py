@@ -2763,6 +2763,7 @@ def _feature_evaluation_accepts(
         and evaluation.get("visible") is True
         and evaluation.get("criteria_satisfied") is True
         and evaluation.get("regression_detected") is not True
+        and (not primary_shape or evaluation.get("subject_recognizable") is True)
         and confidence >= 0.75
         and match_score >= minimum_match
     )
@@ -2820,7 +2821,9 @@ async def _evaluate_feature_candidate(
         "NOT RELATIVE: a feature being better than the baseline is never enough by itself. Set passed=true and "
         "criteria_satisfied=true only when the candidate visibly satisfies ALL acceptance criteria that can be judged "
         "from the supplied pixels. Set visible=true only when the feature itself is clearly visible in the candidate. "
-        "reference_match_score is an absolute 0..1 score for how closely this feature matches the reference appearance, "
+        "subject_recognizable must indicate whether an unfamiliar viewer could recognize the requested overall subject "
+        "from the candidate renders; this is mandatory for primary silhouette/body features. reference_match_score is "
+        "an absolute 0..1 score for how closely this feature matches the reference appearance, "
         "shape, placement, count and proportions. If a criterion demands precision that cannot actually be verified "
         "from these images (for example exact millimetres or a 1% tolerance), do NOT pretend it was measured: set "
         "criteria_satisfied=false and explain the unverifiable criterion. If the candidate merely improved but remains "

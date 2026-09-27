@@ -29,6 +29,7 @@ from .config import (
 from .dashboard import dashboard_page, jobs_snapshot, public_artifact, public_render
 from .generic_builder import generic_scene_script
 from .history import append_history, load_history
+from .mesh_builder import adaptive_loft_script
 from .ollama import OllamaProxyClient, OllamaProxyError
 from .quality import evaluate_scene_spec_structural, get_benchmark
 from .repair import print_repair_script
@@ -587,6 +588,23 @@ class GenericSceneSpec(BaseModel):
     rationale: str = Field(default="", max_length=2000)
     presentation_base: bool = True
     objects: list[SceneObjectSpec] = Field(min_length=1, max_length=40)
+
+
+class LoftSection(BaseModel):
+    position: float = Field(ge=-10.0, le=10.0)
+    contour: list[tuple[float, float]] = Field(min_length=8, max_length=8)
+
+
+class AdaptiveLoftSpec(BaseModel):
+    title: str = Field(min_length=1, max_length=120)
+    rationale: str = Field(default="", max_length=2400)
+    axis: Literal["x", "y", "z"] = "y"
+    color: str = Field(default="#B8BDC6", pattern=r"^#[0-9A-Fa-f]{6}$")
+    subdivision_levels: int = Field(default=1, ge=0, le=2)
+    smooth: bool = True
+    presentation_base: bool = True
+    sections: list[LoftSection] = Field(min_length=4, max_length=12)
+    attachments: list[SceneObjectSpec] = Field(default_factory=list, max_length=24)
 
 
 def _semantic_name_tokens(value: str) -> set[str]:

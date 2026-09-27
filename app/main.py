@@ -1669,45 +1669,332 @@ async def download_artifact(job_id: str, category: str, filename: str) -> FileRe
     return FileResponse(path)
 
 
+async def _plan_reference_search(
+    job_request: dict,
+    requested_query: str,
+) -> ReferenceSearchPlan:
+    """Turn a free-form modeling prompt into a precise image-search identity."""
+    system = (
+        "You create precise web image-search plans for 3D reconstruction. Extract the exact visible subject identity "
+        "from the user's modeling request. For a named make/model, character, product, animal species, landmark, etc., "
+        "keep that identity intact and remove instructions such as 'make', '3D model', print dimensions, materials, "
+        "or workflow chatter. The primary query should be short and identity-focused. Alternate queries may add useful "
+        "exterior/view words but must not broaden to sibling products or similar-looking subjects. identity_constraints "
+        "must state what an image has to visibly depict to count as the requested subject. Return JSON only."
+    )
+    prompt = (
+        f"Full modeling request: {job_request.get('prompt', '')}\n"
+        f"Requested research query: {requested_query}\n"
+        f"Intended use: {job_request.get('intended_use', '')}\n"
+        "Produce a strict image-search plan for geometry references."
+    )
+    client = OllamaProxyClient()
+    errors: list[str] = []
+    for candidate_model in (REASONING_MODEL, *VISION_MODELS):
+        try:
+            result = await client.chat_json(
+                model=candidate_model,
+                system=system,
+                prompt=prompt,
+                schema=ReferenceSearchPlan.model_json_schema(),
+                temperature=0.0,
+                num_predict=2048,
+            )
+            plan = ReferenceSearchPlan.model_validate(result.data)
+        except (OllamaProxyError, httpx.HTTPError, ValidationError, ValueError, TypeError) as exc:
+            errors.append(f"{candidate_model}: {exc}")
+            continue
+        return plan
+
+    return ReferenceSearchPlan(
+        primary_query=requested_query[:180],
+        alternate_queries=[],
+        subject_description=str(job_request.get("prompt") or requested_query)[:1200],
+        identity_constraints=[],
+    )
+
+
+async def _verify_reference_batch(
+    root: Path,
+    *,
+    plan: ReferenceSearchPlan,
+    query: str,
+    records: list[dict],
+) -> tuple[list[dict], list[dict]]:
+    """Visually verify automatic search results before they enter the reference pack."""
+    usable_records: list[dict] = []
+    image_paths: list[Path] = []
+    for record in records[:8]:
+        stored_name = str(record.get("stored_name") or "")
+        path = root / "references" / Path(stored_name).name
+        if not stored_name or not path.is_file():
+            continue
+        usable_records.append(record)
+        image_paths.append(path)
+    if not image_paths:
+        return [], []
+
+    images = _encode_vision_images(image_paths)
+    labels = [path.name for path in image_paths]
+    metadata = [
+        {
+            "stored_name": record.get("stored_name"),
+            "title": record.get("title"),
+            "description": record.get("description"),
+            "source_title": record.get("source_title"),
+            "provider": record.get("provider"),
+        }
+        for record in usable_records
+    ]
+    system = (
+        "You are a strict visual reference curator for 3D reconstruction. Inspect the ACTUAL PIXELS of every supplied "
+        "candidate image. Accept an image only when it clearly depicts the exact requested subject and is useful for "
+        "modeling its visible geometry. For a named make/model/product/character, reject sibling models, different "
+        "generations when visibly inconsistent, unrelated objects, logos, maps, diagrams, screenshots, isolated parts, "
+        "or images where identity is uncertain. Do not trust filenames/titles over pixels. A useful geometry reference "
+        "should show a substantial portion of the requested subject with readable silhouette/proportions. Return one "
+        "decision for every supplied stored_name. exact_identity_match must be true for accepted images. "
+        "useful_for_geometry must also be true for accepted images. Return JSON only."
+    )
+    prompt = (
+        f"Primary requested identity: {plan.primary_query}\n"
+        f"Subject description: {plan.subject_description}\n"
+        f"Identity constraints: {json.dumps(plan.identity_constraints, ensure_ascii=False)}\n"
+        f"Search query used: {query}\n"
+        f"Candidate metadata in image order: {json.dumps(metadata, ensure_ascii=False)}\n"
+        f"Image labels in order: {labels}\n"
+        "Be conservative. A false positive reference can corrupt the entire 3D model."
+    )
+
+    client = OllamaProxyClient()
+    errors: list[str] = []
+    decision_map: dict[str, ReferenceCandidateDecision] = {}
+    selected_model: str | None = None
+    for candidate_model in VISION_MODELS:
+        try:
+            result = await client.chat_json(
+                model=candidate_model,
+                system=system,
+                prompt=prompt,
+                images=images,
+                schema=ReferencePackDecision.model_json_schema(),
+                temperature=0.0,
+                num_predict=4096,
+            )
+            pack = ReferencePackDecision.model_validate(result.data)
+        except (OllamaProxyError, httpx.HTTPError, ValidationError, ValueError, TypeError) as exc:
+            errors.append(f"{candidate_model}: {exc}")
+            continue
+        selected_model = candidate_model
+        decision_map = {decision.stored_name: decision for decision in pack.decisions}
+        break
+
+    accepted: list[dict] = []
+    rejected: list[dict] = []
+    for record in usable_records:
+        stored_name = str(record.get("stored_name") or "")
+        decision = decision_map.get(stored_name)
+        if decision is None:
+            decision = ReferenceCandidateDecision(
+                stored_name=stored_name,
+                accept=False,
+                match_score=0.0,
+                exact_identity_match=False,
+                useful_for_geometry=False,
+                reason=(
+                    "Visual verifier did not return a decision for this candidate."
+                    if selected_model
+                    else "Visual verification failed across configured vision models: " + " | ".join(errors[-3:])
+                ),
+            )
+
+        verified_record = {
+            **record,
+            "verified": True,
+            "match_score": decision.match_score,
+            "exact_identity_match": decision.exact_identity_match,
+            "useful_for_geometry": decision.useful_for_geometry,
+            "verification_reason": decision.reason,
+            "verification_model": selected_model,
+            "verification_query": query,
+            "verified_at": datetime.now(UTC).isoformat(),
+        }
+        should_accept = (
+            decision.accept
+            and decision.exact_identity_match
+            and decision.useful_for_geometry
+            and decision.match_score >= 0.70
+        )
+        if should_accept:
+            accepted.append(verified_record)
+        else:
+            rejected.append(verified_record)
+            try:
+                (root / "references" / Path(stored_name).name).unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    append_history(
+        root,
+        "reference_candidates_verified",
+        query=query,
+        model=selected_model,
+        candidate_count=len(usable_records),
+        accepted=len(accepted),
+        rejected=len(rejected),
+        verifier_errors=errors[-3:],
+    )
+    return accepted, rejected
+
+
+async def _verify_reference_candidates(
+    root: Path,
+    *,
+    plan: ReferenceSearchPlan,
+    query: str,
+    records: list[dict],
+    max_images: int,
+) -> tuple[list[dict], list[dict]]:
+    accepted: list[dict] = []
+    rejected: list[dict] = []
+    for start in range(0, len(records), 8):
+        batch = records[start : start + 8]
+        batch_accepted, batch_rejected = await _verify_reference_batch(
+            root,
+            plan=plan,
+            query=query,
+            records=batch,
+        )
+        accepted.extend(batch_accepted)
+        rejected.extend(batch_rejected)
+        if len(accepted) >= max_images:
+            # Candidates not evaluated because we already have enough should not remain
+            # loose in the references directory.
+            for record in records[start + 8 :]:
+                stored_name = str(record.get("stored_name") or "")
+                if stored_name:
+                    try:
+                        (root / "references" / Path(stored_name).name).unlink(missing_ok=True)
+                    except OSError:
+                        pass
+            break
+    return accepted[:max_images], rejected
+
+
 async def research_job(job_id: str, request: ResearchRequest) -> dict:
     root = _require_job(job_id)
     job_request = json.loads((root / "request.json").read_text(encoding="utf-8"))
-    query = (request.query or job_request.get("prompt") or "").strip()
+    requested_query = (request.query or job_request.get("prompt") or "").strip()
+    if not requested_query:
+        raise HTTPException(status_code=400, detail="Reference research query is empty.")
+
     _write_status(root, state="running", stage="researching_references")
-    try:
-        payload = await research_web_references(
-            query,
-            root / "references",
-            max_images=request.max_images,
-        )
-    except (httpx.HTTPError, ValueError) as exc:
-        _write_status(root, state="failed", stage="researching_references", error=str(exc))
-        raise HTTPException(status_code=502, detail=f"Reference research failed: {exc}") from exc
+    plan = await _plan_reference_search(job_request, requested_query)
 
-    index = _load_reference_index(root)
-    known_hashes = {str(item.get("sha256")) for item in index}
-    added = []
-    for record in payload.get("references", []):
-        if record.get("sha256") in known_hashes:
+    # Keep user-uploaded references, but remove old automatic references that were
+    # never verified or previously failed identity matching.
+    index = _prune_unverified_auto_references(root, _load_reference_index(root))
+    known_hashes = {str(item.get("sha256")) for item in index if item.get("sha256")}
+
+    queries: list[str] = []
+    for value in [plan.primary_query, *plan.alternate_queries, requested_query]:
+        value = str(value or "").strip()
+        if value and value.casefold() not in {item.casefold() for item in queries}:
+            queries.append(value)
+    queries = queries[:4]
+
+    accepted_new: list[dict] = []
+    rejected: list[dict] = []
+    pages: list[dict] = []
+    research_runs: list[dict] = []
+    research_errors: list[str] = []
+
+    for query in queries:
+        if len(accepted_new) >= request.max_images:
+            break
+        try:
+            payload = await research_web_references(
+                query,
+                root / "references",
+                max_images=request.max_images,
+            )
+        except (httpx.HTTPError, ValueError) as exc:
+            research_errors.append(f"{query}: {exc}")
             continue
-        index.append(record)
-        added.append(record)
-        known_hashes.add(str(record.get("sha256")))
 
-    (root / "references.json").write_text(json.dumps(index, indent=2, ensure_ascii=False), encoding="utf-8")
-    write_research_manifest(root / "research.json", payload)
-    append_history(root, "research", query=query, added=len(added), provider=payload.get("provider"))
+        research_runs.append(payload)
+        pages.extend(payload.get("pages", []))
+        candidate_records = [
+            record
+            for record in payload.get("references", [])
+            if record.get("sha256") not in known_hashes
+        ]
+        batch_accepted, batch_rejected = await _verify_reference_candidates(
+            root,
+            plan=plan,
+            query=query,
+            records=candidate_records,
+            max_images=request.max_images - len(accepted_new),
+        )
+        rejected.extend(batch_rejected)
+        for record in batch_accepted:
+            digest = str(record.get("sha256") or "")
+            if digest and digest in known_hashes:
+                continue
+            accepted_new.append(record)
+            if digest:
+                known_hashes.add(digest)
+
+    index.extend(accepted_new)
+    index = _prune_unverified_auto_references(root, index)
+    (root / "references.json").write_text(
+        json.dumps(index, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    manifest = {
+        "requested_query": requested_query,
+        "search_plan": plan.model_dump(),
+        "queries": queries,
+        "provider": "wikimedia+vision-verifier",
+        "created_at": datetime.now(UTC).isoformat(),
+        "pages": pages,
+        "accepted": accepted_new,
+        "rejected": rejected,
+        "research_errors": research_errors,
+        "runs": research_runs,
+    }
+    write_research_manifest(root / "research.json", manifest)
+
+    usable = _usable_reference_index(root)
+    append_history(
+        root,
+        "research",
+        requested_query=requested_query,
+        primary_query=plan.primary_query,
+        queries=queries,
+        accepted=len(accepted_new),
+        rejected=len(rejected),
+        usable_reference_count=len(usable),
+        provider="wikimedia+vision-verifier",
+        errors=research_errors,
+    )
     status = _write_status(
         root,
         state="ready",
-        stage="references_researched",
-        reference_count=len(index),
+        stage="references_researched" if usable else "references_unavailable",
+        reference_count=len(usable),
+        reference_search_query=plan.primary_query,
+        rejected_reference_count=len(rejected),
     )
     return {
         "job_id": job_id,
-        "query": query,
-        "added": added,
-        "pages": payload.get("pages", []),
+        "query": requested_query,
+        "search_plan": plan.model_dump(),
+        "added": accepted_new,
+        "rejected": rejected,
+        "pages": pages,
+        "research_errors": research_errors,
         "status": status,
     }
 
@@ -2237,7 +2524,7 @@ async def _build_generic_scene_spec(job_id: str, auto_research: bool) -> Generic
     root = _require_job(job_id)
     job_request = json.loads((root / "request.json").read_text(encoding="utf-8"))
 
-    if auto_research and not _load_reference_index(root):
+    if auto_research and not _usable_reference_index(root):
         try:
             await research_job(job_id, ResearchRequest(max_images=5))
         except HTTPException:
@@ -3512,7 +3799,7 @@ async def _generic_recognizability_check(job_id: str, *, stage: str) -> dict:
 async def generate_generic_scene(job_id: str, request: GenericGenerateRequest) -> dict:
     root = _require_job(job_id)
 
-    if request.auto_research and not _load_reference_index(root):
+    if request.auto_research and not _usable_reference_index(root):
         try:
             await research_job(job_id, ResearchRequest(max_images=5))
         except HTTPException:
@@ -4030,7 +4317,7 @@ async def refine_pikachu(job_id: str, request: PikachuRefineRequest) -> dict:
     if not any((root / "renders").glob("pikachu-*.png")):
         await _execute_pikachu(job_id, prefix="pikachu", version=1)
 
-    if request.auto_research and not _load_reference_index(root):
+    if request.auto_research and not _usable_reference_index(root):
         try:
             await research_job(job_id, ResearchRequest(max_images=5))
         except HTTPException:

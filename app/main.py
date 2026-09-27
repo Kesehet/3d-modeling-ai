@@ -2926,14 +2926,33 @@ async def _evaluate_feature_candidate(
     root = _require_job(job_id)
     job_request = json.loads((root / "request.json").read_text(encoding="utf-8"))
     views = _feature_diagnostic_views(feature_task)
+    reference_paths: list[Path] = []
+    for record in _usable_reference_index(root):
+        stored_name = str(record.get("stored_name") or "")
+        if not stored_name:
+            continue
+        path = root / "references" / Path(stored_name).name
+        if path.is_file() and path.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp"}:
+            reference_paths.append(path)
     reference_paths = sorted(
-        [
-            path
-            for path in (root / "references").glob("*")
-            if path.is_file() and path.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp"}
-        ],
+        reference_paths,
         key=lambda path: path.stat().st_mtime,
     )[-3:]
+    if not reference_paths:
+        return {
+            "feature_id": feature_task.id,
+            "passed": False,
+            "visible": False,
+            "criteria_satisfied": False,
+            "subject_recognizable": False,
+            "confidence": 0.0,
+            "reference_match_score": 0.0,
+            "regression_detected": False,
+            "summary": "Strict feature QA has no verified reference image to compare against.",
+            "problems": ["no verified reference images"],
+            "protected_geometry_notes": [],
+            "model": None,
+        }
     baseline_paths = (
         [
             root / "renders" / f"model-v{baseline_version}-{view}.png"
@@ -2951,7 +2970,10 @@ async def _evaluate_feature_candidate(
             "feature_id": feature_task.id,
             "passed": False,
             "visible": False,
+            "criteria_satisfied": False,
+            "subject_recognizable": False,
             "confidence": 0.0,
+            "reference_match_score": 0.0,
             "regression_detected": True,
             "summary": "Feature QA could not run because comparison renders are missing.",
             "problems": ["missing comparison renders"],
@@ -3038,7 +3060,10 @@ async def _evaluate_feature_candidate(
         "feature_id": feature_task.id,
         "passed": False,
         "visible": False,
+        "criteria_satisfied": False,
+        "subject_recognizable": False,
         "confidence": 0.0,
+        "reference_match_score": 0.0,
         "regression_detected": True,
         "summary": "Feature QA failed across configured vision models.",
         "problems": errors[-4:] or ["feature QA unavailable"],

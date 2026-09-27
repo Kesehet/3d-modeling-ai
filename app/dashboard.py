@@ -309,6 +309,7 @@ def jobs_snapshot() -> dict:
                     "quality_gate": status.get("quality_gate") if isinstance(status.get("quality_gate"), dict) else None,
                     "feature_plan": feature_plan_summary(root),
                     "auto_improve": status.get("auto_improve") if isinstance(status.get("auto_improve"), dict) else None,
+                    "reference_gate": status.get("reference_gate") if isinstance(status.get("reference_gate"), dict) else None,
                     "updated_at": status.get("updated_at"),
                     "renders": renders,
                     "references": references,

@@ -1,3 +1,4 @@
+import pytest
 from PIL import Image
 
 from app.main import (
@@ -51,9 +52,16 @@ def test_generic_visual_refinement_collects_only_latest_model_version(tmp_path):
     assert all("model-v2-" in label for label in labels)
 
 
-def test_refinement_comparison_defaults_to_reject_when_unclear():
+def test_refinement_comparison_requires_explicit_judgment_for_fallback():
+    with pytest.raises(ValueError, match="explicit keep/revert judgment"):
+        _normalize_refinement_comparison_payload(
+            {"summary": "Unclear result", "regressions": "Lost the tail"}
+        )
+
+
+def test_refinement_comparison_preserves_explicit_rejection():
     normalized = _normalize_refinement_comparison_payload(
-        {"summary": "Unclear result", "regressions": "Lost the tail"}
+        {"candidate_is_better": False, "summary": "Worse silhouette", "regressions": "Lost the tail"}
     )
     assert normalized["candidate_is_better"] is False
     assert normalized["regressions"] == ["Lost the tail"]

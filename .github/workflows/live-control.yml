@@ -104,13 +104,16 @@ jobs:
               }' diagnostics/json/job.json || true
 
               if [ -s diagnostics/json/artifacts.json ]; then
-                for category in references reference-candidates renders; do
+                for category in references reference-candidates renders logs; do
                   names=$(jq -r --arg category "$category" '.artifacts[$category][]?.name // empty' diagnostics/json/artifacts.json)
                   if [ "$category" = "renders" ]; then
                     # Keep diagnostics useful without downloading hundreds of stale
                     # candidate renders from long-running jobs. Four 9-view versions
                     # are enough to inspect current/baseline/recent candidate behavior.
                     names=$(printf '%s\n' "$names" | sed '/^$/d' | sort -V | tail -n 36)
+                  elif [ "$category" = "logs" ]; then
+                    mkdir -p diagnostics/logs
+                    names=$(jq -r '.artifacts.logs | sort_by(.name | split("-") | last) | .[-16:][]?.name // empty' diagnostics/json/artifacts.json)
                   else
                     names=$(printf '%s\n' "$names" | sed '/^$/d' | head -n 12)
                   fi

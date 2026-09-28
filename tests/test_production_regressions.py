@@ -188,6 +188,30 @@ def test_cage_edit_schema_hides_replan_until_it_is_allowed():
     assert "replan_representation" in unlocked["properties"]["operation"]["enum"]
 
 
+def test_cage_edit_normalizer_clamps_safe_numeric_overshoot():
+    payload = main._normalize_cage_edit_action_payload({
+        "operation": "reshape_station",
+        "reason": "Compress the overly tall section.",
+        "height_scale": 0.5,
+        "width_scale": 1.8,
+        "height_offset_fraction": -0.5,
+        "position_offset_fraction": 0.4,
+        "width_offset_fraction": 0.6,
+        "point_height_offset_fraction": -0.8,
+        "insert_fraction": 0.95,
+    })
+
+    action = main.CageEditAction.model_validate(payload)
+
+    assert action.height_scale == 0.65
+    assert action.width_scale == 1.45
+    assert action.height_offset_fraction == -0.30
+    assert action.position_offset_fraction == 0.20
+    assert action.width_offset_fraction == 0.30
+    assert action.point_height_offset_fraction == -0.30
+    assert action.insert_fraction == 0.85
+
+
 def test_adaptive_representation_keeps_clear_partial_progress(tmp_path, monkeypatch):
     root = job(tmp_path, monkeypatch)
     (root / "scene/model-v7.blend").write_bytes(b"preserved cage")

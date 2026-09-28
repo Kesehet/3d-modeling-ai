@@ -5976,6 +5976,28 @@ def _normalize_cage_edit_action_payload(data: object) -> dict:
             or normalized.get("goal")
             or ""
         )
+
+    # The model owns edit intent; deterministic code owns safety bounds.
+    # Preserve the proposed direction/magnitude as closely as possible while
+    # clamping harmless numeric overshoot instead of wasting a vision round.
+    scalar_bounds = {
+        "width_scale": (0.65, 1.45),
+        "height_scale": (0.65, 1.45),
+        "height_offset_fraction": (-0.30, 0.30),
+        "position_offset_fraction": (-0.20, 0.20),
+        "width_offset_fraction": (-0.30, 0.30),
+        "point_height_offset_fraction": (-0.30, 0.30),
+        "insert_fraction": (0.15, 0.85),
+    }
+    for field, (lower, upper) in scalar_bounds.items():
+        if normalized.get(field) is None:
+            continue
+        try:
+            value = float(normalized[field])
+        except (TypeError, ValueError):
+            continue
+        normalized[field] = max(lower, min(upper, value))
+
     return normalized
 
 

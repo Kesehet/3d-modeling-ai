@@ -110,7 +110,23 @@ def _candidate_has_identity_metadata_signal(query: str, candidate: dict[str, Any
 
     query_text = " ".join(terms)
     description = _canonical_text(candidate.get("description") or "")
-    return bool(len(terms) >= 2 and query_text and query_text in description)
+    if not description:
+        return False
+
+    # Some useful Commons files have camera-style filenames (DSC_1234, IMG_...). In
+    # that case allow the description to recover them only when it introduces the
+    # requested identity near the beginning, rather than mentioning it incidentally
+    # deep in a caption about another subject.
+    description_tokens = description.split()
+    if len(terms) == 1:
+        return terms[0] in description_tokens[:6]
+
+    identity_tokens = query_text.split()
+    max_start = min(5, max(0, len(description_tokens) - len(identity_tokens)))
+    for start in range(max_start + 1):
+        if description_tokens[start : start + len(identity_tokens)] == identity_tokens:
+            return True
+    return False
 
 
 def _commons_media_search_query(query: str, *, exact: bool = False) -> str:

@@ -747,7 +747,11 @@ class ResearchRequest(BaseModel):
 
 
 class ReferenceSearchPlan(BaseModel):
+    # Exact requested identity used by strict visual acceptance.
     primary_query: str = Field(min_length=1, max_length=180)
+    # Broadest still-correct search category. Named identities must remain intact;
+    # generic subjects may drop attributes that belong in identity_constraints.
+    discovery_query: str = Field(default="", max_length=180)
     alternate_queries: list[str] = Field(default_factory=list, max_length=3)
     subject_description: str = Field(default="", max_length=1200)
     identity_constraints: list[str] = Field(default_factory=list, max_length=12)
@@ -3284,17 +3288,22 @@ async def _plan_reference_search(
         "You create precise web image-search plans for 3D reconstruction. Extract the exact visible subject identity "
         "from the user's modeling request. For a named make/model, character, product, animal species, landmark, etc., "
         "keep that identity intact and remove instructions such as 'make', '3D model', print dimensions, materials, "
-        "or workflow chatter. The primary query should be short and identity-focused. Alternate queries may add useful "
-        "exterior/view words but must not broaden to sibling products or similar-looking subjects. identity_constraints "
-        "must state what an image has to visibly depict to count as the requested subject. NEVER invent a model year, "
+        "or workflow chatter. Return TWO query levels: primary_query is the exact visible identity the verifier must "
+        "enforce; discovery_query is the broadest search phrase that is still the SAME requested subject. Alternate "
+        "queries may add useful attributes/exterior/view words but must not broaden to sibling products or similar-looking "
+        "subjects. identity_constraints must state what an image has to visibly depict to count as the requested subject. "
+        "NEVER invent a model year, "
         "generation, trim, body style, color, or edition that the user did not request. If the user asks only for a "
         "Volkswagen Polo, for example, a genuine Volkswagen Polo is an identity match regardless of generation; prefer "
         "a coherent set, but do not reject all references for lack of an unspecified year. Return JSON only."
-        " For an unnamed generic object, use a short everyday noun phrase (usually 2-4 words) as primary_query. "
-        "Put material, part counts, leg/handle profiles and detailed proportions in identity_constraints; do not "
-        "concatenate every requested attribute into a search string. Include a simpler noun-phrase alternate "
-        "BEFORE alternate camera views, so recall can recover when detailed wording returns no photographs. "
-        "For named subjects, keep the complete proper-name identity in all queries."
+        " For an unnamed generic object, primary_query may preserve identity-defining requested attributes, but "
+        "discovery_query MUST be the ordinary category noun phrase, usually 1-3 words. Strip material, color, size, "
+        "shape adjectives, part counts, part profiles, dimensions, style, proportions and camera/view words from "
+        "discovery_query and preserve those requirements in identity_constraints instead. This broad discovery query "
+        "exists only to FIND candidates; the strict pixel verifier still enforces primary_query plus constraints. "
+        "For a named make/model, character, product, species or landmark, discovery_query MUST keep the complete named "
+        "identity and must never degrade to a parent category such as 'car' or 'character'. Include useful alternate "
+        "queries only after discovery_query and primary_query. Return JSON only."
     )
     prompt = (
         f"Full modeling request: {job_request.get('prompt', '')}\n"
@@ -3322,6 +3331,7 @@ async def _plan_reference_search(
 
     return ReferenceSearchPlan(
         primary_query=requested_query[:180],
+        discovery_query=requested_query[:180],
         alternate_queries=[],
         subject_description=str(job_request.get("prompt") or requested_query)[:1200],
         identity_constraints=[],
@@ -3932,6 +3942,34 @@ async def _verify_reference_candidates(
     return accepted, rejected
 
 
+def _reference_search_queries(
+    plan: ReferenceSearchPlan,
+    requested_query: str,
+    *,
+    limit: int = 4,
+) -> list[str]:
+    """Order discovery for recall first while preserving strict identity for verification."""
+    queries: list[str] = []
+    discovery = str(plan.discovery_query or plan.primary_query or requested_query).strip()
+    for value in [discovery, plan.primary_query, *plan.alternate_queries, requested_query]:
+        value = str(value or "").strip()
+        if value and value.casefold() not in {item.casefold() for item in queries}:
+            queries.append(value)
+        if len(queries) >= limit:
+            return queries[:limit]
+
+    # Deterministic view fallbacks stay attached to the broad still-correct subject,
+    # not the user's full attribute sentence.
+    base_query = discovery or str(plan.primary_query or requested_query).strip()
+    for suffix in ("front view", "side view", "rear view"):
+        value = f"{base_query} {suffix}".strip()
+        if value.casefold() not in {item.casefold() for item in queries}:
+            queries.append(value)
+        if len(queries) >= limit:
+            break
+    return queries[:limit]
+
+
 async def research_job(job_id: str, request: ResearchRequest) -> dict:
     root = _require_job(job_id)
     job_request = json.loads((root / "request.json").read_text(encoding="utf-8"))
@@ -3947,8 +3985,19 @@ async def research_job(job_id: str, request: ResearchRequest) -> dict:
         str(plan.primary_query or requested_query).strip(),
         flags=re.IGNORECASE,
     ).strip()
+    updates: dict[str, str] = {}
     if normalized_primary and normalized_primary != plan.primary_query:
-        plan = plan.model_copy(update={"primary_query": normalized_primary})
+        updates["primary_query"] = normalized_primary
+    normalized_discovery = re.sub(
+        r"^(?:a|an|the)\s+",
+        "",
+        str(plan.discovery_query or normalized_primary or requested_query).strip(),
+        flags=re.IGNORECASE,
+    ).strip()
+    if normalized_discovery and normalized_discovery != plan.discovery_query:
+        updates["discovery_query"] = normalized_discovery
+    if updates:
+        plan = plan.model_copy(update=updates)
 
     # Keep user-uploaded references, but remove old automatic references that were
     # never verified or previously failed identity matching.
@@ -3956,24 +4005,7 @@ async def research_job(job_id: str, request: ResearchRequest) -> dict:
     known_hashes = {str(item.get("sha256")) for item in index if item.get("sha256")}
     evaluated_hashes = set(known_hashes)
 
-    queries: list[str] = []
-    for value in [plan.primary_query, *plan.alternate_queries, requested_query]:
-        value = str(value or "").strip()
-        if value and value.casefold() not in {item.casefold() for item in queries}:
-            queries.append(value)
-
-    # Some reasoning models legitimately return no alternate searches. Do not then
-    # spend the entire reference budget on one broad Wikimedia query: add deterministic
-    # orthographic-ish views that work for vehicles, furniture, products and characters.
-    if len(queries) < 4:
-        base_query = str(plan.primary_query or requested_query).strip()
-        for suffix in ("front view", "side view", "rear view"):
-            value = f"{base_query} {suffix}".strip()
-            if value.casefold() not in {item.casefold() for item in queries}:
-                queries.append(value)
-            if len(queries) >= 4:
-                break
-    queries = queries[:4]
+    queries = _reference_search_queries(plan, requested_query)
 
     accepted_new: list[dict] = []
     rejected: list[dict] = []
@@ -4086,6 +4118,7 @@ async def research_job(job_id: str, request: ResearchRequest) -> dict:
         "research",
         requested_query=requested_query,
         primary_query=plan.primary_query,
+        discovery_query=plan.discovery_query,
         queries=queries,
         accepted=len(accepted_new),
         rejected=len(rejected),

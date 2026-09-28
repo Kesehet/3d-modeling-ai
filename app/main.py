@@ -2303,6 +2303,24 @@ async def _ensure_final_model_quality(job_id: str, status: dict) -> dict:
     return _write_status(root, quality_gate=final_quality)
 
 
+def _expanded_auto_improve_round_limit(
+    *,
+    requested_rounds: int,
+    round_number: int,
+    remaining_feature_attempts: int,
+) -> int:
+    """Extend only the default full autonomous budget, never an explicit short run."""
+
+    requested_rounds = max(1, min(30, int(requested_rounds)))
+    if requested_rounds < 30 or remaining_feature_attempts <= 0:
+        return requested_rounds
+    computed_limit = min(
+        AUTO_IMPROVE_HARD_ROUND_CAP,
+        round_number + remaining_feature_attempts + 2,
+    )
+    return max(requested_rounds, computed_limit)
+
+
 async def _run_auto_improve(job_id: str, max_rounds: int) -> None:
     root = _job_dir(job_id)
     if not root.is_dir():
@@ -2526,17 +2544,15 @@ async def _run_auto_improve(job_id: str, max_rounds: int) -> None:
         else:
             no_progress_rounds = 0
 
-        # Thirty rounds is the initial user-requested budget, not a reason to
-        # abandon a healthy feature queue halfway through. Extend only by the
-        # finite attempts that remain in the strict feature plan, with a hard
-        # global safety cap.
+        # The default 30-round autonomous run may extend to finish a healthy
+        # finite feature queue. Explicit short budgets (for example a one-round
+        # live diagnostic) are hard caps and must never silently expand.
         remaining_feature_attempts = _remaining_feature_attempt_budget(root)
-        if remaining_feature_attempts:
-            computed_limit = min(
-                AUTO_IMPROVE_HARD_ROUND_CAP,
-                round_number + remaining_feature_attempts + 2,
-            )
-            round_limit = max(round_limit, requested_rounds, computed_limit)
+        round_limit = _expanded_auto_improve_round_limit(
+            requested_rounds=requested_rounds,
+            round_number=round_number,
+            remaining_feature_attempts=remaining_feature_attempts,
+        )
 
         _write_status(
             root,

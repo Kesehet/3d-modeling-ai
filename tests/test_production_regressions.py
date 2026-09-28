@@ -190,8 +190,10 @@ def test_cage_edit_schema_hides_replan_until_it_is_allowed():
 
 def test_cage_edit_normalizer_clamps_safe_numeric_overshoot():
     payload = main._normalize_cage_edit_action_payload({
-        "operation": "reshape_station",
+        "operation": "reshape_station_region",
         "reason": "Compress the overly tall section.",
+        "influence_radius": 9,
+        "length_scale": 0.5,
         "height_scale": 0.5,
         "width_scale": 1.8,
         "height_offset_fraction": -0.5,
@@ -203,6 +205,8 @@ def test_cage_edit_normalizer_clamps_safe_numeric_overshoot():
 
     action = main.CageEditAction.model_validate(payload)
 
+    assert action.influence_radius == 3
+    assert action.length_scale == 0.75
     assert action.height_scale == 0.65
     assert action.width_scale == 1.45
     assert action.height_offset_fraction == -0.30

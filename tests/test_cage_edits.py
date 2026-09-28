@@ -26,6 +26,51 @@ def _spec():
     }
 
 
+def test_reshape_cage_proportions_changes_the_whole_blockout_envelope():
+    spec = _spec()
+    original_span = spec["stations"][-1]["position"] - spec["stations"][0]["position"]
+    original_width = spec["stations"][1]["profile"][1][0]
+
+    action = CageEditAction(
+        operation="reshape_cage_proportions",
+        length_scale=1.2,
+        width_scale=1.1,
+        height_scale=0.9,
+        reason="The entire blockout is too short and narrow.",
+    )
+
+    edited = apply_cage_edit_action(spec, action)
+
+    edited_span = edited["stations"][-1]["position"] - edited["stations"][0]["position"]
+    assert edited_span == pytest.approx(original_span * 1.2)
+    assert edited["stations"][1]["profile"][1][0] == pytest.approx(original_width * 1.1)
+    assert all(station["profile"][0][0] == 0.0 for station in edited["stations"])
+    assert all(station["profile"][-1][0] == 0.0 for station in edited["stations"])
+
+
+def test_reshape_station_region_uses_proportional_falloff():
+    spec = _spec()
+    original = [
+        station["profile"][1][0]
+        for station in spec["stations"]
+    ]
+    action = CageEditAction(
+        operation="reshape_station_region",
+        target_index=1,
+        influence_radius=1,
+        width_scale=1.4,
+        reason="The broad middle transition is too narrow.",
+    )
+
+    edited = apply_cage_edit_action(spec, action)
+    widths = [station["profile"][1][0] for station in edited["stations"]]
+
+    assert widths[1] == pytest.approx(original[1] * 1.4)
+    assert widths[0] == pytest.approx(original[0] * 1.2)
+    assert widths[2] == pytest.approx(original[2] * 1.2)
+    assert widths[3] == pytest.approx(original[3])
+
+
 def test_reshape_station_is_relative_and_preserves_mirror_plane():
     action = CageEditAction(
         operation="reshape_station",

@@ -17,6 +17,8 @@ from pydantic import BaseModel, Field
 
 class CageEditAction(BaseModel):
     operation: Literal[
+        "reshape_cage_proportions",
+        "reshape_station_region",
         "reshape_station",
         "reshape_profile_point",
         "insert_station",
@@ -31,7 +33,9 @@ class CageEditAction(BaseModel):
 
     target_index: int | None = Field(default=None, ge=0, le=64)
     point_index: int | None = Field(default=None, ge=0, le=32)
+    influence_radius: int = Field(default=1, ge=1, le=3)
 
+    length_scale: float = Field(default=1.0, ge=0.75, le=1.30)
     width_scale: float = Field(default=1.0, ge=0.65, le=1.45)
     height_scale: float = Field(default=1.0, ge=0.65, le=1.45)
     height_offset_fraction: float = Field(default=0.0, ge=-0.30, le=0.30)
@@ -90,6 +94,34 @@ def _require_index(items: list, index: int | None, label: str) -> int:
     return index
 
 
+def _reshape_station_profile(
+    station: dict,
+    *,
+    width_scale: float,
+    height_scale: float,
+    height_offset: float,
+    position_offset: float,
+    center_z: float,
+    height_span: float,
+    axis_span: float,
+) -> None:
+    profile = station.get("profile") or []
+    if len(profile) < 4:
+        raise ValueError("Target station does not have a usable profile.")
+
+    station["position"] = float(station["position"]) + position_offset * axis_span
+    for point_index, point in enumerate(profile):
+        width = max(0.0, float(point[0]) * width_scale)
+        height = (
+            (float(point[1]) - center_z) * height_scale
+            + center_z
+            + height_offset * height_span
+        )
+        if point_index in {0, len(profile) - 1}:
+            width = 0.0
+        profile[point_index] = [width, height]
+
+
 def apply_cage_edit_action(spec: dict, action: CageEditAction) -> dict:
     """Return a new cage spec with exactly one bounded edit applied."""
 
@@ -99,24 +131,55 @@ def apply_cage_edit_action(spec: dict, action: CageEditAction) -> dict:
     axis_span, max_half_width, min_z, max_z, height_span = _extents(updated)
     center_z = (min_z + max_z) / 2.0
 
-    if action.operation == "reshape_station":
-        index = _require_index(stations, action.target_index, "station")
-        station = stations[index]
-        profile = station.get("profile") or []
-        if len(profile) < 4:
-            raise ValueError("Target station does not have a usable profile.")
-
-        station["position"] = float(station["position"]) + action.position_offset_fraction * axis_span
-        for point_index, point in enumerate(profile):
-            width = max(0.0, float(point[0]) * action.width_scale)
-            height = (
-                (float(point[1]) - center_z) * action.height_scale
-                + center_z
-                + action.height_offset_fraction * height_span
+    if action.operation == "reshape_cage_proportions":
+        positions = [float(station["position"]) for station in stations]
+        axis_center = (min(positions) + max(positions)) / 2.0
+        for station in stations:
+            station["position"] = axis_center + (
+                float(station["position"]) - axis_center
+            ) * action.length_scale
+            _reshape_station_profile(
+                station,
+                width_scale=action.width_scale,
+                height_scale=action.height_scale,
+                height_offset=action.height_offset_fraction,
+                position_offset=0.0,
+                center_z=center_z,
+                height_span=height_span,
+                axis_span=axis_span,
             )
-            if point_index in {0, len(profile) - 1}:
-                width = 0.0
-            profile[point_index] = [width, height]
+
+    elif action.operation == "reshape_station_region":
+        index = _require_index(stations, action.target_index, "station")
+        radius = action.influence_radius
+        for station_index, station in enumerate(stations):
+            distance = abs(station_index - index)
+            if distance > radius:
+                continue
+            weight = 1.0 - (distance / (radius + 1.0))
+            _reshape_station_profile(
+                station,
+                width_scale=1.0 + (action.width_scale - 1.0) * weight,
+                height_scale=1.0 + (action.height_scale - 1.0) * weight,
+                height_offset=action.height_offset_fraction * weight,
+                position_offset=action.position_offset_fraction * weight,
+                center_z=center_z,
+                height_span=height_span,
+                axis_span=axis_span,
+            )
+
+    elif action.operation == "reshape_station":
+        index = _require_index(stations, action.target_index, "station")
+        _reshape_station_profile(
+            stations[index],
+            width_scale=action.width_scale,
+            height_scale=action.height_scale,
+            height_offset=action.height_offset_fraction,
+            position_offset=action.position_offset_fraction,
+            center_z=center_z,
+            height_span=height_span,
+            axis_span=axis_span,
+        )
 
     elif action.operation == "reshape_profile_point":
         station_index = _require_index(stations, action.target_index, "station")

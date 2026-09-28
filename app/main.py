@@ -504,6 +504,10 @@ def _normalize_refinement_comparison_payload(data: object) -> dict:
     if not isinstance(data, dict):
         raise TypeError("Refinement comparison response is not a JSON object.")
     normalized = dict(data)
+    for wrapper in ("comparison", "evaluation", "result"):
+        if isinstance(normalized.get(wrapper), dict):
+            normalized = normalized[wrapper]
+            break
     if "candidate_is_better" not in normalized:
         for key in ("candidate_better", "is_better", "improved", "accept_candidate", "accepted"):
             if key not in normalized:
@@ -517,7 +521,7 @@ def _normalize_refinement_comparison_payload(data: object) -> dict:
                 }
             break
     normalized.setdefault("candidate_is_better", False)
-    normalized.setdefault("summary", "")
+    normalized.setdefault("summary", normalized.get("reason") or normalized.get("explanation") or "")
     for key in ("improvements", "regressions"):
         value = normalized.get(key)
         if isinstance(value, str):
@@ -1053,6 +1057,7 @@ async def _build_feature_plan(
     )
     prompt = (
         f"Exact user request: {job_request.get('prompt', '')}\n"
+        f"Reference scope: {'parent object; focus only on component '+str(job_request.get('component_name')) if job_request.get('component_job') else 'requested whole object'}\n"
         f"Intended use: {job_request.get('intended_use', '')}\n"
         f"Subject inventory: {json.dumps(inventory.model_dump() if inventory else {}, ensure_ascii=False)}\n"
         f"Reference images in order: {reference_labels}\n"
@@ -1271,6 +1276,20 @@ async def _ensure_component_child_ready(
     child_job_id = _create_component_child_job(parent_job_id, feature_task)
     child_root = _require_job(child_job_id)
     child_status = _read_status(child_root)
+    if not _usable_reference_index(child_root):
+        inherited = []
+        for record in _usable_reference_index(parent_root):
+            name = Path(str(record.get("stored_name") or "")).name
+            source = parent_root / "references" / name
+            if not source.is_file():
+                continue
+            shutil.copy2(source, child_root / "references" / name)
+            inherited.append({**record, "reference_scope": "parent_context",
+                              "parent_job_id": parent_job_id, "focus_component": feature_task.name})
+        if inherited:
+            (child_root / "references.json").write_text(json.dumps(inherited, indent=2), encoding="utf-8")
+            append_history(child_root, "parent_references_inherited", count=len(inherited),
+                           focus_component=feature_task.name)
 
     if _active_model_artifact(child_root, child_status) is None:
         append_history(
@@ -2145,11 +2164,13 @@ def _read_status(root: Path) -> dict:
 
 def _auto_improve_goal_reached(root: Path, status: dict) -> bool:
     quality = status.get("quality_gate")
-    recognizable = (
-        isinstance(quality, dict)
-        and quality.get("recognizable") is True
-    ) or str(status.get("stage") or "").endswith("_recognizable")
+    if isinstance(quality, dict) and quality.get("scope") == "feature":
+        return False
+    recognizable = isinstance(quality, dict) and quality.get("recognizable") is True
     if not recognizable:
+        return False
+    if (quality.get("scope") == "whole_object"
+            and quality.get("evaluated_version") != (status.get("generic_model") or {}).get("version")):
         return False
 
     plan = feature_plan_summary(root)
@@ -2260,6 +2281,28 @@ def _auto_improve_payload(
     }
 
 
+async def _ensure_final_model_quality(job_id: str, status: dict) -> dict:
+    """A local feature verdict cannot certify a completed assembly."""
+    root = _require_job(job_id)
+    plan = feature_plan_summary(root) or {}
+    version = (status.get("generic_model") or {}).get("version")
+    quality = status.get("quality_gate") or {}
+    if not plan.get("required_complete") or version is None:
+        return status
+    if quality.get("scope") == "whole_object" and quality.get("evaluated_version") == version:
+        return status
+    try:
+        final_quality = await _generic_recognizability_check(
+            job_id, stage="final_whole_object_quality", render_version=version,
+        )
+    except Exception as exc:  # noqa: BLE001 - persist background QA failures for retry
+        detail = str(exc.detail) if isinstance(exc, HTTPException) else str(exc)
+        append_history(root, "final_quality_unavailable", version=version, error=detail)
+        final_quality = {"scope": "whole_object", "recognizable": False,
+                         "summary": "Final visual evaluation unavailable: " + detail}
+    return _write_status(root, quality_gate=final_quality)
+
+
 async def _run_auto_improve(job_id: str, max_rounds: int) -> None:
     root = _job_dir(job_id)
     if not root.is_dir():
@@ -2324,7 +2367,7 @@ async def _run_auto_improve(job_id: str, max_rounds: int) -> None:
             )
             return
 
-        before = _read_status(root)
+        before = await _ensure_final_model_quality(job_id, _read_status(root))
         if _assembled_parent_requires_safe_stop(root, before):
             _write_status(
                 root,
@@ -2457,7 +2500,7 @@ async def _run_auto_improve(job_id: str, max_rounds: int) -> None:
             continue
 
         consecutive_errors = 0
-        after = _read_status(root)
+        after = await _ensure_final_model_quality(job_id, _read_status(root))
         after_signature = _auto_improve_progress_signature(root, after)
         if _auto_improve_goal_reached(root, after):
             _write_status(
@@ -4481,7 +4524,10 @@ async def _compare_generic_versions(
                 schema=RefinementComparison.model_json_schema(),
                 temperature=0.0,
             )
+            _write_llm_log(root, "version-compare-raw", {"model": candidate_model, "raw": result.data})
             normalized = _normalize_refinement_comparison_payload(result.data)
+            if not str(normalized.get("summary") or "").strip():
+                raise ValueError("Visual comparison omitted its judgment explanation.")
             comparison = RefinementComparison.model_validate(normalized)
         except (OllamaProxyError, httpx.HTTPError, ValidationError, ValueError, TypeError) as exc:
             errors.append(f"{candidate_model}: {exc}")
@@ -4558,7 +4604,6 @@ def _feature_evaluation_accepts(
         and evaluation.get("visible") is True
         and evaluation.get("criteria_satisfied") is True
         and evaluation.get("regression_detected") is not True
-        and (not primary_shape or evaluation.get("subject_recognizable") is True)
         and confidence >= 0.75
         and match_score >= minimum_match
     )
@@ -4639,7 +4684,9 @@ async def _evaluate_feature_candidate(
         "criteria_satisfied=true only when the candidate visibly satisfies ALL acceptance criteria that can be judged "
         "from the supplied pixels. Set visible=true only when the feature itself is clearly visible in the candidate. "
         "subject_recognizable must indicate whether an unfamiliar viewer could recognize the requested overall subject "
-        "from the candidate renders; this is mandatory for primary silhouette/body features. reference_match_score is "
+        "from the candidate renders. Assess the ACTIVE feature itself; do not fail its local shape because "
+        "separate planned components have not been built yet. Whole-object completion is checked separately. "
+        "reference_match_score is "
         "an absolute 0..1 score for how closely this feature matches the reference appearance, "
         "shape, placement, count and proportions. If a criterion demands precision that cannot actually be verified "
         "from these images (for example exact millimetres or a 1% tolerance), do NOT pretend it was measured: set "
@@ -5719,6 +5766,7 @@ async def _build_hard_surface_cage_spec(
     )
     prompt = (
         f"Exact user request: {job_request.get('prompt', '')}\n"
+        f"Reference scope: {'parent object; focus only on component '+str(job_request.get('component_name')) if job_request.get('component_job') else 'requested whole object'}\n"
         f"Intended use: {job_request.get('intended_use', '')}\n"
         f"Reason for this Blender strategy/pass: {reason}\n"
         f"Subject inventory: {json.dumps(inventory.model_dump() if inventory else {}, ensure_ascii=False)}\n"
@@ -6182,7 +6230,12 @@ async def _decide_hard_surface_cage_edit(
         "reshape_station changes one entire cross-section; reshape_profile_point changes one local profile point; "
         "insert_station adds control where silhouette curvature is under-resolved; remove_station removes a harmful "
         "intermediate section; adjust_cutter changes one existing opening/cut; remove_cutter removes a clearly harmful "
-        "cut. Protect unrelated good geometry. Do not repeat a recent rejected edit with effectively the same "
+        "cut. add_attachment adds a missing in-place primitive; adjust_attachment or remove_attachment "
+        "edits an existing part; add_cutter creates a deliberate opening. set_surface changes subdivision, "
+        "bevel or shading when modifiers have rounded a crisp intended silhouette. "
+        "Primitive transforms use local scales then Euler XYZ rotation; locations use world X/Y/Z. "
+        "Cylinders extend along local Z: rotation around Z does NOT change their axial direction. "
+        "Protect unrelated good geometry. Do not repeat a recent rejected edit with effectively the same "
         "target and parameters. "
         + (
             (
@@ -6212,6 +6265,7 @@ async def _decide_hard_surface_cage_edit(
     )
     prompt = (
         f"Exact user request: {job_request.get('prompt', '')}\n"
+        f"Reference scope: {'parent object; focus only on component '+str(job_request.get('component_name')) if job_request.get('component_job') else 'requested whole object'}\n"
         f"Intended use: {job_request.get('intended_use', '')}\n"
         f"Working baseline version: {baseline_version}\n"
         f"ACTIVE FEATURE (if any): {json.dumps(feature_context, ensure_ascii=False)}\n"
@@ -6225,6 +6279,8 @@ async def _decide_hard_surface_cage_edit(
             else f"Full station profile geometry: {json.dumps(station_summary, ensure_ascii=False)}\n"
         )
         + f"Cutter indices and geometry: {json.dumps(cutter_summary, ensure_ascii=False)}\n"
+        f"Attachments by index: {json.dumps([p.model_dump() for p in spec.attachments])}\n"
+        f"Current surface: subdivision={spec.subdivision_levels}, bevel={spec.bevel_width}, smooth={spec.smooth}\n"
         f"Recent edit outcomes: {json.dumps(recent_events, ensure_ascii=False)}\n"
         f"Images in order: {labels}\n"
         "Reference images come first, followed by CURRENT baseline renders. Choose one change only. "
@@ -6279,6 +6335,7 @@ async def _decide_hard_surface_cage_edit(
             reason=action.reason,
             expected_visual_effect=action.expected_visual_effect,
             model=candidate_model,
+            parameters=action.model_dump(),
         )
         return action
 
@@ -6473,6 +6530,7 @@ async def _refine_hard_surface_cage_incrementally(
         )
         if feature_evaluation:
             quality["summary"] = feature_evaluation.get("summary") or comparison.get("summary")
+            quality["scope"] = "feature"
             quality["active_feature_id"] = feature_task.id
             quality["active_feature_passed"] = feature_complete
             if feature_evaluation.get("subject_recognizable") is not None:
@@ -6715,6 +6773,7 @@ async def _generate_hard_surface_cage(
             or (comparison or {}).get("summary")
             or quality.get("summary")
         )
+        quality["scope"] = "feature"
         quality["active_feature_id"] = feature_task.id
         quality["active_feature_passed"] = feature_complete
         quality["representation"] = "hard_surface_cage"
@@ -7230,6 +7289,7 @@ async def _revise_adaptive_loft_spec(
     )
     prompt = (
         f"Exact user request: {job_request.get('prompt', '')}\n"
+        f"Reference scope: {'parent object; focus only on component '+str(job_request.get('component_name')) if job_request.get('component_job') else 'requested whole object'}\n"
         f"Current AdaptiveLoftSpec: {json.dumps(current_spec.model_dump(), ensure_ascii=False)}\n"
         f"Modeling director critique/instructions: {json.dumps(decision, ensure_ascii=False)}\n"
         f"Subject inventory: {json.dumps(inventory.model_dump() if inventory else {}, ensure_ascii=False)}\n"
@@ -7418,11 +7478,13 @@ async def _refine_adaptive_mesh(
             "baseline_version": baseline_version,
             "candidate_version": version,
             "focused_feature_qa": True,
+            "scope": "feature",
         }
         previous_quality = _quality_snapshot(previous_status.get("quality_gate"))
         quality = dict(previous_quality)
         quality.setdefault("recognizable", False)
         quality["summary"] = feature_evaluation.get("summary") or quality.get("summary")
+        quality["scope"] = "feature"
         quality["active_feature_id"] = feature_task.id
         quality["active_feature_passed"] = feature_passed
         recognizable = quality.get("recognizable")
@@ -7706,6 +7768,7 @@ async def _generate_adaptive_mesh_fallback(
                 "candidate_improved": better,
             }
         )
+        quality["scope"] = "feature"
     else:
         try:
             quality = await _generic_recognizability_check(
@@ -7964,6 +8027,7 @@ async def _ask_modeling_director(
 
     prompt = (
         f"Exact user request: {job_request.get('prompt', '')}\n"
+        f"Reference scope: {'parent object; focus only on component '+str(job_request.get('component_name')) if job_request.get('component_job') else 'requested whole object'}\n"
         f"Intended use: {job_request.get('intended_use', '')}\n"
         f"Current strategy: {current_strategy}\n"
         f"Current stage: {stage}\n"
@@ -8058,13 +8122,15 @@ async def _generic_recognizability_check(
         render_version=render_version,
     )
     action = decision["action"]
-    recognizable = action == "accept"
+    recognizable = action == "accept" and float(decision.get("subject_match_score") or 0) >= 0.75
     recommended_strategy = (
         "base_mesh"
         if action in {"build_mesh", "refine_mesh", "rebuild_mesh"}
         else "procedural"
     )
     return {
+        "scope": "whole_object",
+        "evaluated_version": render_version or (_read_status(root).get("generic_model") or {}).get("version"),
         "recognizable": recognizable,
         "subject_match_score": decision.get("subject_match_score"),
         "recommended_strategy": recommended_strategy,
@@ -8486,6 +8552,7 @@ async def refine_generic_scene(job_id: str, request: GenericRefineRequest) -> di
         )
         prompt = (
             f"Exact user request: {job_request.get('prompt', '')}\n"
+            f"Reference scope: {'parent object; focus only on component '+str(job_request.get('component_name')) if job_request.get('component_job') else 'requested whole object'}\n"
             f"Current SceneSpec: {json.dumps(current_spec.model_dump(), ensure_ascii=False)}\n"
             f"AI director decision: {json.dumps(decision, ensure_ascii=False)}\n"
             f"AI-generated subject inventory: "

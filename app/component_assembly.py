@@ -8,6 +8,8 @@ the assembled candidate for regression QA.
 
 from __future__ import annotations
 
+from .rendering import camera_framing_script
+
 
 def component_assembly_script() -> str:
     return r'''
@@ -114,6 +116,7 @@ for source in source_objects:
         pass
 
 all_model_objects = [*parent_objects, *installed_objects]
+bpy.context.view_layer.update()
 points = []
 for obj in all_model_objects:
     points.extend(obj.matrix_world @ Vector(corner) for corner in obj.bound_box)
@@ -139,10 +142,12 @@ for obj in list(scene.objects):
 scene.render.engine = "BLENDER_WORKBENCH"
 scene.display.shading.light = "STUDIO"
 scene.display.shading.color_type = "MATERIAL"
+scene.display.shading.background_type = "VIEWPORT"
+scene.display.shading.background_color = (0.88, 0.90, 0.93)
 scene.display.shading.show_shadows = True
 scene.display.shading.show_cavity = True
-scene.render.resolution_x = 384
-scene.render.resolution_y = 384
+scene.render.resolution_x = 640
+scene.render.resolution_y = 640
 scene.render.resolution_percentage = 100
 scene.render.image_settings.file_format = "PNG"
 
@@ -166,7 +171,7 @@ views = {
 rendered = []
 for name, position in views.items():
     camera.location = position
-    camera.rotation_euler = (center - camera.location).to_track_quat("-Z", "Y").to_euler()
+# FRAME_QA_CAMERA
     path = f"{OUT}/{PREFIX}-{name}.png"
     scene.render.filepath = path
     bpy.ops.render.render(write_still=True)
@@ -234,4 +239,4 @@ __result__ = {
     "instance_count": len(INSTANCES),
     "installed_object_count": len(installed_objects),
 }
-'''
+'''.replace("# FRAME_QA_CAMERA", camera_framing_script())

@@ -165,3 +165,43 @@ def test_visual_edit_payload_accepts_action_alias_from_vision_model():
     assert action.operation == "replan_representation"
     assert "too coarse" in action.reason
     assert "editable baseline" in action.expected_visual_effect
+
+
+def test_attachment_lifecycle_preserves_unrelated_geometry():
+    original = _spec()
+    added = apply_cage_edit_action(original, CageEditAction(
+        operation="add_attachment", reason="Add a missing independent part",
+        part={"name": "part", "shape": "cube", "location": [0, 1, 1], "scale": [0.3, 0.2, 0.1]},
+    ))
+    moved = apply_cage_edit_action(added, CageEditAction(
+        operation="adjust_attachment", target_index=0, location_delta_fraction=[0, 0, 0.1],
+        reason="Align the part with its mating surface",
+    ))
+    assert added["attachments"][0]["location"] == [0, 1, 1]
+    assert moved["attachments"][0]["location"][2] > 1
+    removed = apply_cage_edit_action(moved, CageEditAction(
+        operation="remove_attachment", target_index=0, reason="Remove the incorrect part",
+    ))
+    assert removed["attachments"] == []
+    assert removed["stations"] == original["stations"]
+    assert removed["cutters"] == original["cutters"]
+    assert "attachments" not in original
+
+
+def test_surface_edit_and_noop_rejection():
+    spec = {**_spec(), "subdivision_levels": 2, "bevel_width": 0.03, "smooth": True}
+    action = CageEditAction(operation="set_surface", subdivision_levels=0, reason="Preserve sharp edges")
+    edited = apply_cage_edit_action(spec, action)
+    assert edited["subdivision_levels"] == 0
+    assert edited["stations"] == spec["stations"]
+    with pytest.raises(ValueError, match="does not change"):
+        apply_cage_edit_action(edited, action)
+
+
+def test_new_part_rejects_nonfinite_and_oversized_geometry():
+    with pytest.raises(ValueError):
+        CageEditAction(operation="adjust_cutter", reason="bad", scale_factor=[float("nan"), 1, 1])
+    action = CageEditAction(operation="add_cutter", reason="bad",
+                           part={"name": "hole", "shape": "cube", "location": [90, 0, 0], "scale": [1, 1, 1]})
+    with pytest.raises(ValueError, match="safe modeling volume"):
+        apply_cage_edit_action(_spec(), action)

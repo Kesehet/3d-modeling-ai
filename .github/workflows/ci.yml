@@ -44,3 +44,7 @@ jobs:
       - uses: actions/checkout@v5
       - name: Build production Blender image
         run: docker build --progress=plain -t 3d-modeling-ai:ci .
+      - name: Exercise Blender geometry, camera framing and model exports
+        run: >-
+          docker run --rm --entrypoint /opt/venv/bin/python
+          -v "$PWD/tests:/tests:ro" 3d-modeling-ai:ci /tests/blender_integration.py

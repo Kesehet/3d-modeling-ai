@@ -1,5 +1,8 @@
+import asyncio
 import json
+from io import BytesIO
 
+import httpx
 from PIL import Image
 
 from app.dashboard import _reference_rows
@@ -13,7 +16,33 @@ from app.main import (
     _normalize_reference_pack_payload,
     _prune_unverified_auto_references,
 )
-from app.research import _candidate_relevance_score
+from app.research import _candidate_relevance_score, research_web_references
+
+
+def test_reference_search_skips_document_thumbnails_before_download(tmp_path, monkeypatch):
+    photo = BytesIO()
+    Image.new("RGB", (400, 300), "brown").save(photo, format="JPEG")
+    downloads = []
+
+    def respond(request):
+        if request.url.host == "en.wikipedia.org":
+            return httpx.Response(200, json={"query": {"pages": []}})
+        if request.url.host == "commons.wikimedia.org":
+            return httpx.Response(200, json={"query": {"pages": [
+                {"title": "File:Subject book.pdf", "imageinfo": [{
+                    "mime": "application/pdf", "thumburl": "https://images.test/book.jpg"}]},
+                {"title": "File:Subject photo.jpg", "imageinfo": [{
+                    "mime": "image/jpeg", "thumburl": "https://images.test/photo.jpg"}]},
+            ]}})
+        downloads.append(str(request.url))
+        return httpx.Response(200, content=photo.getvalue(), headers={"content-type": "image/jpeg"})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(respond))
+    monkeypatch.setattr("app.research.httpx.AsyncClient", lambda **_: client)
+    result = asyncio.run(research_web_references("Subject", tmp_path))
+    assert downloads == ["https://images.test/photo.jpg"]
+    assert result["candidate_count"] == 1
+    assert result["references"][0]["title"] == "File:Subject photo.jpg"
 
 
 def test_exact_subject_metadata_outranks_unrelated_wikimedia_result():

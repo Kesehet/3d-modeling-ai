@@ -21,6 +21,85 @@ def job(tmp_path, monkeypatch):
     return root
 
 
+def test_initial_base_mesh_blockout_defers_cutters_and_attachments():
+    spec = main.HardSurfaceCageSpec(
+        title="Primary blockout",
+        stations=[
+            {"position": p, "profile": [[0, 0], [1, 0], [1, 1], [0, 1]]}
+            for p in (-3, -1, 1, 3)
+        ],
+        cutters=[
+            {
+                "name": "opening",
+                "shape": "cube",
+                "location": [0, 0, 0],
+                "scale": [1, 1, 1],
+                "rotation_deg": [0, 0, 0],
+            }
+        ],
+        attachments=[
+            {
+                "name": "separate detail",
+                "shape": "cube",
+                "location": [0, 0, 0],
+                "scale": [1, 1, 1],
+            }
+        ],
+    )
+    feature = FeatureTask(
+        id="primary",
+        name="Primary mass",
+        strategy="base_mesh_region",
+    )
+
+    cleaned, cutters, attachments = main._clean_initial_primary_blockout(
+        spec,
+        feature,
+        has_existing_cage=False,
+    )
+
+    assert cutters == 1
+    assert attachments == 1
+    assert cleaned.cutters == []
+    assert cleaned.attachments == []
+    assert len(spec.cutters) == 1
+    assert len(spec.attachments) == 1
+
+
+def test_existing_cage_keeps_later_feature_geometry_during_replan():
+    spec = main.HardSurfaceCageSpec(
+        title="Existing cage",
+        stations=[
+            {"position": p, "profile": [[0, 0], [1, 0], [1, 1], [0, 1]]}
+            for p in (-3, -1, 1, 3)
+        ],
+        cutters=[
+            {
+                "name": "accepted opening",
+                "shape": "cube",
+                "location": [0, 0, 0],
+                "scale": [1, 1, 1],
+                "rotation_deg": [0, 0, 0],
+            }
+        ],
+    )
+    feature = FeatureTask(
+        id="primary",
+        name="Primary mass",
+        strategy="base_mesh_region",
+    )
+
+    kept, cutters, attachments = main._clean_initial_primary_blockout(
+        spec,
+        feature,
+        has_existing_cage=True,
+    )
+
+    assert kept.cutters
+    assert cutters == 0
+    assert attachments == 0
+
+
 def test_versions_survive_gaps_partial_builds_and_concurrent_reservations(tmp_path):
     (tmp_path / "scene").mkdir()
     (tmp_path / "exports").mkdir()

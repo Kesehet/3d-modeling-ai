@@ -6,11 +6,34 @@ from app.main import (
     _auto_improve_goal_reached,
     _auto_improve_progress_signature,
     _compact_quality_gate,
+    _expanded_auto_improve_round_limit,
     _feature_queue_is_blocked,
     _persisted_auto_improve_no_progress_rounds,
     _quality_snapshot,
     _remaining_feature_attempt_budget,
 )
+
+
+def test_explicit_short_auto_budget_is_a_hard_cap():
+    assert _expanded_auto_improve_round_limit(
+        requested_rounds=1,
+        round_number=1,
+        remaining_feature_attempts=25,
+    ) == 1
+    assert _expanded_auto_improve_round_limit(
+        requested_rounds=4,
+        round_number=2,
+        remaining_feature_attempts=25,
+    ) == 4
+
+
+def test_default_full_auto_budget_can_extend_for_finite_feature_queue():
+    limit = _expanded_auto_improve_round_limit(
+        requested_rounds=30,
+        round_number=30,
+        remaining_feature_attempts=4,
+    )
+    assert limit > 30
 
 
 def test_auto_improve_requires_quality_and_feature_completion(tmp_path):

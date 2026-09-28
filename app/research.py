@@ -236,6 +236,10 @@ async def research_web_references(
                 if not info_list:
                     continue
                 info = info_list[0]
+                # Commons also returns PDF/DjVu books whose JPEG thumbnails are
+                # just cover pages. Do not spend image/vision budget on those.
+                if not str(info.get("mime") or "").startswith("image/"):
+                    continue
                 meta = info.get("extmetadata") or {}
                 description = (
                     _clean_metadata(meta.get("ImageDescription"))

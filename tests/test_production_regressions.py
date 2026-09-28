@@ -472,3 +472,25 @@ def test_final_quality_failure_is_persisted_and_retryable(tmp_path, monkeypatch)
     assert main._auto_improve_goal_reached(root, status) is False
     assert "evaluated_version" not in status["quality_gate"]
     assert "vision timeout" in main._read_status(root)["quality_gate"]["summary"]
+
+
+def test_research_does_not_rejudge_same_rejected_image_across_queries(tmp_path, monkeypatch):
+    job(tmp_path, monkeypatch)
+    checked = []
+
+    async def plan(*args):
+        return main.ReferenceSearchPlan(primary_query="subject", alternate_queries=["subject side", "subject top"])
+
+    async def search(*args, **kwargs):
+        return {"references": [{"sha256": "same-image", "stored_name": "candidate.jpg"}], "pages": []}
+
+    async def verify(_root, *, records, **kwargs):
+        checked.extend(r["sha256"] for r in records)
+        return [], records
+
+    monkeypatch.setattr(main, "_plan_reference_search", plan)
+    monkeypatch.setattr(main, "research_web_references", search)
+    monkeypatch.setattr(main, "_verify_reference_candidates", verify)
+    result = asyncio.run(main.research_job("abc123", main.ResearchRequest(max_images=3)))
+    assert checked == ["same-image"]
+    assert result["status"]["stage"] == "references_unavailable"

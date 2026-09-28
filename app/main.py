@@ -3274,6 +3274,11 @@ async def _plan_reference_search(
         "generation, trim, body style, color, or edition that the user did not request. If the user asks only for a "
         "Volkswagen Polo, for example, a genuine Volkswagen Polo is an identity match regardless of generation; prefer "
         "a coherent set, but do not reject all references for lack of an unspecified year. Return JSON only."
+        " For an unnamed generic object, use a short everyday noun phrase (usually 2-4 words) as primary_query. "
+        "Put material, part counts, leg/handle profiles and detailed proportions in identity_constraints; do not "
+        "concatenate every requested attribute into a search string. Include a simpler noun-phrase alternate "
+        "BEFORE alternate camera views, so recall can recover when detailed wording returns no photographs. "
+        "For named subjects, keep the complete proper-name identity in all queries."
     )
     prompt = (
         f"Full modeling request: {job_request.get('prompt', '')}\n"
@@ -3933,6 +3938,7 @@ async def research_job(job_id: str, request: ResearchRequest) -> dict:
     # never verified or previously failed identity matching.
     index = _prune_unverified_auto_references(root, _load_reference_index(root))
     known_hashes = {str(item.get("sha256")) for item in index if item.get("sha256")}
+    evaluated_hashes = set(known_hashes)
 
     queries: list[str] = []
     for value in [plan.primary_query, *plan.alternate_queries, requested_query]:
@@ -3977,8 +3983,9 @@ async def research_job(job_id: str, request: ResearchRequest) -> dict:
         candidate_records = [
             record
             for record in payload.get("references", [])
-            if record.get("sha256") not in known_hashes
+            if record.get("sha256") not in evaluated_hashes
         ]
+        evaluated_hashes.update(str(record["sha256"]) for record in candidate_records if record.get("sha256"))
         batch_accepted, batch_rejected = await _verify_reference_candidates(
             root,
             plan=plan,

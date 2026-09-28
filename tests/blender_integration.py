@@ -60,6 +60,10 @@ def main():
             "stations": [{"position": p, "profile": [[0, 0], [1, 0], [1, 1], [0, 1]]}
                          for p in (-2, -1, 1, 2)], "cutters": [], "attachments": []}
     parent = run(root, "cage", hard_surface_cage_script(), {"spec": spec})
+    # Exact declarative geometry captured from the live job that exported 64
+    # non-manifold edges with no cutters. This fixture is never used by generation.
+    live_spec = json.loads((Path(__file__).parent / "fixtures/cage_live_regression.json").read_text())
+    run(root, "live_shell", hard_surface_cage_script(), {"spec": live_spec})
     before = (parent / "model-v1.blend").read_bytes()
     edited = apply_cage_edit_action(spec, CageEditAction(
         operation="add_cutter", reason="Open a transverse hole",

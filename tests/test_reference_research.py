@@ -16,18 +16,27 @@ from app.main import (
     _normalize_reference_pack_payload,
     _prune_unverified_auto_references,
 )
-from app.research import _candidate_relevance_score, research_web_references
+from app.research import (
+    _candidate_has_identity_metadata_signal,
+    _candidate_relevance_score,
+    _commons_media_search_query,
+    _query_terms,
+    research_web_references,
+)
 
 
 def test_reference_search_skips_document_thumbnails_before_download(tmp_path, monkeypatch):
     photo = BytesIO()
     Image.new("RGB", (400, 300), "brown").save(photo, format="JPEG")
     downloads = []
+    commons_queries = []
 
     def respond(request):
         if request.url.host == "en.wikipedia.org":
             return httpx.Response(200, json={"query": {"pages": []}})
         if request.url.host == "commons.wikimedia.org":
+            commons_queries.append(str(request.url.params.get("gsrsearch") or ""))
+            assert request.url.params.get("mediasearch") == "true"
             return httpx.Response(200, json={"query": {"pages": [
                 {"title": "File:Subject book.pdf", "imageinfo": [{
                     "mime": "application/pdf", "thumburl": "https://images.test/book.jpg"}]},
@@ -40,9 +49,52 @@ def test_reference_search_skips_document_thumbnails_before_download(tmp_path, mo
     client = httpx.AsyncClient(transport=httpx.MockTransport(respond))
     monkeypatch.setattr("app.research.httpx.AsyncClient", lambda **_: client)
     result = asyncio.run(research_web_references("Subject", tmp_path))
+    assert commons_queries == ["Subject filetype:bitmap"]
     assert downloads == ["https://images.test/photo.jpg"]
     assert result["candidate_count"] == 1
     assert result["references"][0]["title"] == "File:Subject photo.jpg"
+
+
+def test_view_words_do_not_pollute_reference_identity_terms():
+    assert _query_terms("Toyota Prius front three quarter view reference photo") == [
+        "toyota",
+        "prius",
+    ]
+
+
+def test_commons_media_search_is_bitmap_only():
+    assert _commons_media_search_query("dining table") == "dining table filetype:bitmap"
+    assert _commons_media_search_query("dining table", exact=True) == (
+        '"dining table" filetype:bitmap'
+    )
+
+
+def test_metadata_gate_rejects_incidental_full_text_spillover():
+    unrelated = {
+        "provider": "wikimedia_commons",
+        "title": "File:Portrait of Ada Example.jpg",
+        "source_title": "Portrait of Ada Example",
+        "description": "The subject is standing beside a rectangular wooden dining table.",
+    }
+    useful = {
+        "provider": "wikimedia_commons",
+        "title": "File:Wooden dining table in a room.jpg",
+        "source_title": "Wooden dining table",
+        "description": "Furniture photograph.",
+    }
+    generic_filename_but_exact_description = {
+        "provider": "wikimedia_commons",
+        "title": "File:DSC 1234.jpg",
+        "source_title": "DSC 1234",
+        "description": "A dining table photographed from the side.",
+    }
+
+    assert _candidate_has_identity_metadata_signal("dining table side view", unrelated) is False
+    assert _candidate_has_identity_metadata_signal("dining table side view", useful) is True
+    assert _candidate_has_identity_metadata_signal(
+        "dining table side view",
+        generic_filename_but_exact_description,
+    ) is True
 
 
 def test_exact_subject_metadata_outranks_unrelated_wikimedia_result():

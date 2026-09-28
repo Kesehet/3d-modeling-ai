@@ -5588,6 +5588,37 @@ def _normalize_hard_surface_cage_payload(
     return normalized
 
 
+def _clean_initial_primary_blockout(
+    spec: HardSurfaceCageSpec,
+    feature_task: FeatureTask | None,
+    *,
+    has_existing_cage: bool,
+) -> tuple[HardSurfaceCageSpec, int, int]:
+    """Keep the first base-mesh pass as a clean primary mass.
+
+    Feature decomposition owns openings and separate parts. An initial
+    base_mesh_region should establish silhouette/proportion before later
+    surface_cutout/attachment/component passes modify that mass.
+    """
+
+    if (
+        has_existing_cage
+        or feature_task is None
+        or feature_task.strategy != "base_mesh_region"
+    ):
+        return spec, 0, 0
+
+    deferred_cutters = len(spec.cutters)
+    deferred_attachments = len(spec.attachments)
+    if deferred_cutters == 0 and deferred_attachments == 0:
+        return spec, 0, 0
+
+    cleaned = spec.model_copy(deep=True)
+    cleaned.cutters = []
+    cleaned.attachments = []
+    return cleaned, deferred_cutters, deferred_attachments
+
+
 def _active_hard_surface_cage_spec(
     root: Path,
     status_payload: dict,
@@ -5673,6 +5704,8 @@ async def _build_hard_surface_cage_spec(
         "the cage, so use it only when the visible form calls for it. Use bevel sparingly. "
         "Every cutter must have a deliberate location, scale and orientation. "
         "Do not include openings or details owned by later features in this first silhouette pass. "
+        "If ACTIVE FEATURE strategy is base_mesh_region and there is no CURRENT HARD-SURFACE CAGE, emit a CLEAN "
+        "continuous primary mass: no boolean cutters and no separate attachments. Those belong to later feature owners. "
         "Do not copy a stock profile or invent a display pedestal. "
         "Choose all section positions, widths and heights from the actual reference proportions."
     )
@@ -5723,11 +5756,29 @@ async def _build_hard_surface_cage_spec(
                 complexity=subject_complexity,
             )
             spec = HardSurfaceCageSpec.model_validate(normalized)
+            spec, deferred_cutters, deferred_attachments = _clean_initial_primary_blockout(
+                spec,
+                feature_task,
+                has_existing_cage=active is not None,
+            )
             if job_request.get("component_job") is True:
                 spec.presentation_base = False
         except (OllamaProxyError, httpx.HTTPError, ValidationError, ValueError, TypeError) as exc:
             errors.append(f"{candidate_model}: {exc}")
             continue
+
+        if deferred_cutters or deferred_attachments:
+            append_history(
+                root,
+                "primary_blockout_details_deferred",
+                feature_id=feature_task.id if feature_task is not None else None,
+                deferred_cutters=deferred_cutters,
+                deferred_attachments=deferred_attachments,
+                reason=(
+                    "Initial base-mesh pass owns primary mass only; openings and separate "
+                    "parts remain assigned to later feature passes."
+                ),
+            )
 
         _write_llm_log(
             root,

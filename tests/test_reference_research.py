@@ -10,12 +10,12 @@ from app.main import (
     ReferencePackDecision,
     ReferenceSearchPlan,
     _is_usable_reference_record,
-    _reference_search_queries,
     _metadata_supports_reference_identity,
     _metadata_title_supports_reference_identity,
     _normalize_reference_coherence_payload,
     _normalize_reference_pack_payload,
     _prune_unverified_auto_references,
+    _reference_search_queries,
 )
 from app.research import (
     _candidate_has_identity_metadata_signal,

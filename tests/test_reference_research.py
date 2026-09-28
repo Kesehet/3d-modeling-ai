@@ -15,6 +15,7 @@ from app.main import (
     _normalize_reference_coherence_payload,
     _normalize_reference_pack_payload,
     _prune_unverified_auto_references,
+    _reference_search_queries,
 )
 from app.research import (
     _candidate_has_identity_metadata_signal,
@@ -23,6 +24,38 @@ from app.research import (
     _query_terms,
     research_web_references,
 )
+
+
+def test_reference_search_uses_broad_discovery_before_strict_identity():
+    plan = ReferenceSearchPlan(
+        primary_query="blue upholstered office chair with five casters",
+        discovery_query="office chair",
+        alternate_queries=["office chair side view"],
+        subject_description="A blue upholstered office chair with five casters.",
+        identity_constraints=["blue upholstery", "five casters"],
+    )
+
+    queries = _reference_search_queries(
+        plan,
+        "Create a blue upholstered office chair with five casters and realistic proportions",
+    )
+
+    assert queries[0] == "office chair"
+    assert queries[1] == "blue upholstered office chair with five casters"
+    assert queries[2] == "office chair side view"
+
+
+def test_named_identity_discovery_does_not_broaden_to_parent_category():
+    plan = ReferenceSearchPlan(
+        primary_query="Toyota Prius",
+        discovery_query="Toyota Prius",
+        alternate_queries=["Toyota Prius side view"],
+    )
+
+    queries = _reference_search_queries(plan, "A Toyota Prius")
+
+    assert queries[0] == "Toyota Prius"
+    assert "car" not in queries
 
 
 def test_reference_search_skips_document_thumbnails_before_download(tmp_path, monkeypatch):

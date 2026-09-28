@@ -5929,6 +5929,20 @@ def _recent_cage_edit_events(root: Path, limit: int = 6) -> list[dict]:
     return events[-limit:]
 
 
+def _cage_edit_action_schema(*, allow_replan: bool) -> dict:
+    """Expose representation replanning only after bounded edits have actually stalled."""
+
+    schema = CageEditAction.model_json_schema()
+    operation = schema.get("properties", {}).get("operation")
+    if not allow_replan and isinstance(operation, dict):
+        values = operation.get("enum")
+        if isinstance(values, list):
+            operation["enum"] = [
+                value for value in values if value != "replan_representation"
+            ]
+    return schema
+
+
 def _normalize_cage_edit_action_payload(data: object) -> dict:
     """Normalize harmless LLM field-name drift without inventing edit semantics."""
 
@@ -5971,6 +5985,7 @@ async def _decide_hard_surface_cage_edit(
     baseline_version: int,
     spec: HardSurfaceCageSpec,
     feature_task: FeatureTask | None,
+    allow_replan: bool,
 ) -> CageEditAction:
     root = _require_job(job_id)
     job_request = json.loads((root / "request.json").read_text(encoding="utf-8"))
@@ -6047,9 +6062,18 @@ async def _decide_hard_surface_cage_edit(
         "reshape_station changes one entire cross-section; reshape_profile_point changes one local profile point; "
         "insert_station adds control where silhouette curvature is under-resolved; remove_station removes a harmful "
         "intermediate section; adjust_cutter changes one existing opening/cut; remove_cutter removes a clearly harmful "
-        "cut. Choose replan_representation only when the current cage topology/representation cannot plausibly be "
-        "improved with bounded edits. Protect unrelated good geometry. Do not repeat a recent rejected edit with "
-        "effectively the same target and parameters. Return JSON only matching the schema."
+        "cut. Protect unrelated good geometry. Do not repeat a recent rejected edit with effectively the same "
+        "target and parameters. "
+        + (
+            "Representation replanning is now allowed because multiple bounded edits have already failed. "
+            "Choose replan_representation only when the current cage topology truly cannot plausibly converge. "
+            if allow_replan
+            else
+            "Representation replanning is LOCKED for this pass because the current editable representation has not "
+            "yet had enough rejected bounded edits. You MUST choose one bounded station/profile/cutter edit; do not "
+            "return replan_representation. "
+        )
+        + "Return JSON only matching the schema."
     )
     prompt = (
         f"Exact user request: {job_request.get('prompt', '')}\n"
@@ -6074,13 +6098,17 @@ async def _decide_hard_surface_cage_edit(
                 system=system,
                 prompt=prompt,
                 images=images,
-                schema=CageEditAction.model_json_schema(),
+                schema=_cage_edit_action_schema(allow_replan=allow_replan),
                 temperature=0.0,
                 num_predict=2048,
             )
             action = CageEditAction.model_validate(
                 _normalize_cage_edit_action_payload(result.data)
             )
+            if action.operation == "replan_representation" and not allow_replan:
+                raise ValueError(
+                    "Representation replan is locked until bounded cage edits have failed."
+                )
         except (OllamaProxyError, httpx.HTTPError, ValidationError, ValueError, TypeError) as exc:
             errors.append(f"{candidate_model}: {exc}")
             continue
@@ -6160,11 +6188,13 @@ async def _refine_hard_surface_cage_incrementally(
             feature_task=feature_task,
         )
 
+    allow_replan = stall_count >= 2
     action = await _decide_hard_surface_cage_edit(
         job_id,
         baseline_version=baseline_version,
         spec=baseline_spec,
         feature_task=feature_task,
+        allow_replan=allow_replan,
     )
     if action.operation == "replan_representation":
         append_history(

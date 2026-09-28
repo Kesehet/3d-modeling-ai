@@ -48,6 +48,9 @@ Check this branch's PR/CI/deployment status before assuming these changes are li
 - Blender CI executes closed cages, a boolean edit, a tapered mirrored/subdivided body, adaptive loft,
   primitive components, assembly, all nine views and GLB/OBJ/STL exports. It checks manifold edges and useful
   image framing. Local Python verification: **149 tests passed**, Ruff passed, all four Blender scripts compile.
+- PR #57 CI run `36382423810` also replayed the exact live shell as a test-only fixture:
+  **64 non-manifold edges before the fix, 0 after**, with zero loose vertices. All seven real Blender
+  cases and exports passed. This establishes the geometry repair, not subject-level visual completion.
 
 ### Next work and actual release gate
 

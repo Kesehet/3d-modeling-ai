@@ -2166,11 +2166,11 @@ def _auto_improve_goal_reached(root: Path, status: dict) -> bool:
     quality = status.get("quality_gate")
     if isinstance(quality, dict) and quality.get("scope") == "feature":
         return False
-    recognizable = (
-        isinstance(quality, dict)
-        and quality.get("recognizable") is True
-    ) or str(status.get("stage") or "").endswith("_recognizable")
+    recognizable = isinstance(quality, dict) and quality.get("recognizable") is True
     if not recognizable:
+        return False
+    if (quality.get("scope") == "whole_object"
+            and quality.get("evaluated_version") != (status.get("generic_model") or {}).get("version")):
         return False
 
     plan = feature_plan_summary(root)

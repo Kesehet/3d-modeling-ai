@@ -452,6 +452,7 @@ def test_final_quality_rechecks_whole_object_and_current_version(tmp_path, monke
     assert main._auto_improve_goal_reached(root, status) is True
     asyncio.run(main._ensure_final_model_quality("abc123", status))
     status["generic_model"]["version"] = 5
+    assert main._auto_improve_goal_reached(root, status) is False
     asyncio.run(main._ensure_final_model_quality("abc123", status))
     assert calls == [4, 5]
 
@@ -464,9 +465,10 @@ def test_final_quality_failure_is_persisted_and_retryable(tmp_path, monkeypatch)
         raise main.HTTPException(status_code=502, detail="vision timeout")
 
     monkeypatch.setattr(main, "_generic_recognizability_check", unavailable)
-    status = main._write_status(root, generic_model={"version": 4},
+    status = main._write_status(root, stage="generic_recognizable", generic_model={"version": 4},
                                quality_gate={"scope": "feature", "recognizable": True})
     status = asyncio.run(main._ensure_final_model_quality("abc123", status))
     assert status["quality_gate"]["recognizable"] is False
+    assert main._auto_improve_goal_reached(root, status) is False
     assert "evaluated_version" not in status["quality_gate"]
     assert "vision timeout" in main._read_status(root)["quality_gate"]["summary"]

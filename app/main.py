@@ -3312,6 +3312,15 @@ async def _plan_reference_search(
         "Produce a strict image-search plan for geometry references."
     )
     client = OllamaProxyClient()
+    # Keep the Pydantic model backwards-compatible for stored/tests plans, but make
+    # discovery_query mandatory in the actual planner contract so reasoning models
+    # cannot silently omit the broad-recall decision.
+    plan_schema = ReferenceSearchPlan.model_json_schema()
+    required = list(plan_schema.get("required") or [])
+    if "discovery_query" not in required:
+        required.append("discovery_query")
+    plan_schema["required"] = required
+
     errors: list[str] = []
     for candidate_model in (REASONING_MODEL, *VISION_MODELS):
         try:
@@ -3319,7 +3328,7 @@ async def _plan_reference_search(
                 model=candidate_model,
                 system=system,
                 prompt=prompt,
-                schema=ReferenceSearchPlan.model_json_schema(),
+                schema=plan_schema,
                 temperature=0.0,
                 num_predict=2048,
             )

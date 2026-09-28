@@ -86,12 +86,13 @@ def test_visual_replan_switches_out_of_the_failed_cage_representation(tmp_path, 
         root,
         modeling_strategy="hard_surface_cage",
         working_cage_version=1,
-        cage_edit_stall_count=0,
+        cage_edit_stall_count=2,
     )
     feature = FeatureTask(id="body", name="body", strategy="base_mesh_region")
     calls = []
 
     async def decide(*a, **kw):
+        assert kw["allow_replan"] is True
         return main.CageEditAction(
             operation="replan_representation",
             reason="The current representation cannot express the visible shape.",
@@ -116,6 +117,75 @@ def test_visual_replan_switches_out_of_the_failed_cage_representation(tmp_path, 
     assert result["switched"] is True
     assert calls and calls[0]["feature_task"] is feature
     assert "Do not generate another cage" in calls[0]["reason"]
+
+
+def test_first_cage_refinement_locks_representation_replan(tmp_path, monkeypatch):
+    root = job(tmp_path, monkeypatch)
+    spec = main.HardSurfaceCageSpec(title="Test", stations=[
+        {"position": p, "profile": [[0, 0], [1, 0], [1, 1], [0, 1]]}
+        for p in (-3, -1, 1, 3)
+    ])
+    (root / "cage-spec-v1.json").write_text(json.dumps({"spec": spec.model_dump()}))
+    main._write_status(
+        root,
+        modeling_strategy="hard_surface_cage",
+        generic_model={"version": 1},
+        working_cage_version=1,
+        cage_edit_stall_count=0,
+    )
+    feature = FeatureTask(id="body", name="body", strategy="base_mesh_region")
+    flags = []
+
+    async def decide(*a, **kw):
+        flags.append(kw["allow_replan"])
+        return main.CageEditAction(
+            operation="reshape_station",
+            target_index=1,
+            width_scale=1.1,
+            reason="Widen the dominant section before abandoning the representation.",
+            expected_visual_effect="Improve the primary silhouette.",
+        )
+
+    async def build(*a, version, activate_status, **kw):
+        assert activate_status is False
+        return {"candidate_model": {"version": version}}
+
+    async def compare(*a, **kw):
+        return {"candidate_is_better": False, "summary": "Not enough improvement yet."}
+
+    async def evaluate(*a, **kw):
+        return {
+            "passed": False,
+            "visible": True,
+            "criteria_satisfied": False,
+            "confidence": 0.99,
+            "reference_match_score": 0.2,
+            "subject_recognizable": False,
+            "regression_detected": False,
+            "summary": "Still needs work.",
+        }
+
+    monkeypatch.setattr(main, "_decide_hard_surface_cage_edit", decide)
+    monkeypatch.setattr(main, "_execute_hard_surface_cage", build)
+    monkeypatch.setattr(main, "_compare_generic_versions", compare)
+    monkeypatch.setattr(main, "_evaluate_feature_candidate", evaluate)
+
+    result = asyncio.run(
+        main._refine_hard_surface_cage_incrementally("abc123", feature_task=feature)
+    )
+
+    assert flags == [False]
+    assert result["action"]["operation"] == "reshape_station"
+    assert result["kept"] is False
+    assert main._read_status(root)["cage_edit_stall_count"] == 1
+
+
+def test_cage_edit_schema_hides_replan_until_it_is_allowed():
+    locked = main._cage_edit_action_schema(allow_replan=False)
+    unlocked = main._cage_edit_action_schema(allow_replan=True)
+
+    assert "replan_representation" not in locked["properties"]["operation"]["enum"]
+    assert "replan_representation" in unlocked["properties"]["operation"]["enum"]
 
 
 def test_adaptive_representation_keeps_clear_partial_progress(tmp_path, monkeypatch):

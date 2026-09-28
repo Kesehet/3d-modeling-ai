@@ -6001,7 +6001,7 @@ def _normalize_cage_edit_action_payload(data: object) -> dict:
 
     if normalized.get("influence_radius") is not None:
         try:
-            radius = int(round(float(normalized["influence_radius"])))
+            radius = round(float(normalized["influence_radius"]))
         except (TypeError, ValueError):
             radius = 1
         normalized["influence_radius"] = max(1, min(3, radius))

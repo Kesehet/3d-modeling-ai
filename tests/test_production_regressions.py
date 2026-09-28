@@ -40,7 +40,7 @@ def test_initial_base_mesh_blockout_defers_cutters_and_attachments():
         attachments=[
             {
                 "name": "separate detail",
-                "primitive": "cube",
+                "shape": "cube",
                 "location": [0, 0, 0],
                 "scale": [1, 1, 1],
             }

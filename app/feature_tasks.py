@@ -281,7 +281,9 @@ def normalize_feature_plan_payload(data: object, *, subject: str) -> dict:
         if count <= 1:
             if re.search(r"all[ _-]*four|four wheels|4 wheels", repetition_text):
                 count = 4
-            elif symmetry in {"bilateral", "paired"}:
+            elif symmetry in {"bilateral", "paired"} and strategy != "base_mesh_region":
+                # A mirrored primary/base mesh is one feature with bilateral
+                # construction, not two independent feature instances.
                 count = 2
 
         normalized.append(

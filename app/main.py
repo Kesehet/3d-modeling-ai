@@ -1038,10 +1038,18 @@ async def _build_feature_plan(
         "Dependencies must form a DAG. " + component_policy +
         "The primary silhouette/body should normally be first; dependent details should wait for the supporting "
         "surface. In-place workers share one best-so-far model, so ownership scopes must be narrow enough to prevent "
-        "one feature worker from unnecessarily rewriting unrelated geometry. Acceptance criteria MUST be visually "
-        "verifiable from the supplied references/renders. Do not invent exact millimetres, percentages, tolerances, "
-        "materials, badge dimensions, or other measurements unless the user/reference evidence explicitly provides "
-        "them. Phrase criteria as visible shape, proportion, count, placement, continuity, and identity checks."
+        "one feature worker from unnecessarily rewriting unrelated geometry. Think like a production 3D modeler and "
+        "separate PRIMARY FORM from SECONDARY/TERTIARY FORM. A base_mesh_region feature owns only broad mass, global "
+        "proportions, silhouette, large continuous planes/curves, and major transitions. Its acceptance criteria MUST "
+        "NOT require panel seams, trim, small openings, glazing boundaries, fasteners, badges, handles, lighting internals, "
+        "or other detail that belongs to later surface_cutout/surface_detail/attachment/component features. Create those "
+        "as separate later sub-jobs instead. If a component_job installs into a visible recess/opening/socket/mounting "
+        "region, create that supporting in_place surface_cutout or surface-detail feature BEFORE the component and make "
+        "the component depend on it. This avoids installing finished components into an unprepared primary shell. "
+        "Acceptance criteria MUST be visually verifiable from the supplied references/renders. Do not invent exact "
+        "millimetres, percentages, tolerances, materials, badge dimensions, or other measurements unless the "
+        "user/reference evidence explicitly provides them. Phrase criteria as visible shape, proportion, count, "
+        "placement, continuity, and identity checks appropriate to that feature's modeling pass."
     )
     prompt = (
         f"Exact user request: {job_request.get('prompt', '')}\n"

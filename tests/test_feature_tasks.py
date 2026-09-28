@@ -450,6 +450,32 @@ def test_feature_plan_preserves_semantic_id_when_model_emits_generic_name():
     assert plan.features[1].count == 4
 
 
+def test_bilateral_primary_base_mesh_is_one_feature_instance():
+    payload = normalize_feature_plan_payload(
+        {
+            "features": [
+                {
+                    "id": "primary-shell",
+                    "name": "Primary shell",
+                    "strategy": "base_mesh_region",
+                    "symmetry": "bilateral",
+                },
+                {
+                    "id": "paired-detail",
+                    "name": "Paired detail",
+                    "strategy": "attachment",
+                    "symmetry": "bilateral",
+                },
+            ]
+        },
+        subject="generic object",
+    )
+    plan = FeaturePlan.model_validate(payload)
+
+    assert plan.features[0].count == 1
+    assert plan.features[1].count == 2
+
+
 def test_feature_plan_recovers_repeated_instance_intent():
     payload = normalize_feature_plan_payload(
         {

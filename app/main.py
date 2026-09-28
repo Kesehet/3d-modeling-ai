@@ -5981,6 +5981,7 @@ def _normalize_cage_edit_action_payload(data: object) -> dict:
     # Preserve the proposed direction/magnitude as closely as possible while
     # clamping harmless numeric overshoot instead of wasting a vision round.
     scalar_bounds = {
+        "length_scale": (0.75, 1.30),
         "width_scale": (0.65, 1.45),
         "height_scale": (0.65, 1.45),
         "height_offset_fraction": (-0.30, 0.30),
@@ -5997,6 +5998,13 @@ def _normalize_cage_edit_action_payload(data: object) -> dict:
         except (TypeError, ValueError):
             continue
         normalized[field] = max(lower, min(upper, value))
+
+    if normalized.get("influence_radius") is not None:
+        try:
+            radius = int(round(float(normalized["influence_radius"])))
+        except (TypeError, ValueError):
+            radius = 1
+        normalized["influence_radius"] = max(1, min(3, radius))
 
     return normalized
 
@@ -6061,6 +6069,25 @@ async def _decide_hard_surface_cage_edit(
         }
         for index, station in enumerate(spec.stations)
     ]
+    station_positions = [float(station.position) for station in spec.stations]
+    position_min = min(station_positions)
+    position_span = max(station_positions) - position_min
+    station_envelope = []
+    for index, station in enumerate(spec.stations):
+        profile = station.profile
+        station_envelope.append(
+            {
+                "index": index,
+                "position_fraction": (
+                    (float(station.position) - position_min) / position_span
+                    if position_span > 0.0
+                    else 0.0
+                ),
+                "half_width": max(float(point[0]) for point in profile),
+                "bottom": min(float(point[1]) for point in profile),
+                "top": max(float(point[1]) for point in profile),
+            }
+        )
     cutter_summary = [
         {
             "index": index,
@@ -6073,6 +6100,14 @@ async def _decide_hard_surface_cage_edit(
         for index, cutter in enumerate(spec.cutters)
     ]
     feature_context = feature_task.model_dump() if feature_task is not None else {}
+    primary_form_pass = (
+        quality_gate.get("recognizable") is not True
+        or (
+            feature_task is not None
+            and str(feature_task.strategy or "") == "base_mesh_region"
+        )
+    )
+    modeling_pass = "primary_form" if primary_form_pass else "secondary_form"
     recent_events = _recent_cage_edit_events(root)
 
     system = (
@@ -6081,11 +6116,30 @@ async def _decide_hard_surface_cage_edit(
         "identify the single highest-impact visible geometric error, and choose exactly ONE bounded edit from the "
         "CageEditAction schema. The editing vocabulary is generic and index-based. Prefer the smallest edit likely to "
         "make a visible improvement. Use relative factors/fractions instead of inventing absolute coordinates. "
+        "Work like a production 3D modeler: establish the blockout, overall proportions, and readable silhouette "
+        "before spending edits on secondary forms or detail. Compare the side/front/top envelopes and major transitions. "
+        "reshape_cage_proportions changes the whole length/width/height envelope; reshape_station_region behaves like "
+        "bounded proportional editing around one station with smooth falloff into neighboring connected sections; "
         "reshape_station changes one entire cross-section; reshape_profile_point changes one local profile point; "
         "insert_station adds control where silhouette curvature is under-resolved; remove_station removes a harmful "
         "intermediate section; adjust_cutter changes one existing opening/cut; remove_cutter removes a clearly harmful "
         "cut. Protect unrelated good geometry. Do not repeat a recent rejected edit with effectively the same "
         "target and parameters. "
+        + (
+            (
+                "PRIMARY-FORM PASS: the subject is not yet visually established. Prioritize, in order: "
+                "reshape_cage_proportions for a wrong global envelope; reshape_station_region for a broad silhouette "
+                "or transition error spanning adjacent sections; reshape_station or insert_station for a local "
+                "silhouette control problem. Avoid cutter/detail edits unless a large existing cut is itself the "
+                "dominant silhouette error. Do not polish details on an unrecognizable blockout. "
+            )
+            if primary_form_pass
+            else
+            (
+                "SECONDARY-FORM PASS: the broad subject already reads. Preserve the accepted silhouette while "
+                "refining local profiles, openings, transitions, and attachments needed by the active feature. "
+            )
+        )
         + (
             "Representation replanning is now allowed because multiple bounded edits have already failed. "
             "Choose replan_representation only when the current cage topology truly cannot plausibly converge. "
@@ -6103,8 +6157,15 @@ async def _decide_hard_surface_cage_edit(
         f"Working baseline version: {baseline_version}\n"
         f"ACTIVE FEATURE (if any): {json.dumps(feature_context, ensure_ascii=False)}\n"
         f"Current quality critique: {json.dumps(quality_gate, ensure_ascii=False)}\n"
-        f"Station indices and geometry: {json.dumps(station_summary, ensure_ascii=False)}\n"
-        f"Cutter indices and geometry: {json.dumps(cutter_summary, ensure_ascii=False)}\n"
+        f"MODELING PASS: {modeling_pass}\n"
+        f"Station envelope (normalized longitudinal position, half-width, bottom, top): "
+        f"{json.dumps(station_envelope, ensure_ascii=False)}\n"
+        + (
+            ""
+            if primary_form_pass
+            else f"Full station profile geometry: {json.dumps(station_summary, ensure_ascii=False)}\n"
+        )
+        + f"Cutter indices and geometry: {json.dumps(cutter_summary, ensure_ascii=False)}\n"
         f"Recent edit outcomes: {json.dumps(recent_events, ensure_ascii=False)}\n"
         f"Images in order: {labels}\n"
         "Reference images come first, followed by CURRENT baseline renders. Choose one change only. "
@@ -6141,6 +6202,7 @@ async def _decide_hard_surface_cage_edit(
             "baseline_version": baseline_version,
             "images": labels,
             "feature": feature_context,
+            "modeling_pass": modeling_pass,
             "action": action.model_dump(),
             "created_at": datetime.now(UTC).isoformat(),
         }
@@ -6151,8 +6213,10 @@ async def _decide_hard_surface_cage_edit(
             baseline_version=baseline_version,
             feature_id=feature_task.id if feature_task is not None else None,
             operation=action.operation,
+            modeling_pass=modeling_pass,
             target_index=action.target_index,
             point_index=action.point_index,
+            influence_radius=action.influence_radius,
             reason=action.reason,
             expected_visual_effect=action.expected_visual_effect,
             model=candidate_model,

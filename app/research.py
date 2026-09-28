@@ -27,6 +27,8 @@ SEARCH_STOPWORDS = {
     "for",
     "from",
     "generate",
+    "image",
+    "images",
     "in",
     "make",
     "model",
@@ -34,6 +36,26 @@ SEARCH_STOPWORDS = {
     "on",
     "please",
     "render",
+    "reference",
+    "references",
+    "photo",
+    "photos",
+    "photograph",
+    "photographs",
+    "front",
+    "rear",
+    "back",
+    "side",
+    "top",
+    "bottom",
+    "view",
+    "views",
+    "angle",
+    "angles",
+    "multiple",
+    "profile",
+    "three",
+    "quarter",
     "the",
     "to",
     "with",
@@ -61,6 +83,56 @@ def _query_terms(query: str) -> list[str]:
     ]
     # Preserve order while deduplicating.
     return list(dict.fromkeys(terms))
+
+
+def _candidate_has_identity_metadata_signal(query: str, candidate: dict[str, Any]) -> bool:
+    """Reject obvious text-search spillover before downloading or invoking vision.
+
+    Search providers may return files whose descriptions mention the requested object
+    only incidentally. Require at least one meaningful identity term in the file/page
+    title, or the complete normalized identity phrase in its description. Vision still
+    makes the authoritative pixel-level acceptance decision.
+    """
+    terms = _query_terms(query)
+    if not terms:
+        return True
+
+    title_text = " ".join(
+        item
+        for item in (
+            _canonical_text(candidate.get("title") or ""),
+            _canonical_text(candidate.get("source_title") or ""),
+        )
+        if item
+    )
+    if any(term in title_text for term in terms):
+        return True
+
+    query_text = " ".join(terms)
+    description = _canonical_text(candidate.get("description") or "")
+    if not description:
+        return False
+
+    # Some useful Commons files have camera-style filenames (DSC_1234, IMG_...). In
+    # that case allow the description to recover them only when it introduces the
+    # requested identity near the beginning, rather than mentioning it incidentally
+    # deep in a caption about another subject.
+    description_tokens = description.split()
+    if len(terms) == 1:
+        return terms[0] in description_tokens[:6]
+
+    identity_tokens = query_text.split()
+    max_start = min(5, max(0, len(description_tokens) - len(identity_tokens)))
+    for start in range(max_start + 1):
+        if description_tokens[start : start + len(identity_tokens)] == identity_tokens:
+            return True
+    return False
+
+
+def _commons_media_search_query(query: str, *, exact: bool = False) -> str:
+    """Use Commons' media search profile and restrict discovery to raster images."""
+    core = f'"{query}"' if exact else query
+    return f"{core} filetype:bitmap"
 
 
 def _candidate_relevance_score(query: str, candidate: dict[str, Any]) -> float:
@@ -208,9 +280,9 @@ async def research_web_references(
         # Search both an exact phrase and the ordinary full-text query. Exact phrase tends
         # to keep specific products/vehicles/characters together; the fallback preserves
         # recall for generic subjects and Commons naming quirks.
-        commons_queries = [query]
+        commons_queries = [_commons_media_search_query(query)]
         if len(_query_terms(query)) >= 2:
-            commons_queries.insert(0, f'"{query}"')
+            commons_queries.insert(0, _commons_media_search_query(query, exact=True))
 
         seen_commons_titles: set[str] = set()
         for search_round, commons_query in enumerate(commons_queries):
@@ -225,6 +297,10 @@ async def research_web_references(
                 "prop": "imageinfo",
                 "iiprop": "url|mime|size|extmetadata",
                 "iiurlwidth": "1600",
+                # Invoke Commons' media-specific search profile. It combines file
+                # metadata/structured data with text ranking instead of treating files
+                # like ordinary wiki pages.
+                "mediasearch": "true",
             }
             commons = (await client.get(COMMONS_API, params=commons_params)).json()
             for rank, page in enumerate((commons.get("query") or {}).get("pages") or [], start=1):
@@ -263,6 +339,15 @@ async def research_web_references(
                     }
                 )
 
+        # Full-text search can surface biographies, buildings or documents that
+        # merely mention the requested object. Do not download those obvious spillovers
+        # or spend multimodal calls on them. The visual verifier remains authoritative
+        # for every candidate that survives this cheap metadata gate.
+        candidates = [
+            candidate
+            for candidate in candidates
+            if _candidate_has_identity_metadata_signal(query, candidate)
+        ]
         for candidate in candidates:
             candidate["lexical_score"] = round(_candidate_relevance_score(query, candidate), 3)
         candidates.sort(

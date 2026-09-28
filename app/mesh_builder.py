@@ -7,6 +7,8 @@ plus optional safe primitive attachments. Blender constructs the mesh itself.
 
 from __future__ import annotations
 
+from .rendering import camera_framing_script
+
 
 def adaptive_loft_script() -> str:
     return r'''
@@ -223,6 +225,7 @@ if SPEC.get("presentation_base", True):
     base.name = "Presentation Base"
     base.data.materials.append(material_for("#303742"))
 
+bpy.context.view_layer.update()
 points = []
 for obj in objects:
     points.extend(obj.matrix_world @ Vector(corner) for corner in obj.bound_box)
@@ -245,10 +248,12 @@ scene = bpy.context.scene
 scene.render.engine = "BLENDER_WORKBENCH"
 scene.display.shading.light = "STUDIO"
 scene.display.shading.color_type = "MATERIAL"
+scene.display.shading.background_type = "VIEWPORT"
+scene.display.shading.background_color = (0.88, 0.90, 0.93)
 scene.display.shading.show_shadows = True
 scene.display.shading.show_cavity = True
-scene.render.resolution_x = 384
-scene.render.resolution_y = 384
+scene.render.resolution_x = 640
+scene.render.resolution_y = 640
 scene.render.resolution_percentage = 100
 scene.render.image_settings.file_format = "PNG"
 
@@ -274,7 +279,7 @@ views = {
 rendered = []
 for name, position in views.items():
     camera.location = position
-    camera.rotation_euler = (center - camera.location).to_track_quat("-Z", "Y").to_euler()
+# FRAME_QA_CAMERA
     path = f"{OUT}/{PREFIX}-{name}.png"
     scene.render.filepath = path
     bpy.ops.render.render(write_still=True)
@@ -336,4 +341,4 @@ __result__ = {
     "object_count": len(objects),
     "strategy": "adaptive_loft",
 }
-'''
+'''.replace("# FRAME_QA_CAMERA", camera_framing_script())

@@ -7,6 +7,8 @@ bounded modeling intent; Blender performs the actual geometry operations.
 
 from __future__ import annotations
 
+from .rendering import camera_framing_script
+
 
 def hard_surface_cage_script() -> str:
     return r'''
@@ -93,9 +95,11 @@ def build_cage():
 
     # Cap longitudinal ends. Profiles are half-sections whose first/last points
     # lie on the mirror plane, so these n-gons become closed after Mirror.
-    faces.append(tuple(range(profile_size - 1, -1, -1)))
+    faces.append(tuple(range(profile_size)))
     last = (len(stations) - 1) * profile_size
-    faces.append(tuple(last + index for index in range(profile_size)))
+    faces.append(tuple(last + index for index in range(profile_size - 1, -1, -1)))
+    if axis == "x":
+        faces = [tuple(reversed(face)) for face in faces]
 
     mesh = bpy.data.meshes.new("HardSurfaceCage")
     mesh.from_pydata(vertices, [], faces)
@@ -136,10 +140,17 @@ def build_cage():
     # Freeze the cage before booleans so cutters operate on the visible mirrored
     # shape, similar to applying a deliberate human blockout checkpoint.
     for modifier in list(body.modifiers):
-        try:
-            bpy.ops.object.modifier_apply(modifier=modifier.name)
-        except Exception:
-            pass
+        modifier_type = modifier.type
+        bpy.ops.object.modifier_apply(modifier=modifier.name)
+        if modifier_type == "MIRROR":
+            # Normalize the now-closed shell BEFORE subdivision/bevel. Repairing
+            # normals after bevel cannot undo geometry created around inverted caps.
+            bm = bmesh.new()
+            bm.from_mesh(body.data)
+            bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
+            bm.to_mesh(body.data)
+            bm.free()
+            body.data.update()
     return body
 
 
@@ -313,6 +324,7 @@ if SPEC.get("presentation_base", False):
     base.name = "Presentation Base"
     base.data.materials.append(material_for("#303742"))
 
+bpy.context.view_layer.update()
 points = []
 for obj in objects:
     points.extend(obj.matrix_world @ Vector(corner) for corner in obj.bound_box)
@@ -331,10 +343,12 @@ scene = bpy.context.scene
 scene.render.engine = "BLENDER_WORKBENCH"
 scene.display.shading.light = "STUDIO"
 scene.display.shading.color_type = "MATERIAL"
+scene.display.shading.background_type = "VIEWPORT"
+scene.display.shading.background_color = (0.88, 0.90, 0.93)
 scene.display.shading.show_shadows = True
 scene.display.shading.show_cavity = True
-scene.render.resolution_x = 384
-scene.render.resolution_y = 384
+scene.render.resolution_x = 640
+scene.render.resolution_y = 640
 scene.render.resolution_percentage = 100
 scene.render.image_settings.file_format = "PNG"
 
@@ -359,7 +373,7 @@ views = {
 rendered = []
 for name, position in views.items():
     camera.location = position
-    camera.rotation_euler = (center - camera.location).to_track_quat("-Z", "Y").to_euler()
+# FRAME_QA_CAMERA
     path = f"{OUT}/{PREFIX}-{name}.png"
     scene.render.filepath = path
     bpy.ops.render.render(write_still=True)
@@ -424,4 +438,4 @@ __result__ = {
     "object_count": len(objects),
     "strategy": "hard_surface_cage",
 }
-'''
+'''.replace("# FRAME_QA_CAMERA", camera_framing_script())

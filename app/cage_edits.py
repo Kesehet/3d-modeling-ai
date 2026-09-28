@@ -12,10 +12,23 @@ import math
 from itertools import pairwise
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
+
+
+class EditPart(BaseModel):
+    model_config = ConfigDict(allow_inf_nan=False)
+    name: str = Field(min_length=1, max_length=80)
+    shape: Literal["sphere", "cube", "cylinder", "cone", "torus", "frustum"]
+    location: list[float] = Field(min_length=3, max_length=3)
+    scale: list[float] = Field(min_length=3, max_length=3)
+    rotation_deg: list[float] = Field(default_factory=lambda: [0, 0, 0], min_length=3, max_length=3)
+    color: str = Field(default="#808080", pattern=r"^#[0-9A-Fa-f]{6}$")
+    smooth: bool = True
+    bevel: bool = True
 
 
 class CageEditAction(BaseModel):
+    model_config = ConfigDict(allow_inf_nan=False)
     operation: Literal[
         "reshape_cage_proportions",
         "reshape_station_region",
@@ -25,6 +38,11 @@ class CageEditAction(BaseModel):
         "remove_station",
         "adjust_cutter",
         "remove_cutter",
+        "add_cutter",
+        "add_attachment",
+        "adjust_attachment",
+        "remove_attachment",
+        "set_surface",
         "replan_representation",
     ]
     reason: str = Field(min_length=1, max_length=1600)
@@ -34,6 +52,10 @@ class CageEditAction(BaseModel):
     target_index: int | None = Field(default=None, ge=0, le=64)
     point_index: int | None = Field(default=None, ge=0, le=32)
     influence_radius: int = Field(default=1, ge=1, le=3)
+    part: EditPart | None = None
+    subdivision_levels: int | None = Field(default=None, ge=0, le=2)
+    bevel_width: float | None = Field(default=None, ge=0, le=0.3)
+    smooth: bool | None = None
 
     length_scale: float = Field(default=1.0, ge=0.75, le=1.30)
     width_scale: float = Field(default=1.0, ge=0.65, le=1.45)
@@ -128,6 +150,7 @@ def apply_cage_edit_action(spec: dict, action: CageEditAction) -> dict:
     updated = copy.deepcopy(spec)
     stations = updated.get("stations") or []
     cutters = updated.get("cutters") or []
+    attachments = updated.get("attachments") or []
     axis_span, max_half_width, min_z, max_z, height_span = _extents(updated)
     center_z = (min_z + max_z) / 2.0
 
@@ -236,9 +259,12 @@ def apply_cage_edit_action(spec: dict, action: CageEditAction) -> dict:
             raise ValueError("Cannot remove an end station with a bounded local edit.")
         stations.pop(index)
 
-    elif action.operation == "adjust_cutter":
-        index = _require_index(cutters, action.target_index, "cutter")
-        cutter = cutters[index]
+    elif action.operation in {"adjust_cutter", "adjust_attachment"}:
+        targets = cutters if action.operation == "adjust_cutter" else attachments
+        index = _require_index(targets, action.target_index, "part")
+        cutter = targets[index]
+        if cutter.get("start") is not None or cutter.get("end") is not None:
+            raise ValueError("Endpoint-based parts need a replacement part rather than a transform.")
         axis = str(updated.get("axis") or "y").lower()
         xyz_spans = (
             [max_half_width * 2.0, axis_span, height_span]
@@ -263,6 +289,30 @@ def apply_cage_edit_action(spec: dict, action: CageEditAction) -> dict:
         index = _require_index(cutters, action.target_index, "cutter")
         cutters.pop(index)
 
+    elif action.operation == "remove_attachment":
+        attachments.pop(_require_index(attachments, action.target_index, "attachment"))
+
+    elif action.operation in {"add_cutter", "add_attachment"}:
+        if action.part is None:
+            raise ValueError("Adding geometry requires a part specification.")
+        part = action.part.model_dump()
+        if any(abs(v) > 20 for v in part["location"]) or any(v <= 0 or v > 10 for v in part["scale"]):
+            raise ValueError("Part coordinates or dimensions exceed the safe modeling volume.")
+        if action.operation == "add_cutter":
+            if part["shape"] not in {"cube", "cylinder", "sphere"} or len(cutters) >= 16:
+                raise ValueError("Cutter shape or count is unsupported.")
+            cutters.append({k: part[k] for k in ("name", "shape", "location", "scale", "rotation_deg")})
+        else:
+            if len(attachments) >= 24:
+                raise ValueError("Attachment budget exhausted.")
+            attachments.append(part)
+
+    elif action.operation == "set_surface":
+        for key in ("subdivision_levels", "bevel_width", "smooth"):
+            value = getattr(action, key)
+            if value is not None:
+                updated[key] = value
+
     elif action.operation == "replan_representation":
         return updated
 
@@ -272,11 +322,19 @@ def apply_cage_edit_action(spec: dict, action: CageEditAction) -> dict:
     # Preserve longitudinal station ordering after a bounded position edit.
     updated["stations"] = sorted(stations, key=lambda station: float(station["position"]))
     updated["cutters"] = cutters
+    updated["attachments"] = attachments
 
     # Prevent near-duplicate station positions, which create collapsed faces.
     positions = [float(station["position"]) for station in updated["stations"]]
     for left, right in pairwise(positions):
         if not math.isfinite(left) or not math.isfinite(right) or right - left < 0.03:
             raise ValueError("Cage edit collapsed adjacent longitudinal stations.")
+
+    # Do not render and pay for a comparison of an unchanged candidate.
+    original = copy.deepcopy(spec)
+    original.setdefault("cutters", [])
+    original.setdefault("attachments", [])
+    if original == updated:
+        raise ValueError("The proposed edit does not change any geometry or surface settings.")
 
     return updated

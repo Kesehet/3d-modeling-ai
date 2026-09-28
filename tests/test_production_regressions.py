@@ -433,3 +433,40 @@ def test_schema_is_visible_to_model_even_if_gateway_ignores_format():
     asyncio.run(client.chat_json(model="test", system="judge", prompt="image",
                                 schema={"type": "object", "properties": {"verdict": {"type": "boolean"}}}))
     assert '"verdict"' in calls[0]["messages"][0]["content"]
+
+
+def test_final_quality_rechecks_whole_object_and_current_version(tmp_path, monkeypatch):
+    root = job(tmp_path, monkeypatch)
+    monkeypatch.setattr(main, "feature_plan_summary", lambda _: {"required_complete": True})
+    calls = []
+
+    async def judge(_job_id, *, stage, render_version):
+        calls.append(render_version)
+        return {"scope": "whole_object", "evaluated_version": render_version, "recognizable": True}
+
+    monkeypatch.setattr(main, "_generic_recognizability_check", judge)
+    status = main._write_status(root, generic_model={"version": 4},
+                               quality_gate={"scope": "feature", "recognizable": True})
+    assert main._auto_improve_goal_reached(root, status) is False
+    status = asyncio.run(main._ensure_final_model_quality("abc123", status))
+    assert main._auto_improve_goal_reached(root, status) is True
+    asyncio.run(main._ensure_final_model_quality("abc123", status))
+    status["generic_model"]["version"] = 5
+    asyncio.run(main._ensure_final_model_quality("abc123", status))
+    assert calls == [4, 5]
+
+
+def test_final_quality_failure_is_persisted_and_retryable(tmp_path, monkeypatch):
+    root = job(tmp_path, monkeypatch)
+    monkeypatch.setattr(main, "feature_plan_summary", lambda _: {"required_complete": True})
+
+    async def unavailable(*args, **kwargs):
+        raise main.HTTPException(status_code=502, detail="vision timeout")
+
+    monkeypatch.setattr(main, "_generic_recognizability_check", unavailable)
+    status = main._write_status(root, generic_model={"version": 4},
+                               quality_gate={"scope": "feature", "recognizable": True})
+    status = asyncio.run(main._ensure_final_model_quality("abc123", status))
+    assert status["quality_gate"]["recognizable"] is False
+    assert "evaluated_version" not in status["quality_gate"]
+    assert "vision timeout" in main._read_status(root)["quality_gate"]["summary"]

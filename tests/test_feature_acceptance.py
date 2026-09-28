@@ -59,7 +59,7 @@ def test_strict_primary_silhouette_can_pass_when_all_gates_are_met():
 
 
 
-def test_primary_silhouette_cannot_pass_when_subject_is_unrecognizable():
+def test_completed_local_shape_can_pass_before_other_components_are_built():
     task = _body_task()
     evaluation = {
         "passed": True,
@@ -71,4 +71,4 @@ def test_primary_silhouette_cannot_pass_when_subject_is_unrecognizable():
         "regression_detected": False,
     }
 
-    assert _feature_evaluation_accepts(task, evaluation) is False
+    assert _feature_evaluation_accepts(task, evaluation) is True

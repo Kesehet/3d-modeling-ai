@@ -303,7 +303,7 @@ def _normalize_modeling_director_payload(data: object) -> dict:
 
 class RefinementComparison(BaseModel):
     candidate_is_better: bool
-    summary: str = ""
+    summary: str = Field(min_length=1, max_length=2400)
     improvements: list[str] = Field(default_factory=list)
     regressions: list[str] = Field(default_factory=list)
 
@@ -520,7 +520,8 @@ def _normalize_refinement_comparison_payload(data: object) -> dict:
                     "1", "true", "yes", "better", "improved", "accept", "accepted"
                 }
             break
-    normalized.setdefault("candidate_is_better", False)
+    if "candidate_is_better" not in normalized:
+        raise ValueError("Visual comparison omitted its explicit keep/revert judgment.")
     normalized.setdefault("summary", normalized.get("reason") or normalized.get("explanation") or "")
     for key in ("improvements", "regressions"):
         value = normalized.get(key)
@@ -759,16 +760,16 @@ class ReferenceSearchPlan(BaseModel):
 
 class ReferenceCandidateDecision(BaseModel):
     stored_name: str = Field(min_length=1, max_length=220)
-    accept: bool = False
-    match_score: float = Field(default=0.0, ge=0.0, le=1.0)
+    accept: bool
+    match_score: float = Field(ge=0.0, le=1.0)
     score_inferred: bool = False
-    exact_identity_match: bool = False
-    useful_for_geometry: bool = False
+    exact_identity_match: bool
+    useful_for_geometry: bool
     reason: str = Field(default="", max_length=1200)
 
 
 class ReferencePackDecision(BaseModel):
-    decisions: list[ReferenceCandidateDecision] = Field(default_factory=list, max_length=8)
+    decisions: list[ReferenceCandidateDecision] = Field(min_length=1, max_length=8)
 
 
 class ReferenceCoherenceDecision(BaseModel):
@@ -3814,6 +3815,10 @@ async def _verify_reference_batch(
     errors: list[str] = []
     decision_map: dict[str, ReferenceCandidateDecision] = {}
     selected_model: str | None = None
+    decision_schema = ReferencePackDecision.model_json_schema()
+    candidate_schema = decision_schema["$defs"]["ReferenceCandidateDecision"]
+    candidate_schema["required"].append("reason")
+    candidate_schema["properties"]["reason"]["minLength"] = 1
     for candidate_model in VISION_MODELS:
         try:
             result = await client.chat_json(
@@ -3821,13 +3826,20 @@ async def _verify_reference_batch(
                 system=system,
                 prompt=prompt,
                 images=images,
-                schema=None,
+                schema=decision_schema,
                 temperature=0.0,
                 num_predict=4096,
             )
+            _write_llm_log(root, "reference-verification-raw", {
+                "model": candidate_model, "query": query, "images": labels, "raw": result.data,
+            })
             pack = ReferencePackDecision.model_validate(
                 _normalize_reference_pack_payload(result.data, usable_records)
             )
+            if {decision.stored_name for decision in pack.decisions} != set(labels):
+                raise ValueError("Reference verifier omitted one or more candidate judgments.")
+            if any(not decision.reason.strip() for decision in pack.decisions):
+                raise ValueError("Reference verifier omitted its judgment explanations.")
         except (OllamaProxyError, httpx.HTTPError, ValidationError, ValueError, TypeError) as exc:
             errors.append(f"{candidate_model}: {exc}")
             continue
@@ -4566,11 +4578,16 @@ async def _compare_generic_versions(
         "and makes a clear net improvement in silhouette, proportions, connectivity or requested features. "
         "Reject the candidate if it loses a major part, turns detailed geometry into generic blobs, creates "
         "floating/disconnected parts, or is merely different without being clearly better. If uncertain, "
-        "set candidate_is_better=false. Return only JSON matching the schema."
+        "set candidate_is_better=false. This is a RELATIVE comparison: both versions may be unfinished. "
+        "Missing later planned parts do not veto a clear improvement to the active feature, provided "
+        "existing good geometry is preserved. Absolute feature and whole-object completion are checked separately. "
+        "Return an explicit candidate_is_better and a non-empty summary explaining the visible difference. "
+        "Return only JSON matching the schema."
     )
     prompt = (
         f"User request: {job_request.get('prompt', '')}\n"
         f"Intended use: {job_request.get('intended_use', '')}\n"
+        f"Current feature plan and active pass: {json.dumps(feature_plan_summary(root) or {}, ensure_ascii=False)}\n"
         f"Image order/labels: {labels}\n"
         f"Reference images (if any) come first. Next are BASELINE v{baseline_version} views in this order: "
         f"{list(views)}. Last are CANDIDATE v{candidate_version} views in the same order.\n"
@@ -6333,6 +6350,10 @@ async def _decide_hard_surface_cage_edit(
         f"Reference scope: {'parent object; focus only on component '+str(job_request.get('component_name')) if job_request.get('component_job') else 'requested whole object'}\n"
         f"Intended use: {job_request.get('intended_use', '')}\n"
         f"Working baseline version: {baseline_version}\n"
+        f"Coordinate frame: station position is world {spec.axis.upper()}; profile points are "
+        f"[half-width on {'X' if spec.axis == 'y' else 'Y'}, world Z height]. "
+        "World front is -Y, left is -X and up is +Z. Part locations/deltas are world XYZ; "
+        "part scales are local XYZ before Euler rotation.\n"
         f"ACTIVE FEATURE (if any): {json.dumps(feature_context, ensure_ascii=False)}\n"
         f"Current quality critique: {json.dumps(quality_gate, ensure_ascii=False)}\n"
         f"MODELING PASS: {modeling_pass}\n"

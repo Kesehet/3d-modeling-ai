@@ -9,7 +9,7 @@ from pydantic import ValidationError
 from app import main
 from app.artifacts import require_unused_version, reserve_model_version
 from app.feature_tasks import FeatureEvaluation, FeatureTask
-from app.ollama import OllamaProxyClient
+from app.ollama import OllamaJSONResult, OllamaProxyClient
 
 
 def job(tmp_path, monkeypatch):
@@ -494,3 +494,64 @@ def test_research_does_not_rejudge_same_rejected_image_across_queries(tmp_path, 
     result = asyncio.run(main.research_job("abc123", main.ResearchRequest(max_images=3)))
     assert checked == ["same-image"]
     assert result["status"]["stage"] == "references_unavailable"
+
+
+@pytest.mark.parametrize("malformed", [
+    {"decisions": []},
+    {"decisions": [{"stored_name": "candidate.jpg", "accept": False}]},
+])
+def test_reference_verifier_retries_incomplete_judgments(tmp_path, monkeypatch, malformed):
+    root = job(tmp_path, monkeypatch)
+    Image.new("RGB", (32, 32), "brown").save(root / "references" / "candidate.jpg")
+    calls = []
+
+    async def chat(self, **kwargs):
+        calls.append(kwargs)
+        data = malformed if len(calls) == 1 else {"decisions": [{
+            "stored_name": "candidate.jpg", "accept": True, "match_score": 0.95,
+            "exact_identity_match": True, "useful_for_geometry": True,
+            "reason": "The complete subject is visible with a readable silhouette.",
+        }]}
+        return OllamaJSONResult(data=data, endpoint="test", usage={})
+
+    monkeypatch.setattr(main, "VISION_MODELS", ["primary", "fallback"])
+    monkeypatch.setattr(OllamaProxyClient, "chat_json", chat)
+    accepted, rejected = asyncio.run(main._verify_reference_batch(
+        root, plan=main.ReferenceSearchPlan(primary_query="subject"), query="subject",
+        records=[{"stored_name": "candidate.jpg", "title": "Subject"}],
+    ))
+    assert [call["model"] for call in calls] == ["primary", "fallback"]
+    assert len(accepted) == 1 and rejected == []
+    assert accepted[0]["verification_model"] == "fallback"
+    required = calls[0]["schema"]["$defs"]["ReferenceCandidateDecision"]["required"]
+    assert {"accept", "match_score", "exact_identity_match", "useful_for_geometry", "reason"} <= set(required)
+    assert (root / "references" / "candidate.jpg").exists()
+    assert len(list((root / "logs").glob("reference-verification-raw-*.json"))) == 2
+
+
+@pytest.mark.parametrize("malformed", [
+    {"candidate_is_better": True},
+    {"summary": "An ambiguous response without a decision."},
+])
+def test_visual_comparison_retries_missing_judgment_fields(tmp_path, monkeypatch, malformed):
+    root = job(tmp_path, monkeypatch)
+    for version in (1, 2):
+        for view in ("front", "front-left", "left", "back", "right", "front-right"):
+            Image.new("RGB", (32, 32), "gray").save(root / "renders" / f"model-v{version}-{view}.png")
+    calls = []
+
+    async def chat(self, **kwargs):
+        calls.append(kwargs)
+        data = malformed if len(calls) == 1 else {
+            "candidate_is_better": True, "summary": "Candidate restores the reference proportions.",
+            "improvements": ["Corrected silhouette"], "regressions": [],
+        }
+        return OllamaJSONResult(data=data, endpoint="test", usage={})
+
+    monkeypatch.setattr(main, "VISION_MODELS", ["primary", "fallback"])
+    monkeypatch.setattr(OllamaProxyClient, "chat_json", chat)
+    comparison = asyncio.run(main._compare_generic_versions(root, baseline_version=1, candidate_version=2))
+    assert [call["model"] for call in calls] == ["primary", "fallback"]
+    assert comparison["candidate_is_better"] is True
+    assert comparison["model"] == "fallback"
+    assert {"candidate_is_better", "summary"} <= set(calls[0]["schema"]["required"])

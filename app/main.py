@@ -928,6 +928,11 @@ class GeometryBrief(BaseModel):
 async def _reference_geometry_brief(root: Path, *, request: dict, feature: dict,
                                     images: list[str], labels: list[str]) -> dict:
     """Separate visual observation from the reasoning model's coordinate construction."""
+    references = [(image, label) for image, label in zip(images, labels, strict=True)
+                  if label.startswith("references/")]
+    if references:
+        images = [image for image, _ in references]
+        labels = [label for _, label in references]
     client = OllamaProxyClient()
     errors = []
     for model in VISION_MODELS:

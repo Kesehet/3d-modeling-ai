@@ -602,6 +602,7 @@ def test_primary_geometry_uses_visual_brief_then_reasoning_coordinates(tmp_path,
         calls.append(kwargs)
         if len(calls) == 1:
             assert kwargs["model"] == main.VISION_MODELS[0]
+            assert kwargs["images"] == ["reference_image"]
             data = {"dimensions_xyz": [2, 4, 1], "silhouette_notes": ["Wide base", "Level upper surface"],
                     "construction_notes": ["Use Y as the horizontal sweep axis."]}
         else:
@@ -614,7 +615,8 @@ def test_primary_geometry_uses_visual_brief_then_reasoning_coordinates(tmp_path,
         return OllamaJSONResult(data=data, endpoint="test", usage={})
 
     monkeypatch.setattr(main, "_ensure_feature_plan", no_plan)
-    monkeypatch.setattr(main, "_collect_images", lambda *args: (["image"], ["references/source.jpg"]))
+    monkeypatch.setattr(main, "_collect_images", lambda *args: (
+        ["reference_image", "failed_render"], ["references/source.jpg", "renders/model-v1-front.png"]))
     monkeypatch.setattr(OllamaProxyClient, "chat_json", chat)
     spec = asyncio.run(main._build_hard_surface_cage_spec("abc123", reason="Construct primary form"))
     assert spec.axis == "y" and len(calls) == 2

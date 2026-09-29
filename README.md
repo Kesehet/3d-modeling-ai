@@ -53,6 +53,20 @@ The Blender worker is kept behind the Docker network. It is not exposed publicly
 
 ## Development
 
+The geometry vocabulary includes polygon mesh parts (`shape: "mesh"`) with local `vertices`
+and `faces` containing vertex indices. Primitive, loft and mirrored-cage builders share this
+representation; bounded attachment edits can add and transform it. The AI chooses shapes from
+references; the runtime contains no object-name templates.
+
+Clients can submit an editable `HardSurfaceCageSpec` to `POST /v1/jobs/{job_id}/design` using
+the normal API token. The job must already have a verified reference. The API reserves a new
+version, renders nine views, compares against the active model, and performs feature and final
+visual review. A regressing candidate cannot replace the active model. Successful submissions
+also export `model-vN-design.json` beside the GLB, OBJ, STL and Blender files.
+
+An improved working cage may remain separate from the displayed best model. The editor continues
+from that improved geometry; promotion and completion still require their own visual verdicts.
+
 ```bash
 cp .env.example .env
 docker compose up --build

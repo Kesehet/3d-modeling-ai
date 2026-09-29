@@ -646,3 +646,121 @@ def test_failed_regeneration_restores_previous_model_and_quality(tmp_path, monke
     assert result["quality_gate"] == quality
     assert result["modeling_strategy"] == "hard_surface_cage"
     assert result["state"] == "ready"
+
+
+def test_mesh_part_preserves_coordinates_and_rejects_invalid_faces():
+    part = {"name": "Shaped panel", "shape": "mesh", "location": [0, 0, 0], "scale": [1, 1, 1],
+            "vertices": [[0, 0, 0], [1, 0, 0], [0, 1, 0]], "faces": [[0, 1, 2]]}
+    normalized = main._normalize_scene_spec_payload({"objects": [part]}, "Design")
+    validated = main.GenericSceneSpec.model_validate(normalized)
+    assert validated.objects[0].shape == "mesh"
+    assert validated.objects[0].faces == [[0, 1, 2]]
+    assert len(validated.objects[0].vertices) == 3
+    for face in [[0, 1, 99], [0, 0, 2], [-1, 1, 2]]:
+        with pytest.raises(ValidationError):
+            main.SceneObjectSpec.model_validate({**part, "faces": [face]})
+    with pytest.raises(ValidationError):
+        main.SceneObjectSpec.model_validate({**part, "vertices": [[float("nan"), 0, 0]] * 3})
+
+
+def test_primary_feature_review_covers_front_side_and_rear():
+    feature = FeatureTask(id="body", name="Body", strategy="base_mesh_region",
+                          target_regions=["rear_quarter", "front_fascia", "side_panels"])
+    assert main._feature_diagnostic_views(feature) == ("front-left", "left", "back-right")
+
+
+def test_submitted_design_cannot_overwrite_a_better_active_model(tmp_path, monkeypatch):
+    root = job(tmp_path, monkeypatch)
+    baseline = {"version": 1, "blend": "model-v1.blend"}
+    (root / "scene/model-v1.blend").write_bytes(b"baseline")
+    main._write_status(root, state="ready", generic_model=baseline, quality_gate={"evaluated_version": 1})
+    spec = main.HardSurfaceCageSpec(title="Candidate", stations=[
+        {"position": p, "profile": [[0,0],[1,0],[1,1],[0,1]]} for p in [-2,-1,1,2]])
+
+    async def build(*args, version, activate_status):
+        assert activate_status is False
+        return {"candidate_model": {"version": version}}
+
+    async def compare(*args, **kwargs):
+        return {"candidate_is_better": False, "summary": "Visible regression"}
+
+    monkeypatch.setattr(main, "_usable_reference_index", lambda r: [{"verified": True}])
+    monkeypatch.setattr(main, "_execute_hard_surface_cage", build)
+    monkeypatch.setattr(main, "_compare_generic_versions", compare)
+    result = asyncio.run(main.submit_model_design("abc123", spec))
+    assert result["kept"] is False
+    assert main._read_status(root)["generic_model"] == baseline
+    assert main._read_status(root)["quality_gate"]["evaluated_version"] == 1
+
+
+@pytest.mark.parametrize("incremental", [True, False])
+def test_improving_working_mesh_survives_without_replacing_best_model(tmp_path, monkeypatch, incremental):
+    root = job(tmp_path, monkeypatch)
+    spec = main.HardSurfaceCageSpec(title="Envelope", stations=[
+        {"position": p, "profile": [[0,0],[1,0],[1,1],[0,1]]} for p in [-2,-1,1,2]])
+    (root / "cage-spec-v1.json").write_text(json.dumps({"spec": spec.model_dump()}))
+    (root / "scene/model-v3.blend").write_bytes(b"displayed baseline")
+    main._write_status(root, state="ready", generic_model={"version": 3}, working_cage_version=1,
+                       quality_gate={"evaluated_version": 3, "recognizable": False})
+    feature = FeatureTask(id="body", name="Body", strategy="base_mesh_region")
+
+    async def build(*args, version, **kwargs):
+        return {"candidate_model": {"version": version}}
+
+    async def plan(*args, **kwargs):
+        return spec
+
+    async def decide(*args, **kwargs):
+        return main.CageEditAction(operation="reshape_station", target_index=1, width_scale=1.1,
+                                   reason="Improve a section")
+
+    async def compare(*args, baseline_version, **kwargs):
+        return {"candidate_is_better": baseline_version == 1, "summary": "Working mesh progressed"}
+
+    async def evaluate(*args, **kwargs):
+        return {"passed": False, "reference_match_score": .5, "summary": "More work remains"}
+
+    monkeypatch.setattr(main, "_execute_hard_surface_cage", build)
+    monkeypatch.setattr(main, "_build_hard_surface_cage_spec", plan)
+    monkeypatch.setattr(main, "_decide_hard_surface_cage_edit", decide)
+    monkeypatch.setattr(main, "_compare_generic_versions", compare)
+    monkeypatch.setattr(main, "_evaluate_feature_candidate", evaluate)
+    fn = (main._refine_hard_surface_cage_incrementally("abc123", feature_task=feature) if incremental
+          else main._generate_hard_surface_cage("abc123", reason="Different construction", feature_task=feature))
+    result = asyncio.run(fn)
+    status = main._read_status(root)
+    assert result["kept"] is True and result["promoted"] is False
+    assert status["working_cage_version"] == 4
+    assert status["generic_model"]["version"] == 3
+    assert status["quality_gate"]["evaluated_version"] == 3
+    assert status["cage_edit_stall_count"] == 0
+
+
+def test_visual_edit_brief_drives_reasoning_geometry_with_full_profiles(tmp_path, monkeypatch):
+    root = job(tmp_path, monkeypatch)
+    (root / "references/source.jpg").write_bytes(b"reference")
+    for view in ["front-left", "left", "back-right"]:
+        (root / "renders" / f"model-v1-{view}.png").write_bytes(b"render")
+    monkeypatch.setattr(main, "_usable_reference_index", lambda r: [{"stored_name": "source.jpg"}])
+    monkeypatch.setattr(main, "_encode_vision_images", lambda paths: ["pixels"] * len(paths))
+    spec = main.HardSurfaceCageSpec(title="Envelope", stations=[
+        {"position": p, "profile": [[0,0],[1,0],[1,1],[0,1]]} for p in [-2,-1,1,2]])
+    calls = []
+
+    async def chat(self, **kwargs):
+        calls.append(kwargs)
+        if len(calls) == 1:
+            assert kwargs["model"] == main.VISION_MODELS[0] and kwargs["images"]
+            data = {"diagnosis": "Top transition is too abrupt", "correction": "Raise the inner profile point", "preserve": ["Lower edge"]}
+        else:
+            assert kwargs["model"] == main.REASONING_MODEL and kwargs["images"] is None
+            assert "Full station profile geometry:" in kwargs["prompt"]
+            assert "Top transition is too abrupt" in kwargs["prompt"]
+            data = {"operation": "reshape_profile_point", "target_index": 1, "point_index": 2,
+                    "point_height_offset_fraction": .1, "reason": "Smooth the upper transition"}
+        return OllamaJSONResult(data=data, endpoint="test", usage={})
+
+    monkeypatch.setattr(OllamaProxyClient, "chat_json", chat)
+    action = asyncio.run(main._decide_hard_surface_cage_edit("abc123", baseline_version=1, spec=spec,
+        feature_task=FeatureTask(id="body", name="Body", strategy="base_mesh_region"), allow_replan=False))
+    assert action.operation == "reshape_profile_point" and len(calls) == 2

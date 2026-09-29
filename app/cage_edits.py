@@ -10,21 +10,30 @@ from __future__ import annotations
 import copy
 import math
 from itertools import pairwise
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from .mesh_parts import validate_mesh_part
 
 
 class EditPart(BaseModel):
     model_config = ConfigDict(allow_inf_nan=False)
     name: str = Field(min_length=1, max_length=80)
-    shape: Literal["sphere", "cube", "cylinder", "cone", "torus", "frustum"]
+    shape: Literal["sphere", "cube", "cylinder", "cone", "torus", "frustum", "mesh"]
     location: list[float] = Field(min_length=3, max_length=3)
     scale: list[float] = Field(min_length=3, max_length=3)
     rotation_deg: list[float] = Field(default_factory=lambda: [0, 0, 0], min_length=3, max_length=3)
     color: str = Field(default="#808080", pattern=r"^#[0-9A-Fa-f]{6}$")
     smooth: bool = True
     bevel: bool = True
+    vertices: list[tuple[float, float, float]] = Field(default_factory=list, max_length=8192)
+    faces: list[Annotated[list[int], Field(min_length=3, max_length=32)]] = Field(default_factory=list, max_length=8192)
+
+    @model_validator(mode="after")
+    def validate_mesh_geometry(self):
+        validate_mesh_part(self.shape, self.vertices, self.faces)
+        return self
 
 
 class CageEditAction(BaseModel):

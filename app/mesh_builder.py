@@ -7,11 +7,12 @@ plus optional safe primitive attachments. Blender constructs the mesh itself.
 
 from __future__ import annotations
 
+from .mesh_parts import mesh_part_script
 from .rendering import camera_framing_script
 
 
 def adaptive_loft_script() -> str:
-    return r'''
+    return mesh_part_script() + r'''
 import bmesh
 import bpy
 import json
@@ -120,7 +121,9 @@ def build_loft():
 def add_attachment(item):
     shape = item.get("shape", "cube")
     location = tuple(item.get("location", [0, 0, 0]))
-    if shape == "rod":
+    if shape == "mesh":
+        create_mesh_part(item, location)
+    elif shape == "rod":
         start = Vector(item.get("start") or location)
         end = Vector(item.get("end") or [location[0], location[1], location[2] + 1.0])
         delta = end - start

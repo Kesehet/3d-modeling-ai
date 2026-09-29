@@ -18,7 +18,7 @@ import httpx
 from fastapi import Depends, FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse
 from PIL import Image, UnidentifiedImageError
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, model_validator
 
 from .artifacts import require_unused_version, reserve_model_version
 from .builders import pikachu_script
@@ -59,6 +59,7 @@ from .generic_builder import generic_scene_script
 from .hard_surface_builder import hard_surface_cage_script
 from .history import append_history, load_history
 from .mesh_builder import adaptive_loft_script
+from .mesh_parts import geometry_context, validate_mesh_part
 from .ollama import OllamaProxyClient, OllamaProxyError
 from .quality import evaluate_scene_spec_structural, get_benchmark
 from .repair import print_repair_script
@@ -849,7 +850,7 @@ class SubjectInventory(BaseModel):
 
 class SceneObjectSpec(BaseModel):
     name: str = Field(min_length=1, max_length=80)
-    shape: Literal["sphere", "cube", "cylinder", "cone", "torus", "rod", "beam", "frustum", "wedge"]
+    shape: Literal["sphere", "cube", "cylinder", "cone", "torus", "rod", "beam", "frustum", "wedge", "mesh"]
     location: list[float] = Field(min_length=3, max_length=3)
     scale: list[float] = Field(min_length=3, max_length=3)
     rotation_deg: list[float] = Field(default_factory=lambda: [0.0, 0.0, 0.0], min_length=3, max_length=3)
@@ -859,6 +860,13 @@ class SceneObjectSpec(BaseModel):
     color: str = Field(default="#808080", pattern=r"^#[0-9A-Fa-f]{6}$")
     bevel: bool = True
     smooth: bool = True
+    vertices: list[tuple[float, float, float]] = Field(default_factory=list, max_length=8192)
+    faces: list[Annotated[list[int], Field(min_length=3, max_length=32)]] = Field(default_factory=list, max_length=8192)
+
+    @model_validator(mode="after")
+    def validate_mesh_geometry(self):
+        validate_mesh_part(self.shape, self.vertices, self.faces)
+        return self
 
 
 class GenericSceneSpec(BaseModel):
@@ -925,6 +933,12 @@ class GeometryBrief(BaseModel):
     dimensions_xyz: list[float] = Field(min_length=3, max_length=3)
     silhouette_notes: list[str] = Field(min_length=2, max_length=12)
     construction_notes: list[str] = Field(min_length=1, max_length=12)
+
+
+class GeometryEditBrief(BaseModel):
+    diagnosis: str = Field(min_length=1, max_length=1600)
+    correction: str = Field(min_length=1, max_length=1600)
+    preserve: list[str] = Field(default_factory=list, max_length=12)
 
 
 async def _reference_geometry_brief(root: Path, *, request: dict, feature: dict,
@@ -1114,6 +1128,9 @@ async def _build_feature_plan(
         "lowercase id, priority, modeling strategy, build_mode, target regions, ownership scope, acceptance criteria, "
         "assembly anchor/notes where relevant, and dependency ids. Priority uses 10=highest/most important and 1=lowest. "
         "Dependencies must form a DAG. " + component_policy +
+        "Each criterion must be verifiable using ONLY the geometry owned by that feature. Never require a "
+        "dependent component to exist before its supporting feature can pass. Cross-component fit and dimensions "
+        "belong to the later installation/assembly check. "
         "The primary silhouette/body should normally be first; dependent details should wait for the supporting "
         "surface. In-place workers share one best-so-far model, so ownership scopes must be narrow enough to prevent "
         "one feature worker from unnecessarily rewriting unrelated geometry. Think like a production 3D modeler and "
@@ -1981,7 +1998,7 @@ def _normalize_scene_spec_payload(data: object, fallback_title: str) -> dict:
     normalized.setdefault("rationale", "")
     normalized.setdefault("presentation_base", True)
 
-    allowed_shapes = {"sphere", "cube", "cylinder", "cone", "torus", "rod", "beam", "frustum", "wedge"}
+    allowed_shapes = {"sphere", "cube", "cylinder", "cone", "torus", "rod", "beam", "frustum", "wedge", "mesh"}
     shape_aliases = {
         "ellipsoid": "sphere",
         "ball": "sphere",
@@ -2101,6 +2118,8 @@ def _normalize_scene_spec_payload(data: object, fallback_title: str) -> dict:
                 "color": color_hex(item.get("color", "#808080")),
                 "bevel": bool(item.get("bevel", True)),
                 "smooth": bool(item.get("smooth", True)),
+                "vertices": item.get("vertices") or [],
+                "faces": item.get("faces") or [],
             }
         )
 
@@ -3132,6 +3151,11 @@ async def dashboard_auto_improve(job_id: str, request: AutoImproveRequest) -> di
 @app.post("/dashboard/jobs/{job_id}/improve", include_in_schema=False)
 async def dashboard_improve_generic(job_id: str, request: GenericRefineRequest) -> dict:
     return await _guard_job_action(job_id, lambda: refine_generic_scene(job_id, request))
+
+
+@app.post("/dashboard/jobs/{job_id}/design", include_in_schema=False)
+async def dashboard_submit_design(job_id: str, request: HardSurfaceCageSpec) -> dict:
+    return await _guard_job_action(job_id, lambda: submit_model_design(job_id, request))
 
 
 @app.post("/dashboard/jobs/{job_id}/quality-benchmark", include_in_schema=False)
@@ -4709,6 +4733,8 @@ async def _compare_generic_versions(
 
 
 def _feature_diagnostic_views(feature_task: FeatureTask) -> tuple[str, ...]:
+    if feature_task.strategy == "base_mesh_region":
+        return ("front-left", "left", "back-right")
     text = " ".join(
         [
             feature_task.name,
@@ -4850,9 +4876,14 @@ async def _evaluate_feature_candidate(
         if baseline_version is not None
         else "Reference images come first. There is no trusted baseline yet. "
     )
+    plan = load_feature_plan(root)
+    other_features = [{"id": f.id, "name": f.name, "owner_scope": f.owner_scope}
+                      for f in (plan.features if plan else []) if f.id != feature_task.id]
     prompt = (
         f"User request: {job_request.get('prompt', '')}\n"
         f"ACTIVE FEATURE SUB-JOB: {json.dumps(feature_task.model_dump(), ensure_ascii=False)}\n"
+        f"Other planned features (owned by later passes): "
+        f"{json.dumps(other_features)}\n"
         f"Images in order: {labels}\n"
         + comparison_context
         + f"Then CANDIDATE v{candidate_version} views {list(views)}.\n"
@@ -4988,6 +5019,7 @@ def _generic_spatial_guidance(_: str) -> str:
         "- Visible details should sit on the intended surface instead of being buried inside another part.\n"
         "- Connected parts should touch or overlap when the real object is physically connected.\n"
         "- Use rod/beam only when start and end are explicitly defined; otherwise use a solid primitive.\n"
+        "- Use mesh with local vertices and face indices for shaped panels that primitives cannot express.\n"
         "- Use the reference images, not object-name heuristics, to decide proportions, silhouette and part placement."
     )
 
@@ -5088,7 +5120,9 @@ async def _build_generic_scene_spec(job_id: str, auto_research: bool) -> Generic
         ),
     )
     prompt += f"\nReference images supplied directly to the planner in this order: {reference_labels}\n"
-    planner_models = VISION_MODELS if reference_images else (REASONING_MODEL, *VISION_MODELS)
+    # Vision has already supplied the observations and inventory above. Let the
+    # reasoning model construct coordinates, as for continuous mesh planning.
+    planner_models = (REASONING_MODEL, *VISION_MODELS)
     result = None
     spec = None
     selected_planner_model = None
@@ -5100,7 +5134,7 @@ async def _build_generic_scene_spec(job_id: str, auto_research: bool) -> Generic
                 model=candidate_model,
                 system=system,
                 prompt=prompt,
-                images=reference_images or None,
+                images=(reference_images or None) if candidate_model in VISION_MODELS else None,
                 schema=GenericSceneSpec.model_json_schema(),
                 temperature=0.0,
                 num_predict=8192,
@@ -5868,7 +5902,7 @@ async def _build_hard_surface_cage_spec(
 
     status_payload = _read_status(root)
     active = _working_hard_surface_cage_spec(root, status_payload)
-    current_cage = active[1].model_dump() if active is not None else {}
+    current_cage = geometry_context(active[1].model_dump()) if active is not None else {}
 
     latest_vision: dict = {}
     vision_path = root / "vision-latest.json"
@@ -6405,7 +6439,7 @@ async def _decide_hard_surface_cage_edit(
         "reshape_station changes one entire cross-section; reshape_profile_point changes one local profile point; "
         "insert_station adds control where silhouette curvature is under-resolved; remove_station removes a harmful "
         "intermediate section; adjust_cutter changes one existing opening/cut; remove_cutter removes a clearly harmful "
-        "cut. add_attachment adds a missing in-place primitive; adjust_attachment or remove_attachment "
+        "cut. add_attachment adds a missing in-place primitive or shaped mesh panel; adjust_attachment or remove_attachment "
         "edits an existing part; add_cutter creates a deliberate opening. set_surface changes subdivision, "
         "bevel or shading when modifiers have rounded a crisp intended silhouette. "
         "Primitive transforms use local scales then Euler XYZ rotation; locations use world X/Y/Z. "
@@ -6452,13 +6486,9 @@ async def _decide_hard_surface_cage_edit(
         f"MODELING PASS: {modeling_pass}\n"
         f"Station envelope (normalized longitudinal position, half-width, bottom, top): "
         f"{json.dumps(station_envelope, ensure_ascii=False)}\n"
-        + (
-            ""
-            if primary_form_pass
-            else f"Full station profile geometry: {json.dumps(station_summary, ensure_ascii=False)}\n"
-        )
+        + f"Full station profile geometry: {json.dumps(station_summary, ensure_ascii=False)}\n"
         + f"Cutter indices and geometry: {json.dumps(cutter_summary, ensure_ascii=False)}\n"
-        f"Attachments by index: {json.dumps([p.model_dump() for p in spec.attachments])}\n"
+        f"Attachments by index: {json.dumps(geometry_context([p.model_dump() for p in spec.attachments]))}\n"
         f"Current surface: subdivision={spec.subdivision_levels}, bevel={spec.bevel_width}, smooth={spec.smooth}\n"
         f"Recent edit outcomes: {json.dumps(recent_events, ensure_ascii=False)}\n"
         f"Images in order: {labels}\n"
@@ -6468,13 +6498,32 @@ async def _decide_hard_surface_cage_edit(
 
     client = OllamaProxyClient()
     errors: list[str] = []
-    for candidate_model in VISION_MODELS:
+    edit_brief = None
+    for visual_model in VISION_MODELS:
+        try:
+            observed = await client.chat_json(
+                model=visual_model,
+                system=("Compare reference pixels and the CURRENT model as a 3D artist. Identify the single "
+                        "largest visible shape error within the active feature, explain the geometric correction "
+                        "and what must be preserved. Do not emit coordinates or an edit operation. A separate "
+                        "geometry engineer will translate your observation using the actual mesh data. Return JSON."),
+                prompt=prompt, images=images, schema=GeometryEditBrief.model_json_schema(),
+                temperature=0.0, num_predict=2048,
+            )
+            edit_brief = GeometryEditBrief.model_validate(observed.data).model_dump()
+            _write_llm_log(root, "geometry-edit-brief", {"model": visual_model, "images": labels, **edit_brief})
+            break
+        except (OllamaProxyError, httpx.HTTPError, ValidationError, ValueError, TypeError) as exc:
+            errors.append(f"{visual_model}: {exc}")
+    if edit_brief:
+        prompt += "\nVisual artist's diagnosis: " + json.dumps(edit_brief)
+    for candidate_model in ((REASONING_MODEL, *VISION_MODELS) if edit_brief else VISION_MODELS):
         try:
             result = await client.chat_json(
                 model=candidate_model,
                 system=system,
                 prompt=prompt,
-                images=images,
+                images=images if candidate_model in VISION_MODELS else None,
                 schema=_cage_edit_action_schema(allow_replan=allow_replan),
                 temperature=0.0,
                 num_predict=2048,
@@ -6523,6 +6572,25 @@ async def _decide_hard_surface_cage_edit(
         detail="Visual cage edit decision failed across configured vision models: "
         + " | ".join(errors[-4:]),
     )
+
+
+def _retain_working_cage_progress(root: Path, previous: dict, version: int,
+                                  feature: FeatureTask | None, evaluation: dict | None,
+                                  comparison: dict) -> dict:
+    """Advance an improving construction track without replacing a better displayed model."""
+    status = _write_status(
+        root, state="ready", stage="hard_surface_cage_working_progress",
+        modeling_strategy="hard_surface_cage", generic_model=previous.get("generic_model"),
+        quality_gate=previous.get("quality_gate"), working_cage_version=version, cage_edit_stall_count=0,
+        working_cage_evaluation={"evaluated_version": version, "feature": evaluation, "comparison": comparison},
+    )
+    if feature is not None:
+        record_feature_progress(root, feature.id, version=version,
+                                summary=str(comparison.get("summary") or "Working geometry improved."))
+    append_history(root, "cage_working_progress", version=version,
+                   active_version=(previous.get("generic_model") or {}).get("version"),
+                   summary=comparison.get("summary"))
+    return status
 
 
 async def _refine_hard_surface_cage_incrementally(
@@ -6695,7 +6763,13 @@ async def _refine_hard_surface_cage_incrementally(
             )
             better_than_active = active_comparison.get("candidate_is_better") is True
 
-    improved = improved and better_than_active
+    if improved and not better_than_active:
+        status = _retain_working_cage_progress(root, previous_status, version, feature_task,
+                                               feature_evaluation, comparison)
+        return {**build, "status": status, "baseline_version": baseline_version,
+                "candidate_version": version, "kept": True, "promoted": False,
+                "action": action.model_dump(), "comparison": comparison,
+                "feature_evaluation": feature_evaluation}
 
     if improved:
         candidate_model = build.get("candidate_model")
@@ -6936,11 +7010,18 @@ async def _generate_hard_surface_cage(
             or (comparison and comparison.get("candidate_is_better") is True)
         )
 
+        working_improved = candidate_improved
         if candidate_improved and active_version is not None and active_version != baseline_version:
             active_comparison = await _compare_generic_versions(
                 root, baseline_version=active_version, candidate_version=version,
             )
             candidate_improved = active_comparison.get("candidate_is_better") is True
+
+        if working_improved and not candidate_improved:
+            status = _retain_working_cage_progress(root, previous_status, version, feature_task,
+                                                   feature_evaluation, comparison or {})
+            return {**build, "status": status, "accepted": False, "kept": True, "promoted": False,
+                    "comparison": comparison, "feature_evaluation": feature_evaluation}
 
         quality = dict(
             previous_status.get("quality_gate")
@@ -8335,6 +8416,64 @@ async def _generic_recognizability_check(
         "director": decision,
         "stage": stage,
     }
+
+
+async def submit_model_design(job_id: str, spec: HardSurfaceCageSpec) -> dict:
+    """Render an editable design supplied by a client/modeler, then run normal visual QA."""
+    root = _require_job(job_id)
+    if not _usable_reference_index(root):
+        raise HTTPException(status_code=424, detail="A verified reference is required to review a design.")
+    if _read_status(root).get("state") == "running":
+        raise HTTPException(status_code=409, detail="Wait for the current modeling pass to finish.")
+    previous = _read_status(root)
+    baseline = (previous.get("generic_model") or {}).get("version")
+    if spec.intended_dimensions_xyz is not None:
+        _validate_cage_dimensions(spec, spec.intended_dimensions_xyz)
+    spec.presentation_base = False
+    version = reserve_model_version(root)
+    build = await _execute_hard_surface_cage(job_id, spec, version=version, activate_status=False)
+    (root / "exports" / f"model-v{version}-design.json").write_text(spec.model_dump_json(indent=2))
+    comparison = (await _compare_generic_versions(root, baseline_version=baseline, candidate_version=version)
+                  if baseline is not None else None)
+    if comparison and comparison.get("candidate_is_better") is not True:
+        status = _write_status(root, state="ready", stage="design_candidate_rejected",
+                               generic_model=previous.get("generic_model"),
+                               modeling_strategy=previous.get("modeling_strategy"),
+                               quality_gate=previous.get("quality_gate"))
+        return {**build, "status": status, "kept": False, "comparison": comparison}
+
+    # Feature completion is earned from renders, never from part names in the supplied JSON.
+    _write_status(root, state="running", stage="reviewing_design", generic_model=build["candidate_model"],
+                  modeling_strategy="hard_surface_cage", working_cage_version=version, cage_edit_stall_count=0,
+                  quality_gate={"evaluated_version": version, "recognizable": None, "scope": "whole_object"})
+    plan = await _ensure_feature_plan(job_id, _load_subject_inventory(root))
+    evaluations = []
+    if plan is not None:
+        for feature in plan.features:
+            evaluation = await _evaluate_feature_candidate(job_id, feature, baseline_version=None,
+                                                            candidate_version=version)
+            evaluations.append(evaluation)
+            passed = _feature_evaluation_accepts(feature, evaluation)
+            finish_feature(root, feature.id, accepted=passed, version=version if passed else None,
+                           summary=str(evaluation.get("summary") or ""), verified=passed,
+                           acceptance_score=float(evaluation.get("reference_match_score") or 0),
+                           acceptance_model=evaluation.get("model"),
+                           error="" if passed else "Design still needs refinement for this feature.")
+    quality = await _generic_recognizability_check(job_id, stage="submitted_design_quality", render_version=version)
+    status = _write_status(root, state="ready",
+                           stage="design_recognizable" if quality.get("recognizable") else "design_needs_refinement",
+                           quality_gate=quality)
+    append_history(root, "design_submitted", version=version, source="client_geometry",
+                   parts=1 + len(spec.attachments), comparison=comparison,
+                   features_passed=sum(_feature_evaluation_accepts(f, e)
+                                       for f, e in zip(plan.features if plan else [], evaluations, strict=True)))
+    return {**build, "status": status, "kept": True, "comparison": comparison,
+            "feature_evaluations": evaluations, "quality_gate": quality}
+
+
+@app.post("/v1/jobs/{job_id}/design", dependencies=[Depends(require_api_token)])
+async def submit_model_design_api(job_id: str, request: HardSurfaceCageSpec) -> dict:
+    return await _guard_job_action(job_id, lambda: submit_model_design(job_id, request))
 
 
 async def _generate_directed_mesh(job_id: str, decision: dict, *, feature_task: FeatureTask | None = None) -> dict:

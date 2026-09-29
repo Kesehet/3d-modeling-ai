@@ -45,6 +45,21 @@ jobs:
       - name: Build production Blender image
         run: docker build --progress=plain -t 3d-modeling-ai:ci .
       - name: Exercise Blender geometry, camera framing and model exports
-        run: >-
-          docker run --rm --entrypoint /opt/venv/bin/python
-          -v "$PWD/tests:/tests:ro" 3d-modeling-ai:ci /tests/blender_integration.py
+        run: |
+          mkdir -p blender-artifacts
+          chmod 777 blender-artifacts
+          docker run --rm --entrypoint /opt/venv/bin/python \
+            -e BLENDER_TEST_OUTPUT=/artifacts \
+            -v "$PWD/blender-artifacts:/artifacts" \
+            -v "$PWD/tests:/tests:ro" 3d-modeling-ai:ci /tests/blender_integration.py
+      - name: Save model review renders and exports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: blender-model-review
+          path: |
+            blender-artifacts/mesh_part/*.png
+            blender-artifacts/cage_panel/*.png
+            blender-artifacts/**/*qa.json
+            blender-artifacts/**/blender.log
+          retention-days: 7

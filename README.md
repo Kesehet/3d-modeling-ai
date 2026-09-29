@@ -80,3 +80,9 @@ Production follows the same pattern used by the other Hostinger projects:
 The GitHub repository needs the same `HOSTINGER_API_KEY` secret used by the other VPS deployment workflows. AI credentials should be added as repository/environment secrets rather than committed.
 
 See `tasks.md` and `docs/architecture.md`.
+
+## Workspace sign-in
+
+When `THREED_API_TOKEN` is configured, the dashboard, job history, renders and downloads require sign-in. Use the same existing token as the workspace access key. The browser receives a signed, HttpOnly, SameSite=Strict session cookie that expires after 12 hours; the token is never stored in browser JavaScript. Rotating the token invalidates existing sessions. API clients continue to send `Authorization: Bearer …`. Local development without a configured token remains open; the Hostinger deployment requires a token.
+
+This is a single-owner workspace gate, not multi-user account isolation. Login attempts are rate limited in the API process.

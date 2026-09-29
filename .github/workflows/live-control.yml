@@ -72,7 +72,7 @@ jobs:
           }
 
           refresh_dashboard() {
-            curl --fail --silent --show-error --retry 4 --retry-all-errors --retry-delay 3 --connect-timeout 15 --max-time 30               "$BASE_URL/dashboard/api"               -o diagnostics/json/dashboard.json
+            curl --fail --silent --show-error --retry 4 --retry-all-errors --retry-delay 3 --connect-timeout 15 --max-time 30               -H "Authorization: Bearer $THREED_API_TOKEN" "$BASE_URL/dashboard/api"               -o diagnostics/json/dashboard.json
           }
 
           resolve_latest_job() {

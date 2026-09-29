@@ -62,9 +62,12 @@ from .ollama import OllamaProxyClient, OllamaProxyError
 from .quality import evaluate_scene_spec_structural, get_benchmark
 from .repair import print_repair_script
 from .research import research_web_references, write_research_manifest
-from .security import require_api_token
+from .security import dashboard_access, dashboard_login, dashboard_logout, require_api_token
 
 app = FastAPI(title="3D Modeling AI", version="0.2.0")
+app.middleware("http")(dashboard_access)
+app.add_api_route("/auth/login", dashboard_login, methods=["POST"], include_in_schema=False)
+app.add_api_route("/auth/logout", dashboard_logout, methods=["POST"], include_in_schema=False)
 AUTO_IMPROVE_TASKS: dict[str, asyncio.Task[None]] = {}
 REFERENCE_RECOVERY_TASKS: dict[str, asyncio.Task[None]] = {}
 FEATURE_MAX_ATTEMPTS = 3

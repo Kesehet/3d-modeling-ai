@@ -428,7 +428,7 @@ header{display:flex;align-items:center;justify-content:space-between;gap:16px;ma
 </head>
 <body>
 <div class="wrap">
-<header><div class="brand"><h1>3D Modeling AI</h1><p>Your generated models</p></div><button class="btn primary" id="newJobBtn">+ New Job</button></header>
+<header><div class="brand"><h1>3D Modeling AI</h1><p>Your generated models</p></div><div class="detail-actions"><form method="post" action="/auth/logout"><button class="btn" type="submit">Sign out</button></form><button class="btn primary" id="newJobBtn">+ New Job</button></div></header>
 
 <section class="home" id="homeView"><div class="gallery" id="jobGallery"></div></section>
 
@@ -616,6 +616,7 @@ function renderDetail(job){
 async function refresh(){
   try{
     const response=await fetch("/dashboard/api",{cache:"no-store"});
+    if(response.status===401){window.location.replace("/");return}
     if(!response.ok)throw new Error("Dashboard API "+response.status);
     data=await response.json();
     if(data.ui_version&&data.ui_version!==CLIENT_UI_VERSION){

@@ -908,6 +908,8 @@ class HardSurfaceCageSpec(BaseModel):
     title: str = Field(min_length=1, max_length=120)
     rationale: str = Field(default="", max_length=2400)
     axis: Literal["x", "y"] = "y"
+    # Optional for saved specs; new primary plans declare their coordinate intent.
+    intended_dimensions_xyz: list[float] | None = Field(default=None, min_length=3, max_length=3)
     color: str = Field(default="#B8BDC6", pattern=r"^#[0-9A-Fa-f]{6}$")
     subdivision_levels: int = Field(default=1, ge=0, le=2)
     bevel_width: float = Field(default=0.04, ge=0.0, le=0.3)
@@ -944,7 +946,9 @@ async def _reference_geometry_brief(root: Path, *, request: dict, feature: dict,
                     "engineer. Do not emit mesh coordinates. World X is left/right, Y is front/back, Z is vertical; "
                     "front is -Y. Estimate the ACTIVE FEATURE's bounding dimensions in world XYZ, in consistent "
                     "units with its longest dimension between 1 and 8. Dimensions must describe the reference "
-                    "target, not a failed current render. Give concrete silhouette landmarks: where height/width "
+                    "target, not a failed current render. These are approximate 3D dimensions: account for camera "
+                    "perspective and foreshortening, never equate projected image width with world X. The geometry "
+                    "engineer may correct uncertain estimates. Give concrete silhouette landmarks: where height/width "
                     "changes, transitions, flat versus curved regions, and the dominant axis. Describe only the "
                     "active feature if supplied, reserving other components for later passes. Return JSON."
                 ),
@@ -964,6 +968,8 @@ async def _reference_geometry_brief(root: Path, *, request: dict, feature: dict,
 
 
 def _validate_cage_dimensions(spec: HardSurfaceCageSpec, expected: list[float]) -> None:
+    if len(expected) != 3 or any(not math.isfinite(v) or v <= 0 for v in expected):
+        raise ValueError("Intended XYZ dimensions must be three positive finite values.")
     positions = [s.position for s in spec.stations]
     half_widths = [p[0] for s in spec.stations for p in s.profile]
     heights = [p[1] for s in spec.stations for p in s.profile]
@@ -973,7 +979,7 @@ def _validate_cage_dimensions(spec: HardSurfaceCageSpec, expected: list[float]) 
     actual = [width, length, height] if spec.axis == "y" else [length, width, height]
     # This catches swapped axes / flattened geometry before spending a Blender render.
     if any(abs(a / e - 1) > 0.30 for a, e in zip(actual, expected, strict=True)):
-        raise ValueError(f"Cage XYZ dimensions {actual} contradict the reference brief {expected}. "
+        raise ValueError(f"Cage XYZ dimensions {actual} contradict the planner's intended dimensions {expected}. "
                          "Station positions are horizontal; every profile second coordinate is absolute world Z.")
 
 
@@ -5911,7 +5917,10 @@ async def _build_hard_surface_cage_spec(
         "AXIS CONTRACT: axis=y means station.position is WORLD Y and profile=[HALF X WIDTH, ABSOLUTE WORLD Z]. "
         "axis=x means position is WORLD X and profile=[HALF Y WIDTH, ABSOLUTE WORLD Z]. "
         "A station's position is NEVER its height. The top height must occur in profile[*][1]. "
-        "The visual artist's XYZ dimension brief is authoritative; verify your mesh bounds against it."
+        "The visual artist's XYZ dimension brief is an approximate estimate from perspective photos, not a "
+        "measurement. Correct implausible aspect ratios using the subject and silhouette evidence. Declare your "
+        "chosen primary cage bounds as intended_dimensions_xyz=[world X width, world Y length, world Z height]; "
+        "your emitted station/profile coordinates must agree with YOUR declared dimensions. Attachments are excluded."
     )
     prompt = (
         f"Exact user request: {job_request.get('prompt', '')}\n"
@@ -5935,6 +5944,14 @@ async def _build_hard_surface_cage_spec(
         prompt += "\nReference artist's construction brief: " + json.dumps(brief)
     client = OllamaProxyClient()
     errors: list[str] = []
+    cage_schema = HardSurfaceCageSpec.model_json_schema()
+    if brief:
+        cage_schema["properties"]["intended_dimensions_xyz"] = {
+            "type": "array", "items": {"type": "number", "exclusiveMinimum": 0},
+            "minItems": 3, "maxItems": 3,
+            "description": "Planner's intended primary cage extent in world X, Y, Z; excludes attachments.",
+        }
+        cage_schema["required"].append("intended_dimensions_xyz")
     for candidate_model in ((REASONING_MODEL, *VISION_MODELS) if brief else VISION_MODELS):
         try:
             result = await client.chat_json(
@@ -5942,7 +5959,7 @@ async def _build_hard_surface_cage_spec(
                 system=system,
                 prompt=prompt + ("\nFix these previous construction errors: " + " | ".join(errors) if errors else ""),
                 images=(images or None) if candidate_model in VISION_MODELS else None,
-                schema=HardSurfaceCageSpec.model_json_schema(),
+                schema=cage_schema,
                 temperature=0.0,
                 num_predict=8192,
             )
@@ -5967,7 +5984,9 @@ async def _build_hard_surface_cage_spec(
             )
             spec = HardSurfaceCageSpec.model_validate(normalized)
             if brief:
-                _validate_cage_dimensions(spec, brief["dimensions_xyz"])
+                if spec.intended_dimensions_xyz is None:
+                    raise ValueError("Declare intended_dimensions_xyz for the primary cage.")
+                _validate_cage_dimensions(spec, spec.intended_dimensions_xyz)
             spec, deferred_cutters, deferred_attachments = _clean_initial_primary_blockout(
                 spec,
                 feature_task,
@@ -8327,6 +8346,28 @@ async def _generate_directed_mesh(job_id: str, decision: dict, *, feature_task: 
 
 async def generate_generic_scene(job_id: str, request: GenericGenerateRequest) -> dict:
     root = _require_job(job_id)
+    previous = _read_status(root)
+    try:
+        return await _generate_generic_scene_candidate(job_id, request)
+    except Exception as exc:
+        # A failed strategy switch must not promote an intermediate procedural
+        # draft over the user's previous model or leave its quality attached to it.
+        if isinstance(previous.get("generic_model"), dict):
+            _write_status(
+                root, state="ready", stage=previous.get("stage") or "generation_failed",
+                generic_model=previous["generic_model"],
+                modeling_strategy=previous.get("modeling_strategy"),
+                quality_gate=previous.get("quality_gate"),
+                last_generation_error=str(getattr(exc, "detail", exc)),
+            )
+            append_history(root, "generation_failed_baseline_preserved",
+                           version=previous["generic_model"].get("version"),
+                           error=str(getattr(exc, "detail", exc)))
+        raise
+
+
+async def _generate_generic_scene_candidate(job_id: str, request: GenericGenerateRequest) -> dict:
+    root = _require_job(job_id)
 
     if request.auto_research:
         await _ensure_reference_pack(job_id, max_images=5, attempts=2)
@@ -8348,6 +8389,8 @@ async def generate_generic_scene(job_id: str, request: GenericGenerateRequest) -
         )
 
     await _ensure_feature_plan(job_id, _load_subject_inventory(root))
+
+    _write_status(root, state="running", stage="planning_model_geometry")
 
     initial_decision = await _ask_modeling_director(
         job_id,

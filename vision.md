@@ -7,6 +7,8 @@ for the actual model-making software urgently. Work through APIs/code, never bro
 turn a passing build, a GLB export, or a local feature verdict into a claim that the full model is ready.
 
 Repository: `Kesehet/3d-modeling-ai`. Live: `https://3d-modeling-ai.srv1058562.hstgr.cloud`.
+**Owner instruction: do not implement security/auth changes.** Security draft PR #64 was closed without merge or deployment. Focus on model-making.
+
 Sync main before continuing; other agents have contributed changes. Never replace their work blindly.
 
 ### Verified baseline
@@ -29,7 +31,11 @@ Sync main before continuing; other agents have contributed changes. Never replac
   were valid negative judgments inside `{ "properties": { ...instance fields... } }`, which the
   application missed. Diagnostics: workflow `36468455029`, artifact `10990052511`.
 
-### Current recovery change (verify PR/deployment before assuming live)
+### Current recovery change
+
+PR #63 merged as `7b9551cd14c44eb91e88817e9b7e0bac58c1d4ba`. CI `36569560206` passed
+170 Python tests plus real Blender geometry/export checks. Deployment `36569799658` is being
+verified before the live Prius rebuild; do not infer model success from these checks.
 
 - Recover the observed `properties` response envelope only when it contains instance fields matching
   the requested schema. A copied schema is rejected, never treated as a positive judgment.
@@ -51,9 +57,8 @@ Sync main before continuing; other agents have contributed changes. Never replac
    testing for later cavity/cutout features. Do not assume a cylindrical draft is a completed mug.
 4. Watch representation switching and feature ownership. Current strict dependencies can strand later
    components behind a failed primary mass. Improve geometry planning rather than lowering QA thresholds.
-5. Operational P0s remain: dashboard mutation/read auth, durable job scheduling, per-job exclusion and
-   pause/retry controls. Authentication/session code was tested locally but deliberately kept out of this
-   geometry recovery release while the owner prioritized model-making. Do not assume it is deployed.
+5. Continue only model-making work. The owner explicitly rejected security work on September 29;
+   do not reopen or deploy PR #64. Any job scheduling changes must directly unblock generation.
 6. Update this handoff with actual live results, version numbers, PR/run IDs and remaining blockers.
 
 ### Access and continuation

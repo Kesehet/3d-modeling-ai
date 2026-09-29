@@ -558,7 +558,7 @@ def test_visual_comparison_retries_missing_judgment_fields(tmp_path, monkeypatch
 
 
 @pytest.mark.parametrize("axis,expected", [("y", [2, 4, 1]), ("x", [4, 2, 1])])
-def test_reference_dimensions_catch_swapped_axes_and_flattened_cages(axis, expected):
+def test_planner_dimensions_catch_swapped_axes_and_flattened_cages(axis, expected):
     spec = main.HardSurfaceCageSpec(title="Envelope", axis=axis, stations=[
         {"position": p, "profile": [[0, 0], [1, 0], [1, 1], [0, 1]]}
         for p in (-2, -1, 1, 2)
@@ -567,7 +567,7 @@ def test_reference_dimensions_catch_swapped_axes_and_flattened_cages(axis, expec
     flat = spec.model_copy(deep=True)
     for station in flat.stations:
         station.profile = [(w, z * 0.1) for w, z in station.profile]
-    with pytest.raises(ValueError, match="contradict the reference brief"):
+    with pytest.raises(ValueError, match="contradict the planner's intended dimensions"):
         main._validate_cage_dimensions(flat, expected)
 
 
@@ -603,12 +603,15 @@ def test_primary_geometry_uses_visual_brief_then_reasoning_coordinates(tmp_path,
         if len(calls) == 1:
             assert kwargs["model"] == main.VISION_MODELS[0]
             assert kwargs["images"] == ["reference_image"]
-            data = {"dimensions_xyz": [2, 4, 1], "silhouette_notes": ["Wide base", "Level upper surface"],
+            # Perspective-based estimates must not veto a coherent geometry plan.
+            data = {"dimensions_xyz": [6.5, 8, 3.2], "silhouette_notes": ["Wide base", "Level upper surface"],
                     "construction_notes": ["Use Y as the horizontal sweep axis."]}
         else:
             assert kwargs["model"] == main.REASONING_MODEL and kwargs["images"] is None
             assert "dimensions_xyz" in kwargs["prompt"]
-            data = {"title": "Primary envelope", "axis": "y", "subdivision_levels": 0, "stations": [
+            assert "intended_dimensions_xyz" in kwargs["schema"]["required"]
+            data = {"title": "Primary envelope", "axis": "y", "intended_dimensions_xyz": [2, 4, 1],
+                    "subdivision_levels": 0, "stations": [
                 {"position": p, "profile": [[0, 0], [1, 0], [1, 0.5], [1, 1], [0, 1]]}
                 for p in (-2, -1.2, -0.4, 0.4, 1.2, 2)
             ]}
@@ -621,3 +624,25 @@ def test_primary_geometry_uses_visual_brief_then_reasoning_coordinates(tmp_path,
     spec = asyncio.run(main._build_hard_surface_cage_spec("abc123", reason="Construct primary form"))
     assert spec.axis == "y" and len(calls) == 2
     main._validate_cage_dimensions(spec, [2, 4, 1])
+
+
+def test_failed_regeneration_restores_previous_model_and_quality(tmp_path, monkeypatch):
+    root = job(tmp_path, monkeypatch)
+    previous = {"version": 2, "blend": "model-v2.blend"}
+    quality = {"evaluated_version": 2, "recognizable": False}
+    main._write_status(root, state="ready", stage="needs_refinement", generic_model=previous,
+                       modeling_strategy="hard_surface_cage", quality_gate=quality)
+
+    async def failed_candidate(*args):
+        main._write_status(root, generic_model={"version": 3}, modeling_strategy="procedural",
+                           quality_gate={"evaluated_version": 3})
+        raise main.HTTPException(status_code=502, detail="Geometry planner failed")
+
+    monkeypatch.setattr(main, "_generate_generic_scene_candidate", failed_candidate)
+    with pytest.raises(main.HTTPException):
+        asyncio.run(main.generate_generic_scene("abc123", main.GenericGenerateRequest(auto_research=False)))
+    result = main._read_status(root)
+    assert result["generic_model"] == previous
+    assert result["quality_gate"] == quality
+    assert result["modeling_strategy"] == "hard_surface_cage"
+    assert result["state"] == "ready"

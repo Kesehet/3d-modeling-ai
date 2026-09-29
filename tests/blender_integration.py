@@ -54,7 +54,8 @@ def run(root, name, code, extra):
 
 
 def main():
-    root = Path(tempfile.mkdtemp(prefix="blender-regression-"))
+    root = Path(os.environ.get("BLENDER_TEST_OUTPUT") or tempfile.mkdtemp(prefix="blender-regression-"))
+    root.mkdir(parents=True, exist_ok=True)
     spec = {"title": "Generic editable body", "axis": "y", "subdivision_levels": 0,
             "bevel_width": 0.01, "presentation_base": False,
             "stations": [{"position": p, "profile": [[0, 0], [1, 0], [1, 1], [0, 1]]}
@@ -95,6 +96,14 @@ def main():
         "instances": [{"location": [0, 0, 1], "scale": [0.5, 0.5, 0.5],
                        "rotation_deg": [0, 0, 0]}],
     })
+    panel = {"name": "Shaped panel", "shape": "mesh", "location": [0, 0, 1], "scale": [1, 1, 1],
+             "color": "#123456", "bevel": False,
+             "vertices": [[-.3,-.2,0],[.3,-.2,0],[.2,.2,0],[-.2,.2,0],
+                          [-.3,-.2,.1],[.3,-.2,.1],[.2,.2,.1],[-.2,.2,.1]],
+             "faces": [[0,1,2,3],[4,7,6,5],[0,4,5,1],[1,5,6,2],[2,6,7,3],[3,7,4,0]]}
+    run(root, "mesh_part", generic_scene_script(), {"spec": {
+        "title": "Polygon panel", "presentation_base": False, "objects": [panel]}})
+    run(root, "cage_panel", hard_surface_cage_script(), {"spec": {**spec, "attachments": [panel]}})
     print("BLENDER_INTEGRATION_OK", root)
 
 

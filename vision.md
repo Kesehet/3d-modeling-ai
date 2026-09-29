@@ -1,6 +1,6 @@
 # Vision: Iterative Visual 3D Agent
 
-## Engineering handoff — September 29, 2026
+## Engineering handoff — September 30, 2026
 
 **No usable Prius has been verified. Production model quality is still blocked.** The owner is asking
 for the actual model-making software urgently. Work through APIs/code, never browser automation. Do not
@@ -8,6 +8,7 @@ turn a passing build, a GLB export, or a local feature verdict into a claim that
 
 Repository: `Kesehet/3d-modeling-ai`. Live: `https://3d-modeling-ai.srv1058562.hstgr.cloud`.
 **Owner instruction: do not implement security/auth changes.** Security draft PR #64 was closed without merge or deployment. Focus on model-making.
+**Owner reiterated: improve the general model-maker; do not hard-code objects to manufacture successful results.**
 
 Sync main before continuing; other agents have contributed changes. Never replace their work blindly.
 
@@ -49,10 +50,31 @@ Latest private diagnostic capture: workflow `36609442466`, artifact `11053016528
   cage XYZ bounds before rendering and feed construction errors to fallback planners.
 - Preserve strict local/final QA, immutable versions and keep/revert. No subject-name geometry templates.
 
-Current follow-up makes photo dimensions advisory, requires new primary cage plans to declare their
+PR #65 merged as `e7494552d289ca29ab88fc4198789d0d6a2c7d59`; deployment `36610075715` succeeded.
+It makes photo dimensions advisory, requires new primary cage plans to declare their
 own intended XYZ bounds, and checks actual coordinates against that declaration. It also restores
 the previous active model and its quality record if regeneration fails during a strategy switch.
-The actual Prius remains unverified until the live retest and visual inspection complete.
+The live Prius v4 generated successfully but remained a rounded shell, without recognizable vehicle
+structure. Relative review preferred v4 over working v1, but comparison against displayed v3 rejected
+it and incorrectly discarded progress in the working construction track. Four subsequent automatic
+rounds did not finish the model. This is not a production-quality Prius.
+
+Current general-engine change (verify CI/deploy before assuming live):
+
+- Arbitrary declarative polygon mesh parts work in primitive, loft and cage builders, and bounded
+  attachment edits. This supports shaped panels and components beyond the original primitive vocabulary.
+- The visual model diagnoses a visible edit; the reasoning model translates the diagnosis into geometry.
+  The editor receives actual profile points during primary-form work, previously hidden from it.
+- Improving working cage geometry can advance without replacing the better displayed model. Quality
+  and completion remain attached to the displayed version until a candidate wins promotion.
+- Primary-form review includes front, side and rear coverage. Review receives other feature ownership
+  so later components are not confused with the active pass. New plans forbid criteria dependent on
+  geometry owned by later features.
+- A generic `/v1/jobs/{id}/design` API accepts a complete editable cage/parts design and runs the same
+  render, compare, feature and final review pipeline. Dashboard API alias exists. No canned subject
+  design is included in the generator or used as evidence that autonomous generation works.
+- An optional TRELLIS public-image experiment reached a ZeroGPU quota limit; no external reconstruction
+  backend was added. Do not rotate hosts/accounts to bypass that limit.
 
 ### Next action and release gate
 

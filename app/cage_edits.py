@@ -14,15 +14,16 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from .mesh_parts import validate_mesh_part
+from .mesh_parts import ParametricGeometry, validate_mesh_part
 
 
-class EditPart(BaseModel):
+class EditPart(ParametricGeometry):
     model_config = ConfigDict(allow_inf_nan=False)
     name: str = Field(min_length=1, max_length=80)
-    shape: Literal["sphere", "cube", "cylinder", "cone", "torus", "frustum", "mesh"]
+    shape: Literal["sphere", "cube", "cylinder", "cone", "torus", "frustum", "mesh", "lathe", "sweep"]
     location: list[float] = Field(min_length=3, max_length=3)
-    scale: list[float] = Field(min_length=3, max_length=3)
+    scale: list[float] = Field(default_factory=lambda: [1, 1, 1], min_length=3, max_length=3)
+    radius: float | None = Field(default=None, gt=0.01, le=5.0)
     rotation_deg: list[float] = Field(default_factory=lambda: [0, 0, 0], min_length=3, max_length=3)
     color: str = Field(default="#808080", pattern=r"^#[0-9A-Fa-f]{6}$")
     smooth: bool = True
@@ -281,7 +282,8 @@ def apply_cage_edit_action(spec: dict, action: CageEditAction) -> dict:
             else [axis_span, max_half_width * 2.0, height_span]
         )
         location = [float(value) for value in cutter.get("location", [0, 0, 0])[:3]]
-        scale = [float(value) for value in cutter.get("scale", [1, 1, 1])[:3]]
+        size_key = "dimensions" if cutter.get("dimensions") else "scale"
+        scale = [float(value) for value in cutter.get(size_key, [1, 1, 1])[:3]]
         rotation = [float(value) for value in cutter.get("rotation_deg", [0, 0, 0])[:3]]
         for dimension in range(3):
             delta = max(-0.35, min(0.35, float(action.location_delta_fraction[dimension])))
@@ -291,7 +293,7 @@ def apply_cage_edit_action(spec: dict, action: CageEditAction) -> dict:
             scale[dimension] = max(0.02, scale[dimension] * factor)
             rotation[dimension] = max(-360.0, min(360.0, rotation[dimension] + rotation_delta))
         cutter["location"] = location
-        cutter["scale"] = scale
+        cutter[size_key] = scale
         cutter["rotation_deg"] = rotation
 
     elif action.operation == "remove_cutter":
@@ -310,6 +312,8 @@ def apply_cage_edit_action(spec: dict, action: CageEditAction) -> dict:
         if action.operation == "add_cutter":
             if part["shape"] not in {"cube", "cylinder", "sphere"} or len(cutters) >= 16:
                 raise ValueError("Cutter shape or count is unsupported.")
+            if part.get("dimensions"):
+                part["scale"] = [v / 2 for v in part["dimensions"]]
             cutters.append({k: part[k] for k in ("name", "shape", "location", "scale", "rotation_deg")})
         else:
             if len(attachments) >= 24:

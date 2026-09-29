@@ -555,3 +555,69 @@ def test_visual_comparison_retries_missing_judgment_fields(tmp_path, monkeypatch
     assert comparison["candidate_is_better"] is True
     assert comparison["model"] == "fallback"
     assert {"candidate_is_better", "summary"} <= set(calls[0]["schema"]["required"])
+
+
+@pytest.mark.parametrize("axis,expected", [("y", [2, 4, 1]), ("x", [4, 2, 1])])
+def test_reference_dimensions_catch_swapped_axes_and_flattened_cages(axis, expected):
+    spec = main.HardSurfaceCageSpec(title="Envelope", axis=axis, stations=[
+        {"position": p, "profile": [[0, 0], [1, 0], [1, 1], [0, 1]]}
+        for p in (-2, -1, 1, 2)
+    ])
+    main._validate_cage_dimensions(spec, expected)
+    flat = spec.model_copy(deep=True)
+    for station in flat.stations:
+        station.profile = [(w, z * 0.1) for w, z in station.profile]
+    with pytest.raises(ValueError, match="contradict the reference brief"):
+        main._validate_cage_dimensions(flat, expected)
+
+
+def test_director_can_choose_vertical_loft_instead_of_horizontal_cage(monkeypatch):
+    calls = []
+
+    async def loft(job_id, **kwargs):
+        calls.append((job_id, kwargs))
+        return {"strategy": "adaptive_loft"}
+
+    async def cage(*args, **kwargs):
+        raise AssertionError("An explicit loft decision must not become a horizontal cage.")
+
+    monkeypatch.setattr(main, "_generate_adaptive_mesh_fallback", loft)
+    monkeypatch.setattr(main, "_generate_hard_surface_cage", cage)
+    result = asyncio.run(main._generate_directed_mesh("abc123", {
+        "action": "build_mesh", "mesh_representation": "adaptive_loft",
+        "summary": "The primary mass is upright and radial.", "instructions": ["Use world Z."],
+    }))
+    assert result["strategy"] == "adaptive_loft"
+    assert len(calls) == 1 and "world Z" in calls[0][1]["reason"]
+
+
+def test_primary_geometry_uses_visual_brief_then_reasoning_coordinates(tmp_path, monkeypatch):
+    job(tmp_path, monkeypatch)
+    calls = []
+
+    async def no_plan(*args):
+        return None
+
+    async def chat(self, **kwargs):
+        calls.append(kwargs)
+        if len(calls) == 1:
+            assert kwargs["model"] == main.VISION_MODELS[0]
+            assert kwargs["images"] == ["reference_image"]
+            data = {"dimensions_xyz": [2, 4, 1], "silhouette_notes": ["Wide base", "Level upper surface"],
+                    "construction_notes": ["Use Y as the horizontal sweep axis."]}
+        else:
+            assert kwargs["model"] == main.REASONING_MODEL and kwargs["images"] is None
+            assert "dimensions_xyz" in kwargs["prompt"]
+            data = {"title": "Primary envelope", "axis": "y", "subdivision_levels": 0, "stations": [
+                {"position": p, "profile": [[0, 0], [1, 0], [1, 0.5], [1, 1], [0, 1]]}
+                for p in (-2, -1.2, -0.4, 0.4, 1.2, 2)
+            ]}
+        return OllamaJSONResult(data=data, endpoint="test", usage={})
+
+    monkeypatch.setattr(main, "_ensure_feature_plan", no_plan)
+    monkeypatch.setattr(main, "_collect_images", lambda *args: (
+        ["reference_image", "failed_render"], ["references/source.jpg", "renders/model-v1-front.png"]))
+    monkeypatch.setattr(OllamaProxyClient, "chat_json", chat)
+    spec = asyncio.run(main._build_hard_surface_cage_spec("abc123", reason="Construct primary form"))
+    assert spec.axis == "y" and len(calls) == 2
+    main._validate_cage_dimensions(spec, [2, 4, 1])

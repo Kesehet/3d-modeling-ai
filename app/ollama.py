@@ -23,9 +23,24 @@ class OllamaJSONResult:
     usage: dict[str, Any]
 
 
-def decode_structured_json(content: str | JSONValue) -> JSONValue:
+def _unwrap_schema_instance(data: JSONValue, schema: dict[str, Any] | None) -> JSONValue:
+    """Recover a gateway's properties envelope without inventing judgment values."""
+    if not schema or not isinstance(data, dict) or set(data) != {"properties"}:
+        return data
+    instance = data["properties"]
+    expected = set(schema.get("properties", {}))
+    if not isinstance(instance, dict) or not expected.intersection(instance):
+        return data
+    # A copied JSON schema is not an evaluation. Keep it on the error/fallback path.
+    values = [instance[key] for key in expected.intersection(instance)]
+    if all(isinstance(value, dict) and set(value).intersection({"type", "$ref", "anyOf", "enum"}) for value in values):
+        raise OllamaProxyError("Ollama returned schema definitions instead of judgment values.")
+    return instance
+
+
+def decode_structured_json(content: str | JSONValue, *, schema: dict[str, Any] | None = None) -> JSONValue:
     if isinstance(content, (dict, list)):
-        return content
+        return _unwrap_schema_instance(content, schema)
 
     text = content.strip()
     if not text:
@@ -36,7 +51,7 @@ def decode_structured_json(content: str | JSONValue) -> JSONValue:
     except json.JSONDecodeError:
         parsed = None
     if isinstance(parsed, (dict, list)):
-        return parsed
+        return _unwrap_schema_instance(parsed, schema)
 
     if text.startswith("```"):
         lines = text.splitlines()
@@ -50,7 +65,7 @@ def decode_structured_json(content: str | JSONValue) -> JSONValue:
         except json.JSONDecodeError:
             parsed = None
         if isinstance(parsed, (dict, list)):
-            return parsed
+            return _unwrap_schema_instance(parsed, schema)
 
     candidates_with_offsets: list[tuple[int, str]] = []
     first_object = text.find("{")
@@ -78,7 +93,7 @@ def decode_structured_json(content: str | JSONValue) -> JSONValue:
             last_error = exc
             continue
         if isinstance(parsed, (dict, list)):
-            return parsed
+            return _unwrap_schema_instance(parsed, schema)
 
     preview = " ".join(text.split())[:240]
     if last_error is not None:
@@ -145,6 +160,7 @@ class OllamaProxyClient:
             system += (
                 "\nOutput contract: return one JSON value matching this schema. "
                 "Include every judgment field explicitly, even fields with defaults. "
+                "Put the instance fields directly at the root, without a properties envelope. "
                 "Do not return the schema itself.\n"
                 + json.dumps(schema, separators=(",", ":"), ensure_ascii=False)
             )
@@ -174,7 +190,7 @@ class OllamaProxyClient:
             body = response.json()
             content = (body.get("message") or {}).get("content") or ""
             try:
-                data = decode_structured_json(content)
+                data = decode_structured_json(content, schema=schema)
             except OllamaProxyError as exc:
                 chat_decode_error = exc
             else:
@@ -201,7 +217,7 @@ class OllamaProxyClient:
         self._raise_for_response(response, "/api/generate")
         body = response.json()
         try:
-            data = decode_structured_json(body.get("response") or "")
+            data = decode_structured_json(body.get("response") or "", schema=schema)
         except OllamaProxyError as generate_error:
             if schema:
                 # Some hosted multimodal models accept JSON mode but do not
@@ -229,7 +245,7 @@ class OllamaProxyClient:
                     relaxed_body = relaxed_response.json()
                     relaxed_content = (relaxed_body.get("message") or {}).get("content") or ""
                     try:
-                        relaxed_data = decode_structured_json(relaxed_content)
+                        relaxed_data = decode_structured_json(relaxed_content, schema=schema)
                     except OllamaProxyError:
                         pass
                     else:
@@ -254,7 +270,7 @@ class OllamaProxyClient:
                 self._raise_for_response(relaxed_response, "/api/generate")
                 relaxed_body = relaxed_response.json()
                 try:
-                    relaxed_data = decode_structured_json(relaxed_body.get("response") or "")
+                    relaxed_data = decode_structured_json(relaxed_body.get("response") or "", schema=schema)
                 except OllamaProxyError as relaxed_error:
                     if chat_decode_error:
                         raise OllamaProxyError(

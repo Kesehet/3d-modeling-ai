@@ -1,85 +1,71 @@
 # Vision: Iterative Visual 3D Agent
 
-## Engineering handoff — September 28, 2026 (India)
+## Engineering handoff — September 29, 2026
 
-**Production readiness: NOT YET VERIFIED.** HTTP success and file exports do not establish usable model
-quality. Preserve this distinction in product status and release reports.
+**No usable Prius has been verified. Production model quality is still blocked.** The owner is asking
+for the actual model-making software urgently. Work through APIs/code, never browser automation. Do not
+turn a passing build, a GLB export, or a local feature verdict into a claim that the full model is ready.
 
-Repository: `Kesehet/3d-modeling-ai`. Service: `https://3d-modeling-ai.srv1058562.hstgr.cloud`.
-The owner asked for API/code work and explicitly asked to avoid browser automation. Preserve the generic,
-AI-directed observe/edit/render/compare/keep-or-revert approach; no subject-name geometry templates.
+Repository: `Kesehet/3d-modeling-ai`. Live: `https://3d-modeling-ai.srv1058562.hstgr.cloud`.
+Sync main before continuing; other agents have contributed changes. Never replace their work blindly.
 
-### Release baseline and concrete evidence
+### Verified baseline
 
-- Baseline main: `d30d4b1bdd899d19f1a5331ca0738ad6dff65e77` (PR #55). Hostinger run `36363288553`
-  and CI run `36363288554` succeeded. Sync main before continuing; several other fixes landed after PR #46.
-- PR #46 fixed immutable version reservations, version-bound visual analysis, regression rollback, bounded
-  component research queries, and explicit model-visible JSON schemas. Later main fixes added worker
-  concurrency limits, compact quality history, persistent stall budgets, representation switching and
-  feature decomposition into coordinated modeling passes. Preserve those changes.
-- Latest baseline job: `a5e5d049-1c11-405c-8af6-2d2c14421ce9`, prompt `A Toyota Prius`, v1.
-  It is a rejected first body feature, not a finished car. Its QA reports **64 non-manifold edges with
-  zero cutters**, dimensions `[1.7833, 4.74, 1.3146]`. Actual front-left/left pixels show a sloping body
-  with damaged seams and end surfaces. The cage builder wound longitudinal caps opposite to the adjacent
-  surface; normal repair happened only after subdivision/bevel. This is a deterministic geometry defect.
-- Other current failed/stalled jobs: `c4a8b04d-9060-4db7-88bd-c120ef953d8c` (Prius),
-  `1ca5d6cf-286a-4eee-94cc-d15318b1c1cb` (Veyron), and
-  `91db76ab-2348-4b50-8b5e-37906a6529e9` (Polo). Preserve their evidence.
-- Older jobs mentioned in previous conversations, including `c32d4cc8-0cfa-475d-aa23-c4f2254d8a05`
-  and table `301c0dce-d7e6-4820-8fc9-67b6c9d2d76c`, are absent from the latest dashboard snapshot.
-  Do not assume an old process/session or job remains available.
+- Main `f8acfe19e86e124809349a60c96640213329d160` (PR #62) deployed successfully in Hostinger run
+  `36468397074`. PR #62 CI `36468097718` passed Python, compose and real Blender integration.
+- PR #46 fixed immutable version reservations, version-bound QA, rollback and bounded search queries.
+- PR #57 fixed cage cap winding, normal repair before subdivision/bevel, camera framing and generic
+  attachment/cutter edits. The exact live Prius shell had **64 non-manifold edges before / 0 after**
+  in real Blender CI. That repair did not make the shape a Prius.
+- PR #58/#61 improved generic reference discovery. PR #62 added explicit vision response schemas,
+  required decisions/explanations, raw verification logs and owner-gated diagnostic log downloads.
+- Live retest after #62 recovered **one** valid table reference for `c0f70b5c-cae9-4d17-84f4-04748711303e`.
+  Its earlier zero-reference barrier is resolved; no table model has yet been verified.
+- Mug `d0a6eb4e-d115-420e-8144-19d564eb2468` found **five** references, but produced a flat slab.
+  The AI described a 1.6-unit upright body and incorrectly put that height in Y station positions;
+  actual profile Z spans only 0.2. This is a planning/coordinate error, not a Blender export error.
+- Prius `a5e5d049-1c11-405c-8af6-2d2c14421ce9`: baseline v1 retained, v2 rejected. Both are poor.
+  Actual v2 pixels show a flat shell without recognizable vehicle structure. Raw comparison replies
+  were valid negative judgments inside `{ "properties": { ...instance fields... } }`, which the
+  application missed. Diagnostics: workflow `36468455029`, artifact `10990052511`.
 
-### Recovery increment in this branch
+### Current recovery change (verify PR/deployment before assuming live)
 
-Check this branch's PR/CI/deployment status before assuming these changes are live:
+- Recover the observed `properties` response envelope only when it contains instance fields matching
+  the requested schema. A copied schema is rejected, never treated as a positive judgment.
+- Let the visual director explicitly choose a horizontal mirrored cage or a closed loft along X/Y/Z.
+  The old generic `build_mesh` action always became a horizontal cage regardless of the intended form.
+- Separate visual reference interpretation from coordinate construction for primary forms: vision writes
+  a concrete silhouette/dimension brief; the existing reasoning model writes the geometry. Validate
+  cage XYZ bounds against the brief before rendering and feed errors to fallback planners.
+- Preserve strict local/final QA, immutable versions and keep/revert. No subject-name geometry templates.
 
-- Correct cage cap winding for both axes and normalize the closed shell immediately after Mirror,
-  before subdivision/bevel; modifier failures now surface rather than silently exporting damaged geometry.
-- Shared 640-pixel orthographic cameras fit projected geometry bounds per view, update transforms before
-  bounds, and use neutral backgrounds. All four generic geometry/assembly paths use the same framing.
-- Add/move/remove primitive attachments and cutters; change subdivision/bevel/shading without replacing
-  topology; reject no-op edits before rendering. Preserve existing proportional and station-region edits.
-  Save full action parameters, show attachments/surface state, explain local-cylinder Z and world axes.
-- Local primary-feature QA keeps the strict reference score/confidence gates but does not require missing,
-  separately planned parts to exist. Final whole-object QA is bound to the active version, runs when the
-  required feature plan completes, persists failures for retry, and cannot be satisfied by a local verdict.
-- Child components inherit verified parent images with explicit parent-context provenance and component focus.
-- Malformed visual comparisons with no explanation retry/fallback instead of becoming silent negative verdicts.
-- Blender CI executes closed cages, a boolean edit, a tapered mirrored/subdivided body, adaptive loft,
-  primitive components, assembly, all nine views and GLB/OBJ/STL exports. It checks manifold edges and useful
-  image framing. Local Python verification: **149 tests passed**, Ruff passed, all four Blender scripts compile.
-- PR #57 CI run `36382423810` also replayed the exact live shell as a test-only fixture:
-  **64 non-manifold edges before the fix, 0 after**, with zero loose vertices. All seven real Blender
-  cases and exports passed. This establishes the geometry repair, not subject-level visual completion.
+### Next action and release gate
 
-### Next work and actual release gate
-
-1. Pass real Blender integration and inspect its renders; fix any topology/camera failures before deployment.
-2. After deployment, create fresh jobs for at least three different subject classes. Inspect reference pixels,
-   actual rendered pixels, version history and QA. Do not substitute cube exports for model-quality acceptance.
-3. Follow multiple kept/rejected edits: versions must increase, baseline bytes must stay unchanged, rejected
-   candidates must not appear as accepted, and later feature passes must preserve accepted components.
-4. Diagnose remaining AI axis/shape errors from explicit coordinate/bounds context and model reasoning.
-   Never lower QA thresholds or hardcode subject geometry to turn failures green.
-5. Public-launch operational P0s remain: protect dashboard mutations (currently bypass API-token auth),
-   durable queued/resumable generation (currently long HTTP/background tasks), per-job exclusion and owner
-   pause/retry controls. Worker process concurrency is bounded, but that does not solve per-job orchestration.
-6. Make readiness/release identity observable. Keep viewer, downloads and status on the accepted version and
-   distinguish working draft, visual acceptance, and print readiness. Manifoldness is only one print check;
-   wall thickness, self-intersections, units and slicer validation still need work.
+1. Deploy the recovery change and rebuild the existing Prius through `/dashboard/jobs/{id}/generate`
+   with auto research enabled and automatic rounds initially zero. Inspect actual rendered pixels and
+   the saved dimension brief/spec, then run bounded improvements. Never silently accept a bad candidate.
+2. Verify full object assembly, not just the primary shell: secondary parts, child jobs, placement and
+   final QA must complete. Local feature acceptance is separate from whole-object acceptance.
+3. Retest mug and table to ensure the geometry engine remains generic. Vertical lofts still need careful
+   testing for later cavity/cutout features. Do not assume a cylindrical draft is a completed mug.
+4. Watch representation switching and feature ownership. Current strict dependencies can strand later
+   components behind a failed primary mass. Improve geometry planning rather than lowering QA thresholds.
+5. Operational P0s remain: dashboard mutation/read auth, durable job scheduling, per-job exclusion and
+   pause/retry controls. Authentication/session code was tested locally but deliberately kept out of this
+   geometry recovery release while the owner prioritized model-making. Do not assume it is deployed.
+6. Update this handoff with actual live results, version numbers, PR/run IDs and remaining blockers.
 
 ### Access and continuation
 
-- `GET /dashboard/api`: jobs, plans, quality, accepted artifacts and history. Keep diagnostic output compact.
-- `GET /dashboard/renders/{job_id}/{filename}`: download actual model renders without browser automation.
-- Authenticated `/v1` API supports jobs, references, research, generation, improvement, status, history and
-  artifacts. `THREED_API_TOKEN` and `OLLAMA_PROXY_API_KEY` are production secrets; never print or commit them.
-- Owner-gated Live Control issue #31 and `.github/workflows/live-control.yml` run authenticated diagnostics.
-  Read supported commands and preserve the owner gate. Avoid interrupting running generation with deployment.
-- Main pushes auto-deploy to Hostinger. Merge only the tested PR head and verify deployment plus live behavior.
-- Use focused changes in `app/main.py`; avoid a sweeping refactor while repairing the pipeline. Key modules:
-  `app/artifacts.py`, `app/cage_edits.py`, `app/rendering.py`; regression tests include
-  `tests/test_production_regressions.py` and `tests/blender_integration.py`.
+- `GET /dashboard/api` contains jobs, quality, feature plans and accepted artifacts. Keep output compact.
+- `GET /dashboard/renders/{job_id}/{filename}` retrieves actual pixels without browser automation.
+- `/v1` endpoints require `THREED_API_TOKEN`; never retrieve, print or commit production secrets.
+- Owner-gated Live Control issue #31 supports inspect/research/generate/improve commands via production
+  workflows. Preserve its owner gate. Recent captures include the latest 16 logs ordered by timestamp.
+- Main pushes deploy to Hostinger. Verify CI and deploy completion; avoid restarting active generation.
+- Key code: `app/main.py`, `app/ollama.py`, `app/cage_edits.py`, `app/rendering.py`, `app/feature_tasks.py`.
+  Tests: `tests/test_production_regressions.py`, `tests/test_ollama.py`, `tests/blender_integration.py`.
 
 ## Goal
 

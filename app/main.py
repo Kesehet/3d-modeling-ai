@@ -4,6 +4,7 @@ import asyncio
 import base64
 import hashlib
 import json
+import math
 import re
 import shutil
 import uuid
@@ -209,6 +210,10 @@ class ModelingDirectorDecision(BaseModel):
         "refine_mesh",
         "rebuild_mesh",
     ]
+    mesh_representation: Literal["hard_surface_cage", "adaptive_loft"] = Field(
+        default="hard_surface_cage",
+        description="For mesh actions, choose a horizontal mirrored half-cage or a closed contour loft on X/Y/Z.",
+    )
     subject_match_score: float = Field(default=0.0, ge=0.0, le=1.0)
     summary: str = Field(default="", max_length=2400)
     instructions: list[str] = Field(default_factory=list, max_length=16)
@@ -912,6 +917,59 @@ class HardSurfaceCageSpec(BaseModel):
     stations: list[CageStation] = Field(min_length=4, max_length=16)
     cutters: list[BooleanCutterSpec] = Field(default_factory=list, max_length=16)
     attachments: list[SceneObjectSpec] = Field(default_factory=list, max_length=24)
+
+
+class GeometryBrief(BaseModel):
+    dimensions_xyz: list[float] = Field(min_length=3, max_length=3)
+    silhouette_notes: list[str] = Field(min_length=2, max_length=12)
+    construction_notes: list[str] = Field(min_length=1, max_length=12)
+
+
+async def _reference_geometry_brief(root: Path, *, request: dict, feature: dict,
+                                    images: list[str], labels: list[str]) -> dict:
+    """Separate visual observation from the reasoning model's coordinate construction."""
+    client = OllamaProxyClient()
+    errors = []
+    for model in VISION_MODELS:
+        try:
+            result = await client.chat_json(
+                model=model,
+                system=(
+                    "Inspect reference pixels as a 3D artist and write a construction brief for a separate geometry "
+                    "engineer. Do not emit mesh coordinates. World X is left/right, Y is front/back, Z is vertical; "
+                    "front is -Y. Estimate the ACTIVE FEATURE's bounding dimensions in world XYZ, in consistent "
+                    "units with its longest dimension between 1 and 8. Dimensions must describe the reference "
+                    "target, not a failed current render. Give concrete silhouette landmarks: where height/width "
+                    "changes, transitions, flat versus curved regions, and the dominant axis. Describe only the "
+                    "active feature if supplied, reserving other components for later passes. Return JSON."
+                ),
+                prompt=f"Request: {request.get('prompt')}\nActive feature: {json.dumps(feature)}\nImages: {labels}",
+                images=images or None, schema=GeometryBrief.model_json_schema(), temperature=0.0, num_predict=3072,
+            )
+            brief = GeometryBrief.model_validate(result.data)
+            if any(not math.isfinite(v) or v <= 0 or v > 20 for v in brief.dimensions_xyz):
+                raise ValueError("Geometry brief requires three positive finite dimensions up to 20 units.")
+        except (OllamaProxyError, httpx.HTTPError, ValidationError, ValueError, TypeError) as exc:
+            errors.append(f"{model}: {exc}")
+            continue
+        payload = {**brief.model_dump(), "model": model, "images": labels}
+        _write_llm_log(root, "reference-geometry-brief", payload)
+        return payload
+    raise HTTPException(status_code=502, detail="Reference geometry brief failed: " + " | ".join(errors[-2:]))
+
+
+def _validate_cage_dimensions(spec: HardSurfaceCageSpec, expected: list[float]) -> None:
+    positions = [s.position for s in spec.stations]
+    half_widths = [p[0] for s in spec.stations for p in s.profile]
+    heights = [p[1] for s in spec.stations for p in s.profile]
+    length = max(positions) - min(positions)
+    width = 2 * max(half_widths)
+    height = max(heights) - min(heights)
+    actual = [width, length, height] if spec.axis == "y" else [length, width, height]
+    # This catches swapped axes / flattened geometry before spending a Blender render.
+    if any(abs(a / e - 1) > 0.30 for a, e in zip(actual, expected, strict=True)):
+        raise ValueError(f"Cage XYZ dimensions {actual} contradict the reference brief {expected}. "
+                         "Station positions are horizontal; every profile second coordinate is absolute world Z.")
 
 
 async def _build_subject_inventory(
@@ -5844,7 +5902,11 @@ async def _build_hard_surface_cage_spec(
         "If ACTIVE FEATURE strategy is base_mesh_region and there is no CURRENT HARD-SURFACE CAGE, emit a CLEAN "
         "continuous primary mass: no boolean cutters and no separate attachments. Those belong to later feature owners. "
         "Do not copy a stock profile or invent a display pedestal. "
-        "Choose all section positions, widths and heights from the actual reference proportions."
+        "Choose all section positions, widths and heights from the actual reference proportions. "
+        "AXIS CONTRACT: axis=y means station.position is WORLD Y and profile=[HALF X WIDTH, ABSOLUTE WORLD Z]. "
+        "axis=x means position is WORLD X and profile=[HALF Y WIDTH, ABSOLUTE WORLD Z]. "
+        "A station's position is NEVER its height. The top height must occur in profile[*][1]. "
+        "The visual artist's XYZ dimension brief is authoritative; verify your mesh bounds against it."
     )
     prompt = (
         f"Exact user request: {job_request.get('prompt', '')}\n"
@@ -5861,15 +5923,20 @@ async def _build_hard_surface_cage_spec(
         "cutters or attachments necessary to make that feature visibly correct while protecting unrelated good geometry."
     )
 
+    primary_form = feature_task is None or feature_task.strategy == "base_mesh_region"
+    brief = (await _reference_geometry_brief(root, request=job_request, feature=feature_context,
+                                            images=images, labels=labels)) if primary_form else None
+    if brief:
+        prompt += "\nReference artist's construction brief: " + json.dumps(brief)
     client = OllamaProxyClient()
     errors: list[str] = []
-    for candidate_model in VISION_MODELS:
+    for candidate_model in ((REASONING_MODEL, *VISION_MODELS) if brief else VISION_MODELS):
         try:
             result = await client.chat_json(
                 model=candidate_model,
                 system=system,
-                prompt=prompt,
-                images=images or None,
+                prompt=prompt + ("\nFix these previous construction errors: " + " | ".join(errors) if errors else ""),
+                images=(images or None) if candidate_model in VISION_MODELS else None,
                 schema=HardSurfaceCageSpec.model_json_schema(),
                 temperature=0.0,
                 num_predict=8192,
@@ -5894,6 +5961,8 @@ async def _build_hard_surface_cage_spec(
                 complexity=subject_complexity,
             )
             spec = HardSurfaceCageSpec.model_validate(normalized)
+            if brief:
+                _validate_cage_dimensions(spec, brief["dimensions_xyz"])
             spec, deferred_cutters, deferred_attachments = _clean_initial_primary_blockout(
                 spec,
                 feature_task,
@@ -7122,8 +7191,8 @@ async def _build_adaptive_loft_spec(
         ),
     )
     system = (
-        "You are the mesh-reconstruction stage of an autonomous Blender system. The primitive blockout "
-        "was not recognizable enough, so create a SAFE DECLARATIVE LOFT MESH instead of more cubes/wedges. "
+        "You are the mesh-reconstruction stage of an autonomous Blender system. Create a SAFE DECLARATIVE LOFT MESH "
+        "using the selected construction strategy and reference evidence. "
         "Return JSON only matching the supplied AdaptiveLoftSpec schema. Choose the axis that best follows "
         "the subject's main length. Each cross section MUST contain exactly 8 perimeter points in consistent "
         "clockwise order when viewed along the positive axis; use the same semantic perimeter order in every "
@@ -7136,7 +7205,10 @@ async def _build_adaptive_loft_spec(
         "the frozen child artifact. Do not approximate the whole subject with attachments; the loft must carry the "
         "primary silhouette. "
         "Front-facing subject direction is negative Y and Z is up. Favor reference geometry and recognizability "
-        "over cosmetic detail."
+        "over cosmetic detail. AXIS CONTRACT: axis=z means section.position is WORLD Z height and contour points "
+        "are [world X, world Y]. axis=y means position is WORLD Y and contour=[X,Z]. axis=x means position is "
+        "WORLD X and contour=[Y,Z]. Upright radial shapes usually need axis=z. Never confuse position with height "
+        "on a horizontal axis."
     )
     prompt = (
         f"User request: {job_request.get('prompt', '')}\n"
@@ -7155,15 +7227,20 @@ async def _build_adaptive_loft_spec(
         "top-right -> upper-right/shoulder -> mid-right -> lower-right, adjusted to the actual subject."
     )
 
+    primary_form = feature_task is None or feature_task.strategy == "base_mesh_region"
+    brief = (await _reference_geometry_brief(root, request=job_request, feature=feature_context,
+                                            images=images, labels=labels)) if primary_form else None
+    if brief:
+        prompt += "\nReference artist's construction brief: " + json.dumps(brief)
     client = OllamaProxyClient()
     errors: list[str] = []
-    for candidate_model in VISION_MODELS:
+    for candidate_model in ((REASONING_MODEL, *VISION_MODELS) if brief else VISION_MODELS):
         try:
             result = await client.chat_json(
                 model=candidate_model,
                 system=system,
                 prompt=prompt,
-                images=images or None,
+                images=(images or None) if candidate_model in VISION_MODELS else None,
                 schema=AdaptiveLoftSpec.model_json_schema(),
                 temperature=0.0,
                 num_predict=8192,
@@ -8095,7 +8172,12 @@ async def _ask_modeling_director(
         "front/rear shape, wheel/attachment placement and other visible geometry. Do NOT request rebuild_mesh merely "
         "because the current mesh is crude, low-detail, or has inaccurate proportions. Use rebuild_mesh only when "
         "the main topology/axis/body concept is fundamentally wrong enough that editing the current mesh is unlikely "
-        "to converge. Ignore filenames and object names as proof of correctness: judge the visible geometry. "
+        "to converge. For any mesh action set mesh_representation explicitly: hard_surface_cage is a mirrored "
+        "half-profile swept horizontally along X or Y, suited to bilateral shells. adaptive_loft uses full closed "
+        "cross-sections along ANY axis, including Z for upright forms. Choose the construction that actually fits "
+        "the feature; do not force an upright radial form into a horizontal half-cage. build_procedural supports "
+        "assemblies of beams, boxes, cylinders and other primitives. Ignore filenames and object names as proof "
+        "of correctness: judge the visible geometry. "
         "Return JSON only matching the schema."
     )
     status_payload: dict = {}
@@ -8133,6 +8215,8 @@ async def _ask_modeling_director(
     client = OllamaProxyClient()
     errors: list[str] = []
     candidate_models = VISION_MODELS if images else (REASONING_MODEL, *VISION_MODELS)
+    director_schema = ModelingDirectorDecision.model_json_schema()
+    director_schema["required"].append("mesh_representation")
     for candidate_model in candidate_models:
         try:
             result = await client.chat_json(
@@ -8140,7 +8224,7 @@ async def _ask_modeling_director(
                 system=system,
                 prompt=prompt,
                 images=images or None,
-                schema=ModelingDirectorDecision.model_json_schema(),
+                schema=director_schema,
                 temperature=0.0,
                 num_predict=4096,
             )
@@ -8229,6 +8313,13 @@ async def _generic_recognizability_check(
     }
 
 
+async def _generate_directed_mesh(job_id: str, decision: dict, *, feature_task: FeatureTask | None = None) -> dict:
+    builder = (_generate_adaptive_mesh_fallback if decision.get("mesh_representation") == "adaptive_loft"
+               else _generate_hard_surface_cage)
+    return await builder(job_id, reason=str(decision.get("summary") or "Reference-driven construction")
+                         + "\n" + "\n".join(decision.get("instructions") or []), feature_task=feature_task)
+
+
 async def generate_generic_scene(job_id: str, request: GenericGenerateRequest) -> dict:
     root = _require_job(job_id)
 
@@ -8261,21 +8352,7 @@ async def generate_generic_scene(job_id: str, request: GenericGenerateRequest) -
     )
     initial_action = initial_decision["action"]
     if initial_action in {"build_mesh", "rebuild_mesh"}:
-        _write_status(
-            root,
-            state="running",
-            stage="agent_selected_hard_surface_cage",
-            modeling_strategy="hard_surface_cage",
-        )
-        return await _generate_hard_surface_cage(
-            job_id,
-            reason=(
-                initial_decision.get("summary")
-                or "The modeling director selected a human-style editable base-mesh strategy."
-            )
-            + "\n"
-            + "\n".join(initial_decision.get("instructions") or []),
-        )
+        return await _generate_directed_mesh(job_id, initial_decision)
 
     _write_status(root, state="running", stage="agent_selected_procedural", modeling_strategy="procedural")
     spec = await _build_generic_scene_spec(job_id, auto_research=False)
@@ -8320,12 +8397,7 @@ async def generate_generic_scene(job_id: str, request: GenericGenerateRequest) -
             to_strategy="hard_surface_cage",
             reason=quality_gate.get("summary"),
         )
-        return await _generate_hard_surface_cage(
-            job_id,
-            reason=(quality_gate.get("summary") or "")
-            + "\n"
-            + "\n".join(quality_gate.get("instructions") or []),
-        )
+        return await _generate_directed_mesh(job_id, quality_gate.get("director") or quality_gate)
 
     _write_status(
         root,

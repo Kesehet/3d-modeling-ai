@@ -132,16 +132,20 @@ class OllamaProxyClient:
             return await client.post(f"{self.base_url}{path}", json=payload, headers=self._headers())
 
     @staticmethod
-    def _raise_for_response(response: httpx.Response, path: str) -> None:
-        if response.is_success:
-            return
+    def _response_error_message(response: httpx.Response, path: str) -> str:
         detail = response.text.strip().replace("\n", " ")
         if len(detail) > 1000:
             detail = detail[:1000] + "..."
-        raise OllamaProxyError(
+        return (
             f"Ollama proxy {path} returned HTTP {response.status_code}: "
             f"{detail or response.reason_phrase}"
         )
+
+    @classmethod
+    def _raise_for_response(cls, response: httpx.Response, path: str) -> None:
+        if response.is_success:
+            return
+        raise OllamaProxyError(cls._response_error_message(response, path))
 
     async def chat_json(
         self,
@@ -185,8 +189,9 @@ class OllamaProxyClient:
 
         response = await self._post("/api/chat", payload)
         chat_decode_error: OllamaProxyError | None = None
-        if response.status_code not in {404, 405}:
-            self._raise_for_response(response, "/api/chat")
+        chat_transport_error: str | None = None
+        recoverable_route_statuses = {403, 404, 405, 429, 500, 502, 503, 504}
+        if response.is_success:
             body = response.json()
             content = (body.get("message") or {}).get("content") or ""
             try:
@@ -202,6 +207,10 @@ class OllamaProxyClient:
                         "eval_count": int(body.get("eval_count") or 0),
                     },
                 )
+        elif response.status_code in recoverable_route_statuses:
+            chat_transport_error = self._response_error_message(response, "/api/chat")
+        else:
+            self._raise_for_response(response, "/api/chat")
 
         generate_payload: dict[str, Any] = {
             "model": model,
@@ -214,7 +223,13 @@ class OllamaProxyClient:
             generate_payload["images"] = images
 
         response = await self._post("/api/generate", generate_payload)
-        self._raise_for_response(response, "/api/generate")
+        if not response.is_success:
+            generate_transport_error = self._response_error_message(response, "/api/generate")
+            if chat_transport_error:
+                raise OllamaProxyError(
+                    f"{chat_transport_error}; fallback route also failed: {generate_transport_error}"
+                )
+            self._raise_for_response(response, "/api/generate")
         body = response.json()
         try:
             data = decode_structured_json(body.get("response") or "", schema=schema)

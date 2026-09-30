@@ -262,9 +262,82 @@ def test_first_cage_refinement_locks_representation_replan(tmp_path, monkeypatch
 def test_cage_edit_schema_hides_replan_until_it_is_allowed():
     locked = main._cage_edit_action_schema(allow_replan=False)
     unlocked = main._cage_edit_action_schema(allow_replan=True)
+    diversified = main._cage_edit_action_schema(
+        allow_replan=False,
+        blocked_operations={"reshape_cage_proportions"},
+    )
 
     assert "replan_representation" not in locked["properties"]["operation"]["enum"]
     assert "replan_representation" in unlocked["properties"]["operation"]["enum"]
+    assert "reshape_cage_proportions" not in diversified["properties"]["operation"]["enum"]
+    assert "reshape_station_region" in diversified["properties"]["operation"]["enum"]
+
+
+def test_repeated_global_rescale_failures_force_a_different_edit_before_replan(tmp_path, monkeypatch):
+    root = job(tmp_path, monkeypatch)
+    spec = main.HardSurfaceCageSpec(
+        title="Test",
+        intended_dimensions_xyz=[2, 4, 1],
+        stations=[
+            {"position": p, "profile": [[0, 0], [1, 0], [1, 1], [0, 1]]}
+            for p in (-2, -1, 1, 2)
+        ],
+    )
+    (root / "cage-spec-v1.json").write_text(json.dumps({"spec": spec.model_dump()}))
+    main._write_status(
+        root,
+        modeling_strategy="hard_surface_cage",
+        working_cage_version=1,
+        cage_edit_stall_count=2,
+    )
+    main.append_history(root, "cage_edit_rejected", operation="reshape_cage_proportions")
+    main.append_history(root, "cage_edit_rejected", operation="reshape_cage_proportions")
+    feature = FeatureTask(id="body", name="body", strategy="base_mesh_region")
+    seen = {}
+
+    async def decide(*args, **kwargs):
+        seen["allow_replan"] = kwargs["allow_replan"]
+        seen["blocked_operations"] = kwargs["blocked_operations"]
+        return main.CageEditAction(
+            operation="reshape_station_region",
+            target_index=2,
+            influence_radius=1,
+            height_scale=1.1,
+            reason="Shape the upper transition instead of rescaling the entire envelope.",
+            expected_visual_effect="Create a clearer regional silhouette.",
+        )
+
+    async def build(*args, version, activate_status, **kwargs):
+        assert activate_status is False
+        return {"candidate_model": {"version": version}}
+
+    async def compare(*args, **kwargs):
+        return {"candidate_is_better": False, "summary": "Regional edit still needs work."}
+
+    async def evaluate(*args, **kwargs):
+        return {
+            "passed": False,
+            "visible": True,
+            "criteria_satisfied": False,
+            "confidence": 0.9,
+            "reference_match_score": 0.3,
+            "subject_recognizable": False,
+            "regression_detected": False,
+            "summary": "Still needs work.",
+        }
+
+    monkeypatch.setattr(main, "_decide_hard_surface_cage_edit", decide)
+    monkeypatch.setattr(main, "_execute_hard_surface_cage", build)
+    monkeypatch.setattr(main, "_compare_generic_versions", compare)
+    monkeypatch.setattr(main, "_evaluate_feature_candidate", evaluate)
+
+    result = asyncio.run(
+        main._refine_hard_surface_cage_incrementally("abc123", feature_task=feature)
+    )
+
+    assert seen["allow_replan"] is False
+    assert seen["blocked_operations"] == {"reshape_cage_proportions"}
+    assert result["action"]["operation"] == "reshape_station_region"
 
 
 def test_cage_edit_normalizer_clamps_safe_numeric_overshoot():

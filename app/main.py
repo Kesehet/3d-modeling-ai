@@ -893,6 +893,17 @@ class GenericSceneSpec(BaseModel):
         ),
     )
 
+    @model_validator(mode="after")
+    def validate_cutter_targets(self):
+        names = [item.name for item in self.objects]
+        if len(set(names)) != len(names):
+            raise ValueError("Scene object names must be unique so boolean cutter targets are unambiguous.")
+        available = set(names)
+        missing = sorted({cutter.target for cutter in self.cutters if cutter.target not in available})
+        if missing:
+            raise ValueError(f"Boolean cutter targets do not exist: {missing}")
+        return self
+
 
 class LoftSection(BaseModel):
     position: float = Field(ge=-10.0, le=10.0)

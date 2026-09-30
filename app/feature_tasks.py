@@ -667,6 +667,36 @@ def mark_component_ready(
     return plan
 
 
+def retry_feature(
+    root: Path,
+    feature_id: str,
+    *,
+    reset_attempts: bool = True,
+) -> FeaturePlan | None:
+    """Requeue one failed/blocked feature without discarding already accepted siblings."""
+
+    plan = load_feature_plan(root)
+    if plan is None:
+        return None
+    task = next((feature for feature in plan.features if feature.id == feature_id), None)
+    if task is None:
+        return plan
+
+    task.status = "retry"
+    if reset_attempts:
+        task.attempts = 0
+    task.accepted_version = None
+    task.acceptance_verified = False
+    task.acceptance_score = 0.0
+    task.acceptance_model = None
+    task.last_summary = ""
+    task.last_error = ""
+    plan.active_feature_id = None
+    refresh_feature_states(plan)
+    save_feature_plan(root, plan)
+    return plan
+
+
 def invalidate_unverified_acceptances(root: Path) -> int:
     """Requeue acceptances created before strict reference-based feature QA."""
     plan = load_feature_plan(root)

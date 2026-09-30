@@ -8840,7 +8840,9 @@ async def _ask_modeling_director(
         "Give concrete instructions for the next modeling pass. When a feature sub-job is supplied, prioritize its "
         "acceptance criteria while protecting already-accepted features and the best-so-far silhouette. "
         "During an active feature pass, missing geometry owned by later features is expected; do not switch representation "
-        "or rebuild the primary shape simply because those later components are absent. Preserve geometry "
+        "or rebuild the primary shape simply because those later components are absent. If the active feature uses "
+        "strategy=surface_cutout while the current strategy is procedural, stay procedural and use SceneSpec boolean "
+        "cutters; loft/cage rebuilding cannot substitute for the required subtractive operation. Preserve geometry "
         "that is already moving toward the reference instead of repeatedly restarting. Spend the available reasoning "
         "budget on visual comparison and specific geometry decisions rather than generic commentary."
     )

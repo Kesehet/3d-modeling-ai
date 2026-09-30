@@ -7,6 +7,7 @@ from app import main
 from app.component_assembly import component_assembly_script
 from app.feature_tasks import (
     FeaturePlan,
+    FeatureTask,
     load_feature_plan,
     normalize_feature_plan_payload,
     save_feature_plan,
@@ -75,6 +76,67 @@ def test_component_child_job_is_linked_to_parent_feature(tmp_path, monkeypatch):
     wheel = persisted.features[0]
     assert wheel.component_job_id == child_id
     assert wheel.component_depth == 1
+
+
+
+
+def test_component_child_prompt_excludes_parent_owned_sibling_geometry():
+    component = FeatureTask(
+        id="hub",
+        name="Central hub",
+        build_mode="component_job",
+        acceptance_criteria=[
+            "Round cylindrical silhouette",
+            "Includes three equidistant blade mounting sockets",
+        ],
+        target_regions=["central_hub"],
+        owner_scope=["hub_shell"],
+    )
+    sibling = FeatureTask(
+        id="blade-sockets",
+        name="Blade Mounting Sockets",
+        strategy="surface_cutout",
+        target_regions=["hub_perimeter"],
+        owner_scope=["socket_cutouts"],
+    )
+
+    prompt = main._component_child_prompt(
+        {"prompt": "A simple three-blade fan"},
+        component,
+        excluded_features=[sibling],
+    )
+
+    assert "Round cylindrical silhouette" in prompt
+    assert "Includes three equidistant blade mounting sockets" not in prompt
+    assert "Parent-owned exclusions: Blade Mounting Sockets" in prompt
+    assert "Do NOT model them" in prompt
+
+
+def test_component_child_request_carries_structured_parent_ownership_exclusions(
+    tmp_path, monkeypatch
+):
+    parent_id, root, feature = _parent_job(tmp_path, monkeypatch)
+    plan = load_feature_plan(root)
+    assert plan is not None
+    plan.features.append(
+        FeatureTask(
+            id="wheel-opening",
+            name="Wheel Arch Opening",
+            strategy="surface_cutout",
+            target_regions=["fender"],
+            owner_scope=["wheel_arch_cutout"],
+        )
+    )
+    save_feature_plan(root, plan)
+
+    child_id = main._create_component_child_job(parent_id, feature)
+    child_root = main.JOBS_ROOT / child_id
+    child_request = json.loads((child_root / "request.json").read_text(encoding="utf-8"))
+
+    exclusions = child_request["parent_owned_exclusions"]
+    assert any(item["id"] == "wheel-opening" for item in exclusions)
+    assert "Wheel Arch Opening" in child_request["prompt"]
+    assert "context only" in child_request["prompt"]
 
 
 def test_component_child_creation_respects_recursion_depth(tmp_path, monkeypatch):

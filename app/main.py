@@ -1102,13 +1102,20 @@ async def _build_feature_plan(
     except (TypeError, ValueError):
         component_depth = 0
     component_jobs_allowed = component_depth < COMPONENT_MAX_DEPTH
+    parent_owned_exclusions = (
+        job_request.get("parent_owned_exclusions")
+        if isinstance(job_request.get("parent_owned_exclusions"), list)
+        else []
+    )
     component_policy = (
         "Recursive component jobs ARE allowed at this depth. Mark build_mode=component_job for an independently "
         "modelable visible assembly that has meaningful internal visible structure and benefits from isolated QA "
         "(for example a wheel assembly that itself contains a tire, rim and visible fasteners). Keep the primary "
         "supporting body/silhouette and ordinary surface details in_place. A component job will be frozen after its "
         "own children and QA pass, then installed into the parent; do not duplicate its internal details as sibling "
-        "parent features. Repeated identical components should be one component job with count/symmetry metadata, "
+        "parent features. Conversely, if geometry is assigned to a separate sibling/later parent feature, that geometry "
+        "MUST NOT also appear in a component_job's acceptance criteria or required internal feature list. One visible "
+        "piece of geometry gets one owner. Repeated identical components should be one component job with count/symmetry metadata, "
         "not separate rebuilds for each instance. Treat component_job features as terminal assembly leaves at the parent level: "
         "finish all supporting in_place shell/surface work first, and do not make a later in_place feature depend on an "
         "installed component. If a detail only makes sense inside that component, put it in the child component plan. "
@@ -1145,12 +1152,20 @@ async def _build_feature_plan(
         "millimetres, percentages, tolerances, materials, badge dimensions, or other measurements unless the "
         "user/reference evidence explicitly provides them. Phrase criteria as visible shape, proportion, count, "
         "placement, continuity, and identity checks appropriate to that feature's modeling pass."
+        + (
+            " This is an isolated component job. The parent has explicitly reserved some geometry for other feature "
+            "owners. Anything listed under Parent ownership exclusions is CONTEXT ONLY: do not create a feature for it, "
+            "do not require it for this component's acceptance, and do not recursively decompose it inside this child."
+            if job_request.get("component_job") and parent_owned_exclusions
+            else ""
+        )
     )
     prompt = (
         f"Exact user request: {job_request.get('prompt', '')}\n"
         f"Reference scope: {'parent object; focus only on component '+str(job_request.get('component_name')) if job_request.get('component_job') else 'requested whole object'}\n"
         f"Intended use: {job_request.get('intended_use', '')}\n"
         f"Subject inventory: {json.dumps(inventory.model_dump() if inventory else {}, ensure_ascii=False)}\n"
+        f"Parent ownership exclusions: {json.dumps(parent_owned_exclusions, ensure_ascii=False)}\n"
         f"Reference images in order: {reference_labels}\n"
         "List everything visibly important to the requested object's identity, not just a minimal recognition "
         "checklist. Group only truly inseparable micro-details. Keep left/right or repeated instances in one feature "
@@ -1240,8 +1255,43 @@ async def _ensure_feature_plan(
     return await _build_feature_plan(job_id, inventory)
 
 
-def _component_child_prompt(parent_request: dict, feature_task: FeatureTask) -> str:
-    criteria = "; ".join(feature_task.acceptance_criteria) or "Match the visible reference geometry closely."
+def _ownership_name_tokens(value: str) -> set[str]:
+    stop = {
+        "the", "and", "for", "with", "from", "into", "main", "central",
+        "feature", "assembly", "region", "surface", "visible",
+    }
+    return {
+        token
+        for token in re.findall(r"[a-z0-9]+", str(value).casefold())
+        if len(token) > 2 and token not in stop
+    }
+
+
+def _criterion_belongs_to_other_feature(
+    criterion: str,
+    other_features: list[FeatureTask],
+) -> bool:
+    criterion_tokens = _ownership_name_tokens(criterion)
+    for other in other_features:
+        name_tokens = _ownership_name_tokens(other.name)
+        if len(name_tokens) >= 2 and len(criterion_tokens & name_tokens) >= 2:
+            return True
+    return False
+
+
+def _component_child_prompt(
+    parent_request: dict,
+    feature_task: FeatureTask,
+    *,
+    excluded_features: list[FeatureTask] | None = None,
+) -> str:
+    excluded_features = list(excluded_features or [])
+    effective_criteria = [
+        criterion
+        for criterion in feature_task.acceptance_criteria
+        if not _criterion_belongs_to_other_feature(criterion, excluded_features)
+    ]
+    criteria = "; ".join(effective_criteria) or "Match the visible reference geometry closely."
     assembly = "; ".join(feature_task.assembly_notes)
     parent_prompt = str(parent_request.get("prompt") or "parent object")
     count_note = (
@@ -1250,6 +1300,10 @@ def _component_child_prompt(parent_request: dict, feature_task: FeatureTask) -> 
         if feature_task.count > 1
         else "Build one canonical component."
     )
+    exclusions = "; ".join(
+        f"{feature.name} [{', '.join(feature.target_regions + feature.owner_scope)}]"
+        for feature in excluded_features
+    )
     return (
         f"Model ONLY the isolated component '{feature_task.name}' for this parent subject: {parent_prompt}. "
         f"{count_note} Do NOT model the complete parent object. The component must be complete enough to be judged "
@@ -1257,8 +1311,16 @@ def _component_child_prompt(parent_request: dict, feature_task: FeatureTask) -> 
         f"Visible acceptance criteria: {criteria}. "
         f"Target/ownership context: {', '.join(feature_task.target_regions + feature_task.owner_scope)}. "
         + (f"Assembly context: {assembly}. " if assembly else "")
+        + (
+            f"Parent-owned exclusions: {exclusions}. These are handled by separate parent feature owners. "
+            "Do NOT model them, create placeholders for them, recursively decompose them, or make this child depend "
+            "on them for acceptance. If the parent request or reference shows them, treat them as context only. "
+            if exclusions
+            else ""
+        )
         + "Keep the component centered around a sensible mounting/origin point. Decompose it recursively only when "
-        "a visible child assembly has meaningful independent geometry; do not recurse into microscopic or trivial details."
+        "a visible child assembly has meaningful independent geometry AND is not reserved by a parent-owned exclusion; "
+        "do not recurse into microscopic or trivial details."
     )
 
 
@@ -1291,8 +1353,27 @@ def _create_component_child_job(parent_job_id: str, feature_task: FeatureTask) -
         (child_root / category).mkdir(parents=True, exist_ok=True)
 
     child_depth = parent_depth + 1
+    parent_plan = load_feature_plan(parent_root)
+    excluded_features = (
+        [feature for feature in parent_plan.features if feature.id != feature_task.id]
+        if parent_plan is not None
+        else []
+    )
+    parent_owned_exclusions = [
+        {
+            "id": feature.id,
+            "name": feature.name,
+            "target_regions": feature.target_regions,
+            "owner_scope": feature.owner_scope,
+        }
+        for feature in excluded_features
+    ]
     request = {
-        "prompt": _component_child_prompt(parent_request, feature_task),
+        "prompt": _component_child_prompt(
+            parent_request,
+            feature_task,
+            excluded_features=excluded_features,
+        ),
         "intended_use": parent_request.get("intended_use") or "rendering",
         "target_width_mm": None,
         "job_id": child_job_id,
@@ -1304,6 +1385,7 @@ def _create_component_child_job(parent_job_id: str, feature_task: FeatureTask) -
         "parent_job_id": parent_job_id,
         "parent_feature_id": feature_task.id,
         "parent_prompt": parent_request.get("prompt"),
+        "parent_owned_exclusions": parent_owned_exclusions,
     }
     (child_root / "request.json").write_text(
         json.dumps(request, indent=2, ensure_ascii=False),

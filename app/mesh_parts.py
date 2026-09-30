@@ -130,12 +130,16 @@ def create_parametric_part(item, location):
     import bmesh
     bm = bmesh.new()
     bm.from_mesh(obj.data)
-    boundary = [edge for edge in bm.edges if edge.is_boundary]
-    if boundary:
-        bmesh.ops.holes_fill(bm, edges=boundary, sides=0)
-        bmesh.ops.recalc_face_normals(bm, faces=list(bm.faces))
-        bm.to_mesh(obj.data)
-        obj.data.update()
+    for _ in range(4):
+        boundary = [edge for edge in bm.edges if edge.is_boundary]
+        if not boundary:
+            break
+        result = bmesh.ops.holes_fill(bm, edges=boundary, sides=0)
+        if not result.get("faces"):
+            break
+    bmesh.ops.recalc_face_normals(bm, faces=list(bm.faces))
+    bm.to_mesh(obj.data)
+    obj.data.update()
     bm.free()
     return obj
 

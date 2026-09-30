@@ -905,6 +905,31 @@ class GenericSceneSpec(BaseModel):
         return self
 
 
+def _generic_scene_llm_schema() -> dict:
+    """Compact transport schema; full geometry validation stays in GenericSceneSpec."""
+    return {
+        "type": "object",
+        "properties": {
+            "title": {"type": "string"},
+            "rationale": {"type": "string"},
+            "presentation_base": {"type": "boolean"},
+            "objects": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 40,
+                "items": {"type": "object", "additionalProperties": True},
+            },
+            "cutters": {
+                "type": "array",
+                "maxItems": 24,
+                "items": {"type": "object", "additionalProperties": True},
+            },
+        },
+        "required": ["title", "objects"],
+        "additionalProperties": False,
+    }
+
+
 class LoftSection(BaseModel):
     position: float = Field(ge=-10.0, le=10.0)
     contour: list[tuple[float, float]] = Field(min_length=8, max_length=8)
@@ -5313,7 +5338,11 @@ async def _build_generic_scene_spec(
         "pass to the continuous-mesh strategy. If an ACTIVE FEATURE is supplied, this is a feature-scoped "
         "construction pass: author only geometry owned by that active feature. Do not prebuild later features, "
         "supports, mounts, trim, repeated components, or other planned parts merely to make the whole object look "
-        "more complete. The outer modeling loop adds later features after the active one passes review."
+        "more complete. The outer modeling loop adds later features after the active one passes review. "
+        "SceneSpec JSON uses root fields title, rationale, presentation_base, objects, and optional cutters. "
+        "Each object may use name, shape, location, dimensions, scale, rotation_deg, start/end, radius, profile, "
+        "path, segments, color, bevel, smooth, vertices, and faces. Cutters use the same closed geometry fields "
+        "plus target, the exact name of the object being subtracted from; sweep is not a cutter shape."
     )
     prompt = (
         f"User request: {job_request.get('prompt', '')}\n"
@@ -5358,7 +5387,7 @@ async def _build_generic_scene_spec(
                 system=system,
                 prompt=prompt,
                 images=(reference_images or None) if candidate_model in VISION_MODELS else None,
-                schema=GenericSceneSpec.model_json_schema(),
+                schema=_generic_scene_llm_schema(),
                 temperature=0.0,
                 num_predict=8192,
             )
@@ -9123,11 +9152,14 @@ async def refine_generic_scene(job_id: str, request: GenericRefineRequest) -> di
             "or mesh for arbitrary polygons. SceneSpec cutters are subtractive boolean volumes that target an existing "
             "object by exact name. When the active feature strategy or visual diagnosis calls for a cutout, hole, socket "
             "or recess, express it with cutters rather than an additive object. Do not use subject templates. "
-            "Return JSON only matching the schema."
+            "SceneSpec JSON uses root fields title, rationale, presentation_base, objects, and optional cutters. "
+            "Objects may use name, shape, location, dimensions, scale, rotation_deg, start/end, radius, profile, "
+            "path, segments, color, bevel, smooth, vertices, and faces. Cutters use the same closed geometry fields "
+            "plus target. Return JSON only matching the compact transport schema; the runtime applies full geometry validation."
         )
         prompt = (
             f"User request: {job_request.get('prompt', '')}\n"
-            f"Current SceneSpec: {json.dumps(current_spec.model_dump())}\n"
+            f"Current SceneSpec: {json.dumps(geometry_context(current_spec.model_dump()))}\n"
             f"Visual diagnosis: {json.dumps(decision)}\n"
             f"Subject inventory: {json.dumps(inventory.model_dump() if inventory else {})}\n"
             f"Feature plan: {json.dumps(plan.model_dump() if plan else {})}\n"
@@ -9144,7 +9176,7 @@ async def refine_generic_scene(job_id: str, request: GenericRefineRequest) -> di
                 result = await client.chat_json(
                     model=candidate_model, system=system, prompt=prompt,
                     images=(images or None) if candidate_model in VISION_MODELS else None,
-                    schema=GenericSceneSpec.model_json_schema(), temperature=0.0, num_predict=8192,
+                    schema=_generic_scene_llm_schema(), temperature=0.0, num_predict=8192,
                 )
                 revised = GenericSceneSpec.model_validate(_normalize_scene_spec_payload(result.data, current_spec.title))
                 if job_request.get("component_job") is True:

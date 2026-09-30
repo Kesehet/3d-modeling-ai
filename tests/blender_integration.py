@@ -125,6 +125,28 @@ assert all(abs(a-b) < 0.001 for a,b in zip(actual, [0.3,2.5,1.5])), actual
 """, {"spec": {"title": "Sized and rotated block", "presentation_base": False,
                 "objects": [{"name": "block", "shape": "cube", "location": [0,0,0],
                              "dimensions": [0.3,1.5,2.5], "rotation_deg": [90,0,0], "bevel": False}]}})
+    run(root, "procedural_boolean_cutout", generic_scene_script() + r"""
+body = objects[0]
+center_hit, center_location, center_normal, center_index = body.ray_cast(
+    Vector((0, 0, 2)), Vector((0, 0, -1))
+)
+edge_hit, edge_location, edge_normal, edge_index = body.ray_cast(
+    Vector((0.75, 0, 2)), Vector((0, 0, -1))
+)
+assert not center_hit, (center_hit, center_location)
+assert edge_hit and abs(edge_location.z - 0.5) < 0.08, (edge_hit, edge_location)
+""", {"spec": {
+        "title": "Boolean socket",
+        "presentation_base": False,
+        "objects": [{
+            "name": "body", "shape": "cube", "location": [0,0,0],
+            "dimensions": [2,2,1], "bevel": False,
+        }],
+        "cutters": [{
+            "name": "socket", "target": "body", "shape": "cylinder",
+            "location": [0,0,0], "dimensions": [0.5,0.5,2],
+        }],
+    }, "applied_cutters": 1})
     print("BLENDER_INTEGRATION_OK", root)
 
 

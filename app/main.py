@@ -869,11 +869,40 @@ class SceneObjectSpec(ParametricGeometry):
         return self
 
 
+class SceneCutterSpec(SceneObjectSpec):
+    target: str = Field(
+        min_length=1,
+        max_length=80,
+        description="Exact name of the authored SceneObjectSpec to subtract this closed cutter from.",
+    )
+    shape: Literal["sphere", "cube", "cylinder", "cone", "mesh", "lathe"]
+    bevel: bool = False
+    smooth: bool = False
+
+
 class GenericSceneSpec(BaseModel):
     title: str = Field(min_length=1, max_length=120)
     rationale: str = Field(default="", max_length=2000)
     presentation_base: bool = True
     objects: list[SceneObjectSpec] = Field(min_length=1, max_length=40)
+    cutters: list[SceneCutterSpec] = Field(
+        default_factory=list,
+        max_length=24,
+        description=(
+            "Subtractive boolean volumes. Each cutter targets one object by exact name and is removed from exports."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def validate_cutter_targets(self):
+        names = [item.name for item in self.objects]
+        if len(set(names)) != len(names):
+            raise ValueError("Scene object names must be unique so boolean cutter targets are unambiguous.")
+        available = set(names)
+        missing = sorted({cutter.target for cutter in self.cutters if cutter.target not in available})
+        if missing:
+            raise ValueError(f"Boolean cutter targets do not exist: {missing}")
+        return self
 
 
 class LoftSection(BaseModel):
@@ -2210,6 +2239,61 @@ def _normalize_scene_spec_payload(data: object, fallback_title: str) -> dict:
         )
 
     normalized["objects"] = objects
+
+    raw_cutters = normalized.get("cutters")
+    if raw_cutters is None:
+        raw_cutters = []
+    if not isinstance(raw_cutters, list):
+        raise TypeError("SceneSpec cutters must be a list.")
+
+    cutter_shapes = {"sphere", "cube", "cylinder", "cone", "mesh", "lathe"}
+    cutters = []
+    for index, raw in enumerate(raw_cutters[:24]):
+        if not isinstance(raw, dict):
+            continue
+        item = dict(raw)
+        target = str(item.get("target") or item.get("target_name") or "").strip()[:80]
+        if not target:
+            continue
+        shape = str(item.get("shape", item.get("type", "cube"))).lower().strip()
+        shape = shape_aliases.get(shape, shape)
+        if shape not in cutter_shapes:
+            shape = "cube"
+
+        def cutter_vec3(value: object, default: list[float]) -> list[float]:
+            if isinstance(value, (int, float)):
+                return [float(value), float(value), float(value)]
+            if isinstance(value, list) and len(value) >= 3:
+                return [float(value[0]), float(value[1]), float(value[2])]
+            return default
+
+        cutters.append(
+            {
+                "target": target,
+                "name": str(item.get("name") or f"cutter-{index + 1}")[:80],
+                "shape": shape,
+                "location": cutter_vec3(
+                    item.get("location", item.get("position", item.get("center", [0, 0, 0]))),
+                    [0.0, 0.0, 0.0],
+                ),
+                "scale": cutter_vec3(item.get("scale", item.get("size", [1, 1, 1])), [1.0, 1.0, 1.0]),
+                "rotation_deg": cutter_vec3(
+                    item.get("rotation_deg", item.get("rotation", item.get("rotation_degrees", [0, 0, 0]))),
+                    [0.0, 0.0, 0.0],
+                ),
+                "color": "#808080",
+                "bevel": False,
+                "smooth": False,
+                "dimensions": item.get("dimensions"),
+                "profile": item.get("profile") or [],
+                "path": [],
+                "segments": item.get("segments", 64),
+                "vertices": item.get("vertices") or [],
+                "faces": item.get("faces") or [],
+            }
+        )
+
+    normalized["cutters"] = cutters
     return normalized
 
 
@@ -5141,6 +5225,8 @@ def _generic_spatial_guidance(_: str) -> str:
         "- Connected parts should touch or overlap when the real object is physically connected.\n"
         "- Use rod/beam only when start and end are explicitly defined; otherwise use a solid primitive.\n"
         "- Use mesh with local vertices and face indices for shaped panels that primitives cannot express.\n"
+        "- SceneSpec cutters are closed subtractive volumes. Each cutter must name its exact target object. "
+        "Use cutters for holes, sockets, recesses and other negative space; never fake a cutout with an additive object.\n"
         "- Use the reference images, not object-name heuristics, to decide proportions, silhouette and part placement."
     )
 
@@ -5213,7 +5299,9 @@ async def _build_generic_scene_spec(
 
     system = (
         "You are the modeling agent for Blender. Inspect the user request and supplied reference images, then "
-        "design the best declarative SceneSpec with primitives, lathe, sweep and arbitrary mesh parts. "
+        "design the best declarative SceneSpec with primitives, lathe, sweep, arbitrary mesh parts and subtractive "
+        "boolean cutters. A cutter targets one authored object by exact name and removes its closed volume; use cutters "
+        "for visible holes, recesses, sockets and openings instead of modeling those as protrusions. "
         "Lathe revolves a closed [radius,Z] material profile, preserving hollow interiors when the profile includes "
         "inner walls. Sweep makes smooth round-section curved parts from a short XYZ path and radius. "
         "Use these parametric tools instead of approximating curves with boxes. You own the "
@@ -9032,7 +9120,10 @@ async def refine_generic_scene(job_id: str, request: GenericRefineRequest) -> di
             "have already diagnosed the actual renders. Correct the diagnosed geometry and return the complete "
             "replacement SceneSpec. Preserve useful parts and their names. Use full dimensions for primitives, "
             "lathe for revolved material profiles (including hollow walls), sweep for curved round sections, "
-            "or mesh for arbitrary polygons. Do not use subject templates. Return JSON only matching the schema."
+            "or mesh for arbitrary polygons. SceneSpec cutters are subtractive boolean volumes that target an existing "
+            "object by exact name. When the active feature strategy or visual diagnosis calls for a cutout, hole, socket "
+            "or recess, express it with cutters rather than an additive object. Do not use subject templates. "
+            "Return JSON only matching the schema."
         )
         prompt = (
             f"User request: {job_request.get('prompt', '')}\n"

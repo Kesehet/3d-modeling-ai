@@ -208,3 +208,36 @@ def test_generate_procedural_candidate_passes_active_feature_to_planner(tmp_path
     result = asyncio.run(main._generate_procedural_candidate("abc123", feature_task=feature))
     assert seen["feature_task"] is feature
     assert result["feature_id"] == "primary"
+
+
+
+def test_procedural_scene_cutters_are_normalized_and_validate_targets():
+    payload = {
+        "title": "Cut body",
+        "objects": [{
+            "name": "body",
+            "shape": "cube",
+            "location": [0, 0, 0],
+            "dimensions": [2, 2, 1],
+        }],
+        "cutters": [{
+            "name": "opening",
+            "target": "body",
+            "shape": "cylinder",
+            "location": [0, 0, 0],
+            "dimensions": [0.5, 0.5, 2],
+        }],
+    }
+    scene = main.GenericSceneSpec.model_validate(
+        main._normalize_scene_spec_payload(payload, "Cut body")
+    )
+    assert len(scene.cutters) == 1
+    assert scene.cutters[0].target == "body"
+    assert scene.cutters[0].shape == "cylinder"
+    assert scene.cutters[0].dimensions == [0.5, 0.5, 2]
+
+    payload["cutters"][0]["target"] = "missing"
+    with pytest.raises(ValidationError, match="targets do not exist"):
+        main.GenericSceneSpec.model_validate(
+            main._normalize_scene_spec_payload(payload, "Cut body")
+        )

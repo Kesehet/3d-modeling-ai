@@ -5034,7 +5034,12 @@ def _generic_spatial_guidance(_: str) -> str:
     )
 
 
-async def _build_generic_scene_spec(job_id: str, auto_research: bool) -> GenericSceneSpec:
+async def _build_generic_scene_spec(
+    job_id: str,
+    auto_research: bool,
+    *,
+    feature_task: FeatureTask | None = None,
+) -> GenericSceneSpec:
     root = _require_job(job_id)
     job_request = json.loads((root / "request.json").read_text(encoding="utf-8"))
 
@@ -5093,6 +5098,7 @@ async def _build_generic_scene_spec(job_id: str, auto_research: bool) -> Generic
     inventory_context = inventory.model_dump() if inventory is not None else {}
     feature_plan = await _ensure_feature_plan(job_id, inventory)
     feature_plan_context = feature_plan.model_dump() if feature_plan is not None else {}
+    active_feature_context = feature_task.model_dump() if feature_task is not None else {}
 
     system = (
         "You are the modeling agent for Blender. Inspect the user request and supplied reference images, then "
@@ -5105,7 +5111,10 @@ async def _build_generic_scene_spec(job_id: str, auto_research: bool) -> Generic
         "the supplied schema. Use rod or beam only when both start and end are explicitly provided. Coordinates "
         "should normally stay within -8..8, with Z up and negative Y facing the front camera. If primitives are "
         "a poor fit, still produce the strongest honest blockout you can; the AI director can switch the next "
-        "pass to the continuous-mesh strategy."
+        "pass to the continuous-mesh strategy. If an ACTIVE FEATURE is supplied, this is a feature-scoped "
+        "construction pass: author only geometry owned by that active feature. Do not prebuild later features, "
+        "supports, mounts, trim, repeated components, or other planned parts merely to make the whole object look "
+        "more complete. The outer modeling loop adds later features after the active one passes review."
     )
     prompt = (
         f"User request: {job_request.get('prompt', '')}\n"
@@ -5115,13 +5124,15 @@ async def _build_generic_scene_spec(job_id: str, auto_research: bool) -> Generic
         f"Web research context: {json.dumps(research_context, ensure_ascii=False)}\n"
         f"Required subject inventory: {json.dumps(inventory_context, ensure_ascii=False)}\n"
         f"Coordinated visible-feature plan: {json.dumps(feature_plan_context, ensure_ascii=False)}\n"
+        f"ACTIVE FEATURE FOR THIS PASS: {json.dumps(active_feature_context, ensure_ascii=False)}\n"
         f"Spatial/modeling guidance:\n{_generic_spatial_guidance(str(job_request.get('prompt') or ''))}\n"
-        "Create the complete SceneSpec. Favor visual recognizability and the reference evidence over a "
-        "small object count. You may use as much of the available object budget as the subject genuinely needs. "
-        "IMPORTANT OWNERSHIP RULE: any FeaturePlan entry with build_mode=component_job is owned by its isolated "
-        "child job. Do NOT author that component's final geometry in this parent SceneSpec and do not leave a crude "
-        "placeholder that would survive into the final model. Shape the supporting parent/mounting region so the "
-        "frozen child component can be installed later, but reserve the component geometry itself for the child."
+        "Create the SceneSpec for the CURRENT construction state. When ACTIVE FEATURE is non-empty, include only "
+        "geometry owned by that feature; every other non-accepted feature must remain absent until its own pass. "
+        "Do not add placeholders for later features. Favor recognizability of the active feature and its reference "
+        "evidence over whole-object completeness. IMPORTANT OWNERSHIP RULE: any FeaturePlan entry with "
+        "build_mode=component_job is owned by its isolated child job. Do NOT author that component's final geometry "
+        "in this parent SceneSpec. Shape a mounting region only when that mounting/support geometry itself belongs "
+        "to the ACTIVE FEATURE; otherwise leave it for its later feature pass."
     )
     reference_images, reference_labels = _collect_images(
         root,
@@ -8640,7 +8651,9 @@ async def _generate_procedural_candidate(job_id: str, *, feature_task: FeatureTa
     previous = _read_status(root)
     feature_task = feature_task or begin_feature(root)
     _write_status(root, state="running", stage="planning_procedural_geometry")
-    spec = await _build_generic_scene_spec(job_id, auto_research=False)
+    spec = await _build_generic_scene_spec(
+        job_id, auto_research=False, feature_task=feature_task,
+    )
     version = reserve_model_version(root)
     build = await _execute_generic_spec(job_id, spec, version=version, activate_status=False)
     return await _review_procedural_candidate(job_id, build, previous, feature_task)

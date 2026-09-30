@@ -5009,6 +5009,10 @@ async def _compare_generic_versions(
 def _feature_diagnostic_views(feature_task: FeatureTask) -> tuple[str, ...]:
     if feature_task.strategy == "base_mesh_region":
         return ("front-left", "left", "back-right")
+    if feature_task.symmetry == "radial" and feature_task.count > 1:
+        # Repeated radial features cannot be count-verified from side views alone.
+        # Include the top view plus opposed obliques so QA can see the pattern.
+        return ("top", "front-left", "left", "back-right")
     text = " ".join(
         [
             feature_task.name,

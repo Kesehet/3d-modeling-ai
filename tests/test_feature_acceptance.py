@@ -1,5 +1,5 @@
 from app.feature_tasks import FeatureTask
-from app.main import _feature_evaluation_accepts
+from app.main import _feature_diagnostic_views, _feature_evaluation_accepts
 
 
 def _body_task() -> FeatureTask:
@@ -72,3 +72,22 @@ def test_completed_local_shape_can_pass_before_other_components_are_built():
     }
 
     assert _feature_evaluation_accepts(task, evaluation) is True
+
+
+
+def test_radial_repeated_feature_qa_includes_top_view():
+    task = FeatureTask(
+        id="radial-openings",
+        name="Repeated radial openings",
+        count=3,
+        strategy="surface_cutout",
+        symmetry="radial",
+        acceptance_criteria=["Three evenly spaced openings"],
+    )
+
+    views = _feature_diagnostic_views(task)
+
+    assert "top" in views
+    assert "front-left" in views
+    assert "back-right" in views
+    assert len(views) >= 3

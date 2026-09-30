@@ -122,3 +122,89 @@ def test_finished_existing_feature_advances_without_rebuilding(tmp_path, monkeyp
     plan = load_feature_plan(root)
     assert plan.features[0].accepted_version == 4
     assert plan.features[1].status == "ready"
+
+
+def test_initial_procedural_planner_is_scoped_to_active_feature(tmp_path, monkeypatch):
+    root, feature = setup_job(tmp_path, monkeypatch)
+    (root / "logs").mkdir()
+    prompts = []
+
+    async def inventory(*args, **kwargs):
+        return main.SubjectInventory(
+            subject_family="assembly",
+            minimum_distinct_parts=2,
+            major_parts=[
+                {"name": "Main mass", "count": 1, "importance": "required"},
+                {"name": "Secondary part", "count": 1, "importance": "important"},
+            ],
+        )
+
+    async def ensure_plan(*args, **kwargs):
+        return load_feature_plan(root)
+
+    async def chat(self, **kwargs):
+        prompts.append(kwargs["prompt"])
+        return type("Result", (), {
+            "data": {
+                "title": "Active feature only",
+                "presentation_base": False,
+                "objects": [{
+                    "name": "main-mass",
+                    "shape": "cylinder",
+                    "location": [0, 0, 0],
+                    "dimensions": [2, 2, 0.5],
+                }],
+            },
+            "endpoint": "test",
+            "usage": {},
+        })()
+
+    monkeypatch.setattr(main, "_build_subject_inventory", inventory)
+    monkeypatch.setattr(main, "_ensure_feature_plan", ensure_plan)
+    monkeypatch.setattr(main, "_collect_images", lambda *args, **kwargs: ([], []))
+    monkeypatch.setattr(main.OllamaProxyClient, "chat_json", chat)
+
+    spec = asyncio.run(main._build_generic_scene_spec(
+        "abc123", auto_research=False, feature_task=feature,
+    ))
+
+    assert len(spec.objects) == 1
+    assert prompts
+    prompt = prompts[0]
+    assert "ACTIVE FEATURE FOR THIS PASS" in prompt
+    assert '"id": "primary"' in prompt
+    assert "include only geometry owned by that feature" in prompt
+    assert "every other non-accepted feature must remain absent" in prompt
+
+
+def test_generate_procedural_candidate_passes_active_feature_to_planner(tmp_path, monkeypatch):
+    root, feature = setup_job(tmp_path, monkeypatch)
+    seen = {}
+
+    async def build_spec(job_id, auto_research, *, feature_task=None):
+        seen["feature_task"] = feature_task
+        return main.GenericSceneSpec(
+            title="Primary",
+            presentation_base=False,
+            objects=[{
+                "name": "main",
+                "shape": "cylinder",
+                "location": [0, 0, 0],
+                "dimensions": [2, 2, 0.5],
+            }],
+        )
+
+    async def execute(job_id, spec, *, version, activate_status=True):
+        return {"candidate_model": {"version": version}, "spec": spec.model_dump()}
+
+    async def review(job_id, build, previous, feature_task, **kwargs):
+        return {"feature_id": feature_task.id, "candidate_model": build["candidate_model"]}
+
+    monkeypatch.setattr(main, "_build_generic_scene_spec", build_spec)
+    monkeypatch.setattr(main, "_execute_generic_spec", execute)
+    monkeypatch.setattr(main, "_review_procedural_candidate", review)
+    monkeypatch.setattr(main, "reserve_model_version", lambda root: 1)
+
+    result = asyncio.run(main._generate_procedural_candidate("abc123", feature_task=feature))
+    assert seen["feature_task"] is feature
+    assert result["feature_id"] == "primary"

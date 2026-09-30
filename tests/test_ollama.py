@@ -1,6 +1,9 @@
+import asyncio
+
+import httpx
 import pytest
 
-from app.ollama import OllamaProxyError, decode_structured_json
+from app.ollama import OllamaProxyClient, OllamaProxyError, decode_structured_json
 
 
 def test_decode_structured_json_plain() -> None:
@@ -57,3 +60,30 @@ def test_properties_recovery_never_treats_a_copied_schema_as_a_verdict():
 def test_properties_field_without_output_schema_is_preserved():
     raw = {"properties": {"name": "a legitimate object"}}
     assert decode_structured_json(raw) == raw
+
+
+
+def test_chat_403_falls_back_to_generate(monkeypatch):
+    calls = []
+
+    async def fake_post(self, path, payload):
+        calls.append(path)
+        request = httpx.Request("POST", "https://proxy.test" + path)
+        if path == "/api/chat":
+            return httpx.Response(403, request=request, text="Forbidden")
+        return httpx.Response(
+            200,
+            request=request,
+            json={"response": "{\"ok\": true}", "prompt_eval_count": 3, "eval_count": 2},
+        )
+
+    monkeypatch.setattr(OllamaProxyClient, "_post", fake_post)
+    result = asyncio.run(OllamaProxyClient(api_key="test", base_url="https://proxy.test").chat_json(
+        model="test-model",
+        system="Return JSON.",
+        prompt="Say ok.",
+    ))
+
+    assert calls == ["/api/chat", "/api/generate"]
+    assert result.data == {"ok": True}
+    assert result.endpoint == "/api/generate"

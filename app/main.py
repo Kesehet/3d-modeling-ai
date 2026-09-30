@@ -919,6 +919,25 @@ class GenericSceneSpec(BaseModel):
         return self
 
 
+def _apply_feature_radial_pattern(
+    spec: GenericSceneSpec,
+    feature_task: FeatureTask | None,
+) -> GenericSceneSpec:
+    """Promote one cutter seed into deterministic radial repetition when the feature says so."""
+    if (
+        feature_task is None
+        or str(feature_task.symmetry or "").lower() != "radial"
+        or int(feature_task.count or 1) <= 1
+        or len(spec.cutters) != 1
+        or spec.cutters[0].radial_repeat_count != 1
+    ):
+        return spec
+    repeated = spec.cutters[0].model_copy(
+        update={"radial_repeat_count": min(16, int(feature_task.count))}
+    )
+    return spec.model_copy(update={"cutters": [repeated]})
+
+
 def _generic_scene_llm_schema() -> dict:
     """Compact transport schema; full geometry validation stays in GenericSceneSpec."""
     return {
@@ -5431,6 +5450,7 @@ async def _build_generic_scene_spec(
                 str(job_request.get("prompt") or "Generated model"),
             )
             candidate_spec = GenericSceneSpec.model_validate(normalized)
+            candidate_spec = _apply_feature_radial_pattern(candidate_spec, feature_task)
             if job_request.get("component_job") is True:
                 candidate_spec.presentation_base = False
         except (OllamaProxyError, httpx.HTTPError, ValidationError, ValueError, TypeError) as exc:
@@ -9216,6 +9236,7 @@ async def refine_generic_scene(job_id: str, request: GenericRefineRequest) -> di
                     schema=_generic_scene_llm_schema(), temperature=0.0, num_predict=8192,
                 )
                 revised = GenericSceneSpec.model_validate(_normalize_scene_spec_payload(result.data, current_spec.title))
+                revised = _apply_feature_radial_pattern(revised, feature_task)
                 if job_request.get("component_job") is True:
                     revised.presentation_base = False
             except (OllamaProxyError, httpx.HTTPError, ValidationError, ValueError, TypeError) as exc:

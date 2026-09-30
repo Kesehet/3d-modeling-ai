@@ -9,6 +9,7 @@ from app.feature_tasks import (
     mark_component_ready,
     normalize_feature_plan_payload,
     record_feature_progress,
+    retry_feature,
     save_feature_plan,
 )
 
@@ -526,3 +527,30 @@ def test_feature_can_keep_partial_progress_without_consuming_another_attempt(tmp
     assert again is not None
     assert again.id == first.id
     assert again.attempts == 1
+
+
+
+def test_retry_feature_reopens_failed_dependency_chain(tmp_path):
+    plan = _car_plan()
+    body = plan.features[0]
+    body.status = "failed"
+    body.attempts = 3
+    body.last_error = "Old strict QA failure."
+    plan.features[1].status = "blocked"
+    plan.features[1].last_error = "Blocked because required dependency failed: body-shell"
+    plan.features[2].status = "blocked"
+    plan.features[2].last_error = "Blocked because required dependency failed: body-shell"
+    save_feature_plan(tmp_path, plan)
+
+    retried = retry_feature(tmp_path, "body-shell", reset_attempts=True)
+
+    assert retried is not None
+    body = next(feature for feature in retried.features if feature.id == "body-shell")
+    wheels = next(feature for feature in retried.features if feature.id == "wheels")
+    windows = next(feature for feature in retried.features if feature.id == "windows")
+    assert body.status == "retry"
+    assert body.attempts == 0
+    assert body.last_error == ""
+    assert wheels.status == "pending"
+    assert windows.status == "pending"
+    assert retried.active_feature_id is None

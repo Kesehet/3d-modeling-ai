@@ -6431,6 +6431,29 @@ async def _decide_hard_surface_cage_edit(
         }
         for index, cutter in enumerate(spec.cutters)
     ]
+    max_half_width = max(float(item["half_width"]) for item in station_envelope)
+    min_bottom = min(float(item["bottom"]) for item in station_envelope)
+    max_top = max(float(item["top"]) for item in station_envelope)
+    current_axis_span = position_span
+    current_dimensions_xyz = (
+        [current_axis_span, max_half_width * 2.0, max_top - min_bottom]
+        if spec.axis == "x"
+        else [max_half_width * 2.0, current_axis_span, max_top - min_bottom]
+    )
+    declared_dimensions_xyz = (
+        [float(value) for value in spec.intended_dimensions_xyz]
+        if spec.intended_dimensions_xyz is not None
+        else None
+    )
+    envelope_relative_error = None
+    envelope_matches_declared = False
+    if declared_dimensions_xyz and all(value > 0.0 for value in declared_dimensions_xyz):
+        envelope_relative_error = [
+            abs(current - declared) / declared
+            for current, declared in zip(current_dimensions_xyz, declared_dimensions_xyz, strict=True)
+        ]
+        envelope_matches_declared = max(envelope_relative_error) <= 0.12
+
     feature_context = feature_task.model_dump() if feature_task is not None else {}
     primary_form_pass = (
         quality_gate.get("recognizable") is not True
@@ -6450,8 +6473,13 @@ async def _decide_hard_surface_cage_edit(
         "make a visible improvement. Use relative factors/fractions instead of inventing absolute coordinates. "
         "Work like a production 3D modeler: establish the blockout, overall proportions, and readable silhouette "
         "before spending edits on secondary forms or detail. Compare the side/front/top envelopes and major transitions. "
-        "reshape_cage_proportions changes the whole length/width/height envelope; reshape_station_region behaves like "
-        "bounded proportional editing around one station with smooth falloff into neighboring connected sections; "
+        "reshape_cage_proportions changes the whole length/width/height envelope and is ONLY appropriate when the "
+        "global envelope itself is wrong. If the current computed XYZ envelope already agrees with the declared "
+        "reference-driven target within about 12%, do not use whole-object scaling to manufacture local landmarks; "
+        "use reshape_station_region, reshape_station, reshape_profile_point, or insert_station to shape the hood, "
+        "roof peak, transitions, taper, or other regional silhouette structure instead. "
+        "reshape_station_region behaves like bounded proportional editing around one station with smooth falloff into "
+        "neighboring connected sections; "
         "reshape_station changes one entire cross-section; reshape_profile_point changes one local profile point; "
         "insert_station adds control where silhouette curvature is under-resolved; remove_station removes a harmful "
         "intermediate section; adjust_cutter changes one existing opening/cut; remove_cutter removes a clearly harmful "
@@ -6502,6 +6530,12 @@ async def _decide_hard_surface_cage_edit(
         f"ACTIVE FEATURE (if any): {json.dumps(feature_context, ensure_ascii=False)}\n"
         f"Current quality critique: {json.dumps(quality_gate, ensure_ascii=False)}\n"
         f"MODELING PASS: {modeling_pass}\n"
+        f"Declared reference-driven target dimensions XYZ: {json.dumps(declared_dimensions_xyz)}\n"
+        f"Current cage dimensions XYZ computed from stations: {json.dumps(current_dimensions_xyz)}\n"
+        f"Relative envelope error versus declared target: {json.dumps(envelope_relative_error)}; "
+        f"envelope_matches_declared_within_12pct={envelope_matches_declared}\n"
+        "If the envelope already matches the declared target, solve visible silhouette/transition problems locally "
+        "instead of rescaling the entire object.\n"
         f"Station envelope (normalized longitudinal position, half-width, bottom, top): "
         f"{json.dumps(station_envelope, ensure_ascii=False)}\n"
         + f"Full station profile geometry: {json.dumps(station_summary, ensure_ascii=False)}\n"

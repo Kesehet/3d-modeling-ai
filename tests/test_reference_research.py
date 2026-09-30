@@ -5,6 +5,7 @@ from io import BytesIO
 import httpx
 from PIL import Image
 
+from app import main
 from app.dashboard import _reference_rows
 from app.main import (
     ReferencePackDecision,
@@ -471,3 +472,100 @@ def test_reference_coherence_normalizer_never_drops_first_anchor():
     assert normalized["anchor_stored_name"] == "anchor.jpg"
     assert normalized["keep_stored_names"][0] == "anchor.jpg"
     assert "other.jpg" in normalized["keep_stored_names"]
+
+
+
+def test_generic_subject_reference_accepts_same_category_geometry(tmp_path, monkeypatch):
+    refs = tmp_path / "references"
+    refs.mkdir()
+    (tmp_path / "logs").mkdir()
+    candidate = refs / "candidate-fan.jpg"
+    Image.new("RGB", (400, 300), "white").save(candidate)
+
+    plan = ReferenceSearchPlan(
+        primary_query="white modern 3-blade ceiling fan",
+        discovery_query="ceiling fan",
+        subject_description="A simple modern white three-blade ceiling fan.",
+        identity_constraints=["white finish", "three blades"],
+    )
+    records = [{
+        "stored_name": candidate.name,
+        "provider": "wikimedia_commons",
+        "title": "File:Ceiling fan installed in room.jpg",
+        "source_title": "Ceiling fan installed in room",
+        "description": "A three-blade ceiling fan.",
+    }]
+    seen = {}
+
+    async def chat(self, **kwargs):
+        seen["system"] = kwargs["system"]
+        seen["prompt"] = kwargs["prompt"]
+        return type("Result", (), {
+            "data": {"decisions": [{
+                "stored_name": candidate.name,
+                "accept": True,
+                "match_score": 0.82,
+                "exact_identity_match": False,
+                "useful_for_geometry": True,
+                "reason": "Same subject category with clear housing, downrod and blade geometry.",
+            }]},
+            "endpoint": "test",
+            "usage": {},
+        })()
+
+    monkeypatch.setattr(main, "_encode_vision_images", lambda paths: ["pixels"] * len(paths))
+    monkeypatch.setattr(main.OllamaProxyClient, "chat_json", chat)
+
+    accepted, rejected = asyncio.run(main._verify_reference_batch(
+        tmp_path, plan=plan, query="ceiling fan", records=records,
+    ))
+
+    assert len(accepted) == 1
+    assert rejected == []
+    assert "GENERIC SUBJECT reconstruction" in seen["system"]
+    assert "Generic subject geometry mode: True" in seen["prompt"]
+
+
+def test_named_identity_reference_still_requires_exact_match(tmp_path, monkeypatch):
+    refs = tmp_path / "references"
+    refs.mkdir()
+    (tmp_path / "logs").mkdir()
+    candidate = refs / "candidate-car.jpg"
+    Image.new("RGB", (400, 300), "gray").save(candidate)
+
+    plan = ReferenceSearchPlan(
+        primary_query="Toyota Prius",
+        discovery_query="Toyota Prius",
+        subject_description="A Toyota Prius passenger car.",
+    )
+    records = [{
+        "stored_name": candidate.name,
+        "provider": "wikimedia_commons",
+        "title": "File:Toyota Corolla front.jpg",
+        "source_title": "Toyota Corolla front",
+        "description": "Toyota Corolla passenger car.",
+    }]
+
+    async def chat(self, **kwargs):
+        return type("Result", (), {
+            "data": {"decisions": [{
+                "stored_name": candidate.name,
+                "accept": True,
+                "match_score": 0.95,
+                "exact_identity_match": False,
+                "useful_for_geometry": True,
+                "reason": "Clear car geometry but not the requested named model.",
+            }]},
+            "endpoint": "test",
+            "usage": {},
+        })()
+
+    monkeypatch.setattr(main, "_encode_vision_images", lambda paths: ["pixels"] * len(paths))
+    monkeypatch.setattr(main.OllamaProxyClient, "chat_json", chat)
+
+    accepted, rejected = asyncio.run(main._verify_reference_batch(
+        tmp_path, plan=plan, query="Toyota Prius", records=records,
+    ))
+
+    assert accepted == []
+    assert len(rejected) == 1

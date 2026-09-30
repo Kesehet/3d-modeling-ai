@@ -3885,6 +3885,11 @@ async def _verify_reference_batch(
         }
         for record in usable_records
     ]
+    generic_geometry_mode = bool(
+        str(plan.discovery_query or "").strip()
+        and str(plan.primary_query or "").strip()
+        and str(plan.discovery_query).strip().casefold() != str(plan.primary_query).strip().casefold()
+    )
     system = (
         "You are a strict visual reference curator for 3D reconstruction. Inspect the ACTUAL PIXELS of every supplied "
         "candidate image. Accept an image only when it clearly depicts the exact requested subject and is useful for "
@@ -3892,17 +3897,24 @@ async def _verify_reference_batch(
         "objects, logos, maps, diagrams, screenshots, isolated parts, "
         "or images where identity is uncertain. Only enforce a particular year/generation/trim when it is explicitly "
         "present in the user's requested identity/constraints; otherwise do not fail a genuine subject merely because "
-        "its generation was not specified. Use filenames/titles as supporting evidence, never as a substitute for pixels. "
-        "A useful geometry reference "
-        "should show a substantial portion of the requested subject with readable silhouette/proportions. Return one "
-        "decision for every supplied stored_name. exact_identity_match must be true for accepted images. "
-        "useful_for_geometry must also be true for accepted images. Return JSON only."
+        "its generation was not specified. When the discovery query is broader than the primary query, the request is "
+        "a GENERIC SUBJECT reconstruction rather than a named identity lookup. In that mode, color, background, room "
+        "context, styling, and other descriptive attributes are target characteristics, not identity by themselves. "
+        "A clear same-category subject can still be useful geometry evidence even when some target attributes differ. "
+        "Do not reject solely because the object is installed/in context rather than isolated. A mismatch in major "
+        "geometry such as repeated-part count should lower match_score and usefulness when it would mislead modeling, "
+        "but it does not make all shared geometry unusable. For named make/model/product/character requests remain "
+        "strict. Use filenames/titles as supporting evidence, never as a substitute for pixels. A useful geometry "
+        "reference should show a substantial portion of the requested subject with readable silhouette/proportions. "
+        "Return one decision for every supplied stored_name. In generic-subject mode exact_identity_match may be false "
+        "for an otherwise accepted same-category geometry reference; useful_for_geometry must be true. Return JSON only."
     )
     prompt = (
         f"Primary requested identity: {plan.primary_query}\n"
         f"Subject description: {plan.subject_description}\n"
         f"Identity constraints: {json.dumps(plan.identity_constraints, ensure_ascii=False)}\n"
         f"Search query used: {query}\n"
+        f"Generic subject geometry mode: {generic_geometry_mode}\n"
         f"Candidate metadata in image order: {json.dumps(metadata, ensure_ascii=False)}\n"
         f"Image labels in order: {labels}\n"
         "Be conservative. A false positive reference can corrupt the entire 3D model."
@@ -3984,6 +3996,11 @@ async def _verify_reference_batch(
             and decision.match_score >= 0.70
             and (
                 decision.exact_identity_match
+                or (
+                    generic_geometry_mode
+                    and decision.match_score >= 0.70
+                    and not decision.score_inferred
+                )
                 or (metadata_identity and decision.match_score >= 0.78)
             )
             and (

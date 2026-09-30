@@ -123,7 +123,21 @@ def create_parametric_part(item, location):
     obj.select_set(True)
     bpy.context.view_layer.objects.active = obj
     bpy.ops.object.convert(target="MESH")
-    return bpy.context.object
+    obj = bpy.context.object
+    # Curve conversion may leave the two tube ends as boundary loops even when
+    # use_fill_caps is enabled. A sweep is defined as a capped solid, so close
+    # those boundaries deterministically before the common transform/QA path.
+    import bmesh
+    bm = bmesh.new()
+    bm.from_mesh(obj.data)
+    boundary = [edge for edge in bm.edges if edge.is_boundary]
+    if boundary:
+        bmesh.ops.holes_fill(bm, edges=boundary, sides=0)
+        bmesh.ops.recalc_face_normals(bm, faces=list(bm.faces))
+        bm.to_mesh(obj.data)
+        obj.data.update()
+    bm.free()
+    return obj
 
 
 def apply_part_transform(obj, item):

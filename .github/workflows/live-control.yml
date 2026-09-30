@@ -198,6 +198,24 @@ jobs:
               capture_job "$job_id"
               [ "$code" -ge 200 ] && [ "$code" -lt 300 ] || status=1
               ;;
+            retry-feature)
+              read -r job_id feature_id version _ <<< "$rest"
+              if [ -z "$job_id" ] || [ -z "$feature_id" ]; then
+                echo "retry-feature requires: <job_id> <feature_id> [model_version]" >&2
+                status=2
+              else
+                if [ -n "${version:-}" ]; then
+                  payload=$(jq -nc --arg feature_id "$feature_id" --argjson model_version "$version"                     '{feature_id:$feature_id,model_version:$model_version,reset_attempts:true}')
+                else
+                  payload=$(jq -nc --arg feature_id "$feature_id"                     '{feature_id:$feature_id,reset_attempts:true}')
+                fi
+                code=$(api_json POST "/v1/jobs/$job_id/features/retry" "$payload" diagnostics/json/retry-feature.json)
+                echo "RETRY_FEATURE_HTTP=$code"
+                cat diagnostics/json/retry-feature.json | jq . || cat diagnostics/json/retry-feature.json
+                capture_job "$job_id"
+                [ "$code" -ge 200 ] && [ "$code" -lt 300 ] || status=1
+              fi
+              ;;
             inspect|snapshot)
               read -r job_id _ <<< "$rest"
               if [ -z "$job_id" ]; then
@@ -218,7 +236,7 @@ jobs:
               ;;
             *)
               echo "Unknown action: $action" >&2
-              echo "Supported: diagnose, create, research, generate, auto, inspect, snapshot, delete" >&2
+              echo "Supported: diagnose, create, research, generate, auto, retry-feature, inspect, snapshot, delete" >&2
               status=2
               ;;
           esac

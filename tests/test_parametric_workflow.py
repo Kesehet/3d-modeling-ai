@@ -128,6 +128,7 @@ def test_initial_procedural_planner_is_scoped_to_active_feature(tmp_path, monkey
     root, feature = setup_job(tmp_path, monkeypatch)
     (root / "logs").mkdir()
     prompts = []
+    calls = []
 
     async def inventory(*args, **kwargs):
         return main.SubjectInventory(
@@ -144,6 +145,7 @@ def test_initial_procedural_planner_is_scoped_to_active_feature(tmp_path, monkey
 
     async def chat(self, **kwargs):
         prompts.append(kwargs["prompt"])
+        calls.append(kwargs)
         return type("Result", (), {
             "data": {
                 "title": "Active feature only",
@@ -175,6 +177,17 @@ def test_initial_procedural_planner_is_scoped_to_active_feature(tmp_path, monkey
     assert '"id": "primary"' in prompt
     assert "include only geometry owned by that feature" in prompt
     assert "every other non-accepted feature must remain absent" in prompt
+    assert calls[0]["schema"] == main._generic_scene_llm_schema()
+
+
+def test_generic_scene_transport_schema_stays_compact():
+    schema = main._generic_scene_llm_schema()
+    encoded = json.dumps(schema, separators=(",", ":"))
+    assert "$defs" not in encoded
+    assert len(encoded) < 1200
+    assert schema["properties"]["objects"]["maxItems"] == 40
+    assert schema["properties"]["cutters"]["maxItems"] == 24
+    assert schema["properties"]["objects"]["items"]["additionalProperties"] is True
 
 
 def test_generate_procedural_candidate_passes_active_feature_to_planner(tmp_path, monkeypatch):

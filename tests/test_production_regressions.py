@@ -743,8 +743,14 @@ def test_visual_edit_brief_drives_reasoning_geometry_with_full_profiles(tmp_path
         (root / "renders" / f"model-v1-{view}.png").write_bytes(b"render")
     monkeypatch.setattr(main, "_usable_reference_index", lambda r: [{"stored_name": "source.jpg"}])
     monkeypatch.setattr(main, "_encode_vision_images", lambda paths: ["pixels"] * len(paths))
-    spec = main.HardSurfaceCageSpec(title="Envelope", stations=[
-        {"position": p, "profile": [[0,0],[1,0],[1,1],[0,1]]} for p in [-2,-1,1,2]])
+    spec = main.HardSurfaceCageSpec(
+        title="Envelope",
+        intended_dimensions_xyz=[2, 4, 1],
+        stations=[
+            {"position": p, "profile": [[0,0],[1,0],[1,1],[0,1]]}
+            for p in [-2,-1,1,2]
+        ],
+    )
     calls = []
 
     async def chat(self, **kwargs):
@@ -756,6 +762,9 @@ def test_visual_edit_brief_drives_reasoning_geometry_with_full_profiles(tmp_path
             assert kwargs["model"] == main.REASONING_MODEL and kwargs["images"] is None
             assert "Full station profile geometry:" in kwargs["prompt"]
             assert "Top transition is too abrupt" in kwargs["prompt"]
+            assert "Declared reference-driven target dimensions XYZ: [2.0, 4.0, 1.0]" in kwargs["prompt"]
+            assert "Current cage dimensions XYZ computed from stations: [2.0, 4.0, 1.0]" in kwargs["prompt"]
+            assert "envelope_matches_declared_within_12pct=True" in kwargs["prompt"]
             data = {"operation": "reshape_profile_point", "target_index": 1, "point_index": 2,
                     "point_height_offset_fraction": .1, "reason": "Smooth the upper transition"}
         return OllamaJSONResult(data=data, endpoint="test", usage={})

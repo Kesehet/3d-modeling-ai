@@ -8744,6 +8744,24 @@ async def _generate_adaptive_mesh_fallback(
     build["status"] = status
     return build
 
+def _constrain_director_action_for_feature(
+    action: str,
+    *,
+    current_strategy: str,
+    feature_task: FeatureTask | None,
+) -> str:
+    """Keep feature work on a representation that can express its required operation."""
+
+    if (
+        feature_task is not None
+        and feature_task.strategy == "surface_cutout"
+        and current_strategy == "procedural"
+        and action in {"build_mesh", "rebuild_mesh"}
+    ):
+        return "revise_procedural"
+    return action
+
+
 async def _ask_modeling_director(
     job_id: str,
     *,
@@ -8857,9 +8875,16 @@ async def _ask_modeling_director(
             # The whole object cannot be declared finished while the coordinator
             # still has an unresolved visible feature sub-job.
             action = "refine_mesh" if current_strategy == "adaptive_loft" else "revise_procedural"
+        original_action = action
+        action = _constrain_director_action_for_feature(
+            action,
+            current_strategy=current_strategy,
+            feature_task=feature_task,
+        )
         payload = {
             **decision.model_dump(),
             "action": action,
+            "original_action": original_action,
             "model": candidate_model,
             "endpoint": result.endpoint,
             "usage": result.usage,

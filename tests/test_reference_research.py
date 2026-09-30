@@ -172,6 +172,23 @@ def test_automatic_reference_is_not_usable_until_visually_verified():
     assert _is_usable_reference_record(record) is False
 
 
+def test_verified_generic_geometry_reference_is_usable_without_exact_identity():
+    record = {
+        "stored_name": "candidate-fan.jpg",
+        "provider": "wikimedia_commons",
+        "verified": True,
+        "match_score": 0.82,
+        "exact_identity_match": False,
+        "generic_geometry_reference": True,
+        "useful_for_geometry": True,
+    }
+
+    assert _is_usable_reference_record(record) is True
+
+    record["useful_for_geometry"] = False
+    assert _is_usable_reference_record(record) is False
+
+
 def test_user_uploaded_reference_remains_authoritative():
     record = {
         "stored_name": "ref-user.jpg",

@@ -53,6 +53,7 @@ from .feature_tasks import (
     mark_component_ready,
     normalize_feature_plan_payload,
     record_feature_progress,
+    retry_feature,
     save_feature_plan,
 )
 from .generic_builder import generic_scene_script
@@ -814,6 +815,12 @@ class GenericGenerateRequest(BaseModel):
 
 class AutoImproveRequest(BaseModel):
     rounds: int = Field(default=30, ge=1, le=30)
+
+
+class FeatureRetryRequest(BaseModel):
+    feature_id: str = Field(min_length=1, max_length=80)
+    model_version: int | None = Field(default=None, ge=1)
+    reset_attempts: bool = True
 
 
 class GenericRefineRequest(BaseModel):
@@ -4669,6 +4676,120 @@ async def job_features(job_id: str) -> dict:
     return {
         "job_id": job_id,
         "feature_plan": feature_plan_summary(root),
+    }
+
+
+def _preserved_model_metadata(root: Path, version: int, *, title: str) -> tuple[dict, str]:
+    blend_name = f"model-v{version}.blend"
+    blend_path = root / "scene" / blend_name
+    qa_name = f"model-v{version}-qa.json"
+    qa_path = root / "exports" / qa_name
+    views = (
+        "front", "front-left", "left", "back-left", "back",
+        "back-right", "right", "front-right", "top",
+    )
+    renders = [f"model-v{version}-{view}.png" for view in views]
+    missing = [name for name in renders if not (root / "renders" / name).is_file()]
+    if not blend_path.is_file() or missing:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Preserved model v{version} is incomplete. "
+                f"blend_exists={blend_path.is_file()} missing_renders={missing}"
+            ),
+        )
+
+    if (root / f"scene-spec-v{version}.json").is_file():
+        strategy = "procedural"
+    elif (root / f"mesh-spec-v{version}.json").is_file():
+        strategy = "adaptive_loft"
+    elif (root / f"cage-spec-v{version}.json").is_file():
+        strategy = "hard_surface_cage"
+    else:
+        strategy = "procedural"
+
+    model = {
+        "version": version,
+        "title": title[:120] or f"Preserved model v{version}",
+        "blend": blend_name,
+        "renders": renders,
+        "qa": qa_name if qa_path.is_file() else "",
+        "recovered_from_preserved_version": True,
+    }
+    return model, strategy
+
+
+@app.post("/v1/jobs/{job_id}/features/retry", dependencies=[Depends(require_api_token)])
+async def retry_job_feature(job_id: str, request: FeatureRetryRequest) -> dict:
+    root = _require_job(job_id)
+    plan = load_feature_plan(root)
+    if plan is None:
+        raise HTTPException(status_code=409, detail="Feature plan is not available.")
+    task = next((item for item in plan.features if item.id == request.feature_id), None)
+    if task is None:
+        raise HTTPException(status_code=404, detail=f"Feature not found: {request.feature_id}")
+
+    previous_status = _read_status(root)
+    model = previous_status.get("generic_model")
+    strategy = previous_status.get("modeling_strategy") or "procedural"
+    if request.model_version is not None:
+        model, strategy = _preserved_model_metadata(
+            root,
+            request.model_version,
+            title=task.name,
+        )
+
+    retry_feature(
+        root,
+        task.id,
+        reset_attempts=request.reset_attempts,
+    )
+    quality = {
+        "scope": "feature",
+        "active_feature_id": task.id,
+        "active_feature_passed": False,
+        "recognizable": (
+            previous_status.get("quality_gate", {}).get("recognizable")
+            if isinstance(previous_status.get("quality_gate"), dict)
+            else None
+        ),
+        "summary": (
+            f"Feature {task.name} requeued for strict QA/refinement"
+            + (
+                f" from preserved model v{request.model_version}."
+                if request.model_version is not None
+                else "."
+            )
+        ),
+    }
+    status_values = {
+        "state": "ready",
+        "stage": (
+            f"feature_retry_ready_v{request.model_version}"
+            if request.model_version is not None
+            else "feature_retry_ready"
+        ),
+        "modeling_strategy": strategy,
+        "quality_gate": quality,
+        "error": "",
+    }
+    if isinstance(model, dict):
+        status_values["generic_model"] = model
+    status = _write_status(root, **status_values)
+    append_history(
+        root,
+        "feature_requeued",
+        feature_id=task.id,
+        feature_name=task.name,
+        preserved_version=request.model_version,
+        reset_attempts=request.reset_attempts,
+    )
+    return {
+        "job_id": job_id,
+        "feature_id": task.id,
+        "preserved_version": request.model_version,
+        "feature_plan": feature_plan_summary(root),
+        "status": status,
     }
 
 

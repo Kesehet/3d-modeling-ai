@@ -876,6 +876,19 @@ class SceneCutterSpec(SceneObjectSpec):
         description="Exact name of the authored SceneObjectSpec to subtract this closed cutter from.",
     )
     shape: Literal["sphere", "cube", "cylinder", "cone", "mesh", "lathe"]
+    radial_repeat_count: int = Field(
+        default=1,
+        ge=1,
+        le=16,
+        description="Repeat this cutter evenly around radial_repeat_axis. Use 1 for no pattern.",
+    )
+    radial_repeat_axis: Literal["x", "y", "z"] = "z"
+    radial_repeat_center: list[float] = Field(
+        default_factory=lambda: [0.0, 0.0, 0.0],
+        min_length=3,
+        max_length=3,
+    )
+    radial_repeat_start_deg: float = Field(default=0.0, ge=-360.0, le=360.0)
     bevel: bool = False
     smooth: bool = False
 
@@ -889,7 +902,8 @@ class GenericSceneSpec(BaseModel):
         default_factory=list,
         max_length=24,
         description=(
-            "Subtractive boolean volumes. Each cutter targets one object by exact name and is removed from exports."
+            "Subtractive boolean volumes. Each cutter targets one object by exact name and is removed from exports. "
+            "Use radial_repeat_count for evenly spaced repeated openings instead of hand-placing copies."
         ),
     )
 
@@ -903,6 +917,25 @@ class GenericSceneSpec(BaseModel):
         if missing:
             raise ValueError(f"Boolean cutter targets do not exist: {missing}")
         return self
+
+
+def _apply_feature_radial_pattern(
+    spec: GenericSceneSpec,
+    feature_task: FeatureTask | None,
+) -> GenericSceneSpec:
+    """Promote one cutter seed into deterministic radial repetition when the feature says so."""
+    if (
+        feature_task is None
+        or str(feature_task.symmetry or "").lower() != "radial"
+        or int(feature_task.count or 1) <= 1
+        or len(spec.cutters) != 1
+        or spec.cutters[0].radial_repeat_count != 1
+    ):
+        return spec
+    repeated = spec.cutters[0].model_copy(
+        update={"radial_repeat_count": min(16, int(feature_task.count))}
+    )
+    return spec.model_copy(update={"cutters": [repeated]})
 
 
 def _generic_scene_llm_schema() -> dict:
@@ -2315,6 +2348,23 @@ def _normalize_scene_spec_payload(data: object, fallback_title: str) -> dict:
                 "segments": item.get("segments", 64),
                 "vertices": item.get("vertices") or [],
                 "faces": item.get("faces") or [],
+                "radial_repeat_count": max(
+                    1,
+                    min(16, int(item.get("radial_repeat_count") or item.get("repeat_count") or 1)),
+                ),
+                "radial_repeat_axis": (
+                    str(item.get("radial_repeat_axis") or item.get("repeat_axis") or "z").lower()
+                    if str(item.get("radial_repeat_axis") or item.get("repeat_axis") or "z").lower() in {"x", "y", "z"}
+                    else "z"
+                ),
+                "radial_repeat_center": cutter_vec3(
+                    item.get("radial_repeat_center", item.get("repeat_center", [0, 0, 0])),
+                    [0.0, 0.0, 0.0],
+                ),
+                "radial_repeat_start_deg": max(
+                    -360.0,
+                    min(360.0, float(item.get("radial_repeat_start_deg") or item.get("repeat_start_deg") or 0.0)),
+                ),
             }
         )
 
@@ -5252,6 +5302,8 @@ def _generic_spatial_guidance(_: str) -> str:
         "- Use mesh with local vertices and face indices for shaped panels that primitives cannot express.\n"
         "- SceneSpec cutters are closed subtractive volumes. Each cutter must name its exact target object. "
         "Use cutters for holes, sockets, recesses and other negative space; never fake a cutout with an additive object.\n"
+        "- For evenly spaced repeated openings around a center, author one cutter seed and set radial_repeat_count, "
+        "radial_repeat_axis, radial_repeat_center and radial_repeat_start_deg instead of hand-placing copies.\n"
         "- Use the reference images, not object-name heuristics, to decide proportions, silhouette and part placement."
     )
 
@@ -5326,7 +5378,8 @@ async def _build_generic_scene_spec(
         "You are the modeling agent for Blender. Inspect the user request and supplied reference images, then "
         "design the best declarative SceneSpec with primitives, lathe, sweep, arbitrary mesh parts and subtractive "
         "boolean cutters. A cutter targets one authored object by exact name and removes its closed volume; use cutters "
-        "for visible holes, recesses, sockets and openings instead of modeling those as protrusions. "
+        "for visible holes, recesses, sockets and openings instead of modeling those as protrusions. For evenly spaced "
+        "radial openings, author one cutter seed and set radial_repeat_count instead of calculating copies manually. "
         "Lathe revolves a closed [radius,Z] material profile, preserving hollow interiors when the profile includes "
         "inner walls. Sweep makes smooth round-section curved parts from a short XYZ path and radius. "
         "Use these parametric tools instead of approximating curves with boxes. You own the "
@@ -5342,7 +5395,8 @@ async def _build_generic_scene_spec(
         "SceneSpec JSON uses root fields title, rationale, presentation_base, objects, and optional cutters. "
         "Each object may use name, shape, location, dimensions, scale, rotation_deg, start/end, radius, profile, "
         "path, segments, color, bevel, smooth, vertices, and faces. Cutters use the same closed geometry fields "
-        "plus target, the exact name of the object being subtracted from; sweep is not a cutter shape."
+        "plus target, the exact name of the object being subtracted from; sweep is not a cutter shape. Cutters may "
+        "also use radial_repeat_count, radial_repeat_axis, radial_repeat_center, and radial_repeat_start_deg."
     )
     prompt = (
         f"User request: {job_request.get('prompt', '')}\n"
@@ -5396,6 +5450,7 @@ async def _build_generic_scene_spec(
                 str(job_request.get("prompt") or "Generated model"),
             )
             candidate_spec = GenericSceneSpec.model_validate(normalized)
+            candidate_spec = _apply_feature_radial_pattern(candidate_spec, feature_task)
             if job_request.get("component_job") is True:
                 candidate_spec.presentation_base = False
         except (OllamaProxyError, httpx.HTTPError, ValidationError, ValueError, TypeError) as exc:
@@ -9151,11 +9206,13 @@ async def refine_generic_scene(job_id: str, request: GenericRefineRequest) -> di
             "lathe for revolved material profiles (including hollow walls), sweep for curved round sections, "
             "or mesh for arbitrary polygons. SceneSpec cutters are subtractive boolean volumes that target an existing "
             "object by exact name. When the active feature strategy or visual diagnosis calls for a cutout, hole, socket "
-            "or recess, express it with cutters rather than an additive object. Do not use subject templates. "
+            "or recess, express it with cutters rather than an additive object. For evenly spaced radial cutouts, use one "
+            "seed cutter with radial_repeat_count rather than hand-placing copies. Do not use subject templates. "
             "SceneSpec JSON uses root fields title, rationale, presentation_base, objects, and optional cutters. "
             "Objects may use name, shape, location, dimensions, scale, rotation_deg, start/end, radius, profile, "
             "path, segments, color, bevel, smooth, vertices, and faces. Cutters use the same closed geometry fields "
-            "plus target. Return JSON only matching the compact transport schema; the runtime applies full geometry validation."
+            "plus target and may use radial_repeat_count, radial_repeat_axis, radial_repeat_center, radial_repeat_start_deg. "
+            "Return JSON only matching the compact transport schema; the runtime applies full geometry validation."
         )
         prompt = (
             f"User request: {job_request.get('prompt', '')}\n"
@@ -9179,6 +9236,7 @@ async def refine_generic_scene(job_id: str, request: GenericRefineRequest) -> di
                     schema=_generic_scene_llm_schema(), temperature=0.0, num_predict=8192,
                 )
                 revised = GenericSceneSpec.model_validate(_normalize_scene_spec_payload(result.data, current_spec.title))
+                revised = _apply_feature_radial_pattern(revised, feature_task)
                 if job_request.get("component_job") is True:
                     revised.presentation_base = False
             except (OllamaProxyError, httpx.HTTPError, ValidationError, ValueError, TypeError) as exc:

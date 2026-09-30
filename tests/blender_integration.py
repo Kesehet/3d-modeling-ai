@@ -147,6 +147,35 @@ assert edge_hit and abs(edge_location.z - 0.5) < 0.08, (edge_hit, edge_location)
             "location": [0,0,0], "dimensions": [0.5,0.5,2],
         }],
     }, "applied_cutters": 1})
+    run(root, "procedural_radial_cutters", generic_scene_script() + r"""
+body = objects[0]
+for angle_deg in (0, 120, 240):
+    angle = math.radians(angle_deg)
+    x = 1.2 * math.cos(angle)
+    y = 1.2 * math.sin(angle)
+    hit, location, normal, index = body.ray_cast(
+        Vector((x, y, 2)), Vector((0, 0, -1))
+    )
+    assert not hit, (angle_deg, hit, location)
+center_hit, center_location, center_normal, center_index = body.ray_cast(
+    Vector((0, 0, 2)), Vector((0, 0, -1))
+)
+assert center_hit and abs(center_location.z - 0.4) < 0.08, (center_hit, center_location)
+""", {"spec": {
+        "title": "Radial socket pattern",
+        "presentation_base": False,
+        "objects": [{
+            "name": "body", "shape": "cylinder", "location": [0,0,0],
+            "dimensions": [4,4,0.8], "bevel": False,
+        }],
+        "cutters": [{
+            "name": "socket", "target": "body", "shape": "cylinder",
+            "location": [1.2,0,0], "dimensions": [0.35,0.35,2],
+            "radial_repeat_count": 3,
+            "radial_repeat_axis": "z",
+            "radial_repeat_center": [0,0,0],
+        }],
+    }, "applied_cutters": 3})
     print("BLENDER_INTEGRATION_OK", root)
 
 

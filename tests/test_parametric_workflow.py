@@ -254,3 +254,68 @@ def test_procedural_scene_cutters_are_normalized_and_validate_targets():
         main.GenericSceneSpec.model_validate(
             main._normalize_scene_spec_payload(payload, "Cut body")
         )
+
+
+
+def test_procedural_cutter_radial_pattern_survives_normalization():
+    payload = {
+        "title": "Radial sockets",
+        "objects": [{
+            "name": "body",
+            "shape": "cylinder",
+            "location": [0, 0, 0],
+            "dimensions": [4, 4, 1],
+        }],
+        "cutters": [{
+            "name": "socket",
+            "target": "body",
+            "shape": "cylinder",
+            "location": [1.2, 0, 0],
+            "dimensions": [0.3, 0.3, 2],
+            "radial_repeat_count": 3,
+            "radial_repeat_axis": "z",
+            "radial_repeat_center": [0, 0, 0],
+            "radial_repeat_start_deg": 10,
+        }],
+    }
+
+    scene = main.GenericSceneSpec.model_validate(
+        main._normalize_scene_spec_payload(payload, "Radial sockets")
+    )
+    cutter = scene.cutters[0]
+    assert cutter.radial_repeat_count == 3
+    assert cutter.radial_repeat_axis == "z"
+    assert cutter.radial_repeat_center == [0.0, 0.0, 0.0]
+    assert cutter.radial_repeat_start_deg == 10
+
+
+def test_radial_feature_promotes_single_cutter_seed_to_feature_count():
+    scene = main.GenericSceneSpec(
+        title="Repeated openings",
+        presentation_base=False,
+        objects=[{
+            "name": "body",
+            "shape": "cylinder",
+            "location": [0, 0, 0],
+            "dimensions": [4, 4, 1],
+        }],
+        cutters=[{
+            "name": "socket",
+            "target": "body",
+            "shape": "cylinder",
+            "location": [1.2, 0, 0],
+            "dimensions": [0.3, 0.3, 2],
+        }],
+    )
+    feature = FeatureTask(
+        id="mounts",
+        name="Repeated mounts",
+        count=3,
+        symmetry="radial",
+        strategy="surface_cutout",
+    )
+
+    patterned = main._apply_feature_radial_pattern(scene, feature)
+
+    assert patterned.cutters[0].radial_repeat_count == 3
+    assert scene.cutters[0].radial_repeat_count == 1

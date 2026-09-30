@@ -16,7 +16,7 @@ import bmesh
 import bpy
 import json
 import math
-from mathutils import Vector
+from mathutils import Matrix, Vector
 from pathlib import Path
 
 SPEC = args["spec"]
@@ -169,6 +169,36 @@ if not objects:
     raise RuntimeError("Scene specification contains no objects.")
 
 
+def radial_pattern_instances(item):
+    count = max(1, min(16, int(item.get("radial_repeat_count") or 1)))
+    if count == 1:
+        yield dict(item)
+        return
+
+    axis = str(item.get("radial_repeat_axis") or "z").lower()
+    if axis not in {"x", "y", "z"}:
+        axis = "z"
+    center = Vector(item.get("radial_repeat_center") or [0.0, 0.0, 0.0])
+    start_deg = float(item.get("radial_repeat_start_deg") or 0.0)
+    base_location = Vector(item.get("location") or [0.0, 0.0, 0.0])
+    base_rotation = list(item.get("rotation_deg") or [0.0, 0.0, 0.0])
+    while len(base_rotation) < 3:
+        base_rotation.append(0.0)
+    axis_index = {"x": 0, "y": 1, "z": 2}[axis]
+
+    for index in range(count):
+        angle_deg = start_deg + (360.0 * index / count)
+        matrix = Matrix.Rotation(math.radians(angle_deg), 4, axis.upper())
+        instance = dict(item)
+        instance["name"] = f"{str(item.get('name') or 'cut')}-{index + 1}"
+        instance["location"] = list(center + matrix @ (base_location - center))
+        rotation = list(base_rotation)
+        rotation[axis_index] = float(rotation[axis_index]) + angle_deg
+        instance["rotation_deg"] = rotation
+        instance["radial_repeat_count"] = 1
+        yield instance
+
+
 def apply_boolean_cutter(item):
     target_name = str(item.get("target") or "")
     target = objects_by_name.get(target_name)
@@ -208,8 +238,11 @@ def apply_boolean_cutter(item):
 
 applied_cutters = 0
 for item in SPEC.get("cutters", [])[:24]:
-    apply_boolean_cutter(item)
-    applied_cutters += 1
+    for instance in radial_pattern_instances(item):
+        if applied_cutters >= 96:
+            raise RuntimeError("Scene specification expands to more than 96 boolean cutters.")
+        apply_boolean_cutter(instance)
+        applied_cutters += 1
 
 for obj, item in zip(objects, object_items, strict=True):
     decorate_object(obj, item)

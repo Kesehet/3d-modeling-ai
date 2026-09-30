@@ -185,7 +185,11 @@ class OllamaProxyClient:
 
         response = await self._post("/api/chat", payload)
         chat_decode_error: OllamaProxyError | None = None
-        if response.status_code not in {404, 405}:
+        # Some Ollama-compatible gateways reject a model/format combination on
+        # /api/chat with 403 while the same authenticated model remains available
+        # through /api/generate. A blanket credential failure will also reject the
+        # generate fallback, so trying the second supported route is safe.
+        if response.status_code not in {403, 404, 405}:
             self._raise_for_response(response, "/api/chat")
             body = response.json()
             content = (body.get("message") or {}).get("content") or ""

@@ -319,3 +319,49 @@ def test_radial_feature_promotes_single_cutter_seed_to_feature_count():
 
     assert patterned.cutters[0].radial_repeat_count == 3
     assert scene.cutters[0].radial_repeat_count == 1
+
+
+
+def test_surface_cutout_cannot_abandon_procedural_cutter_representation():
+    feature = FeatureTask(
+        id="openings",
+        name="Repeated openings",
+        strategy="surface_cutout",
+        count=3,
+        symmetry="radial",
+    )
+
+    assert main._constrain_director_action_for_feature(
+        "rebuild_mesh",
+        current_strategy="procedural",
+        feature_task=feature,
+    ) == "revise_procedural"
+    assert main._constrain_director_action_for_feature(
+        "build_mesh",
+        current_strategy="procedural",
+        feature_task=feature,
+    ) == "revise_procedural"
+
+
+def test_director_representation_constraint_is_narrow():
+    shape_feature = FeatureTask(
+        id="shell",
+        name="Primary shell",
+        strategy="base_mesh_region",
+    )
+    cutout = FeatureTask(
+        id="opening",
+        name="Opening",
+        strategy="surface_cutout",
+    )
+
+    assert main._constrain_director_action_for_feature(
+        "rebuild_mesh",
+        current_strategy="procedural",
+        feature_task=shape_feature,
+    ) == "rebuild_mesh"
+    assert main._constrain_director_action_for_feature(
+        "refine_mesh",
+        current_strategy="adaptive_loft",
+        feature_task=cutout,
+    ) == "refine_mesh"

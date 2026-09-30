@@ -130,13 +130,35 @@ def create_parametric_part(item, location):
     import bmesh
     bm = bmesh.new()
     bm.from_mesh(obj.data)
-    for _ in range(4):
-        boundary = [edge for edge in bm.edges if edge.is_boundary]
-        if not boundary:
-            break
-        result = bmesh.ops.holes_fill(bm, edges=boundary, sides=0)
-        if not result.get("faces"):
-            break
+    # Explicitly cap each boundary loop. bmesh.ops.holes_fill treats one end
+    # of an open tube as the exterior boundary and can leave it uncapped.
+    remaining = {edge for edge in bm.edges if edge.is_boundary}
+    while remaining:
+        first = next(iter(remaining))
+        remaining.remove(first)
+        start = first.verts[0]
+        current = first.verts[1]
+        loop = [start, current]
+        closed = False
+        while True:
+            candidates = [edge for edge in current.link_edges if edge in remaining and edge.is_boundary]
+            if not candidates:
+                break
+            edge = candidates[0]
+            remaining.remove(edge)
+            nxt = edge.other_vert(current)
+            if nxt == start:
+                closed = True
+                break
+            if nxt in loop:
+                break
+            loop.append(nxt)
+            current = nxt
+        if closed and len(loop) >= 3:
+            try:
+                bm.faces.new(loop)
+            except ValueError:
+                pass
     bmesh.ops.recalc_face_normals(bm, faces=list(bm.faces))
     bm.to_mesh(obj.data)
     obj.data.update()

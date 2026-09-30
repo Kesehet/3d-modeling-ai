@@ -56,7 +56,18 @@ def material_for(hex_color):
     return material
 
 
-def add_object(item):
+def decorate_object(obj, item):
+    if item.get("bevel", True):
+        modifier = obj.modifiers.new("Safe Bevel", "BEVEL")
+        modifier.width = max(0.01, min(0.18, min(obj.dimensions) * 0.08))
+        modifier.segments = 3
+
+    if item.get("smooth", True):
+        for polygon in obj.data.polygons:
+            polygon.use_smooth = True
+
+
+def add_object(item, *, decorate=True):
     shape = item.get("shape", "cube")
     location = tuple(item.get("location", [0, 0, 0]))
     if shape in {"lathe", "sweep"}:
@@ -140,24 +151,68 @@ def add_object(item):
     if shape not in {"rod", "beam"}:
         apply_part_transform(obj, item)
     obj.data.materials.append(material_for(item.get("color", "#808080")))
-
-    if item.get("bevel", True):
-        modifier = obj.modifiers.new("Safe Bevel", "BEVEL")
-        modifier.width = max(0.01, min(0.18, min(obj.dimensions) * 0.08))
-        modifier.segments = 3
-
-    if item.get("smooth", True):
-        for polygon in obj.data.polygons:
-            polygon.use_smooth = True
+    if decorate:
+        decorate_object(obj, item)
     return obj
 
 
 objects = []
+object_items = []
+objects_by_name = {}
 for item in SPEC.get("objects", [])[:40]:
-    objects.append(add_object(item))
+    obj = add_object(item, decorate=False)
+    objects.append(obj)
+    object_items.append(item)
+    objects_by_name[str(item.get("name") or obj.name)] = obj
 
 if not objects:
     raise RuntimeError("Scene specification contains no objects.")
+
+
+def apply_boolean_cutter(item):
+    target_name = str(item.get("target") or "")
+    target = objects_by_name.get(target_name)
+    if target is None:
+        raise RuntimeError(f"Boolean cutter target does not exist: {target_name!r}")
+
+    cutter_item = dict(item)
+    cutter_item["bevel"] = False
+    cutter_item["smooth"] = False
+    cutter = add_object(cutter_item, decorate=False)
+    cutter.name = ("CUTTER_" + str(item.get("name") or "cut"))[:80]
+
+    modifier = target.modifiers.new(("Cut " + cutter.name)[:63], "BOOLEAN")
+    modifier.operation = "DIFFERENCE"
+    modifier.solver = "EXACT"
+    modifier.object = cutter
+
+    bpy.ops.object.select_all(action="DESELECT")
+    target.select_set(True)
+    bpy.context.view_layer.objects.active = target
+    try:
+        bpy.ops.object.modifier_apply(modifier=modifier.name)
+    except Exception as exc:
+        raise RuntimeError(
+            f"Boolean subtraction failed for cutter {item.get('name')!r} on {target_name!r}: {exc}"
+        ) from exc
+
+    bm = bmesh.new()
+    bm.from_mesh(target.data)
+    bmesh.ops.recalc_face_normals(bm, faces=list(bm.faces))
+    bm.to_mesh(target.data)
+    target.data.update()
+    bm.free()
+
+    bpy.data.objects.remove(cutter, do_unlink=True)
+
+
+applied_cutters = 0
+for item in SPEC.get("cutters", [])[:24]:
+    apply_boolean_cutter(item)
+    applied_cutters += 1
+
+for obj, item in zip(objects, object_items, strict=True):
+    decorate_object(obj, item)
 
 # A neutral presentation base is separate from model geometry.
 if SPEC.get("presentation_base", True):
@@ -278,6 +333,7 @@ qa = {
     "potentially_disconnected_parts": len(objects),
     "non_manifold_edges": non_manifold,
     "loose_vertices": loose_vertices,
+    "applied_cutters": applied_cutters,
     "scene_dimensions_blender_units": [round(float(value), 4) for value in size],
     "print_ready": bool(len(objects) == 1 and non_manifold == 0 and loose_vertices == 0),
     "note": "Generic blockout QA. Multi-object scenes require a deliberate union/repair pass before printing.",

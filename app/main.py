@@ -6261,17 +6261,22 @@ def _recent_cage_edit_events(root: Path, limit: int = 6) -> list[dict]:
     return events[-limit:]
 
 
-def _cage_edit_action_schema(*, allow_replan: bool) -> dict:
-    """Expose representation replanning only after bounded edits have actually stalled."""
+def _cage_edit_action_schema(
+    *,
+    allow_replan: bool,
+    blocked_operations: set[str] | None = None,
+) -> dict:
+    """Expose only edit operations that are valid for the current recovery state."""
 
     schema = CageEditAction.model_json_schema()
     operation = schema.get("properties", {}).get("operation")
-    if not allow_replan and isinstance(operation, dict):
+    if isinstance(operation, dict):
         values = operation.get("enum")
         if isinstance(values, list):
-            operation["enum"] = [
-                value for value in values if value != "replan_representation"
-            ]
+            blocked = set(blocked_operations or ())
+            if not allow_replan:
+                blocked.add("replan_representation")
+            operation["enum"] = [value for value in values if value not in blocked]
     return schema
 
 
@@ -6348,6 +6353,7 @@ async def _decide_hard_surface_cage_edit(
     spec: HardSurfaceCageSpec,
     feature_task: FeatureTask | None,
     allow_replan: bool,
+    blocked_operations: set[str] | None = None,
 ) -> CageEditAction:
     root = _require_job(job_id)
     job_request = json.loads((root / "request.json").read_text(encoding="utf-8"))
@@ -6464,6 +6470,7 @@ async def _decide_hard_surface_cage_edit(
     )
     modeling_pass = "primary_form" if primary_form_pass else "secondary_form"
     recent_events = _recent_cage_edit_events(root)
+    blocked_operations = set(blocked_operations or ())
 
     system = (
         "You are the visual edit director for an iterative Blender modeling agent. "
@@ -6492,6 +6499,12 @@ async def _decide_hard_surface_cage_edit(
         "Cylinders extend along local Z: rotation around Z does NOT change their axial direction. "
         "Protect unrelated good geometry. Do not repeat a recent rejected edit with effectively the same "
         "target and parameters. "
+        + (
+            "The following operations are temporarily blocked because that edit family already failed to improve "
+            f"the preserved working model: {sorted(blocked_operations)}. Choose a different bounded operation. "
+            if blocked_operations
+            else ""
+        )
         + (
             (
                 "PRIMARY-FORM PASS: the subject is not yet visually established. Prioritize, in order: "
@@ -6576,7 +6589,10 @@ async def _decide_hard_surface_cage_edit(
                 system=system,
                 prompt=prompt,
                 images=images if candidate_model in VISION_MODELS else None,
-                schema=_cage_edit_action_schema(allow_replan=allow_replan),
+                schema=_cage_edit_action_schema(
+                    allow_replan=allow_replan,
+                    blocked_operations=blocked_operations,
+                ),
                 temperature=0.0,
                 num_predict=2048,
             )
@@ -6586,6 +6602,11 @@ async def _decide_hard_surface_cage_edit(
             if action.operation == "replan_representation" and not allow_replan:
                 raise ValueError(
                     "Representation replan is locked until bounded cage edits have failed."
+                )
+            if action.operation in blocked_operations:
+                raise ValueError(
+                    f"{action.operation} is temporarily blocked after repeated rejected edits; "
+                    "choose a different bounded edit family."
                 )
         except (OllamaProxyError, httpx.HTTPError, ValidationError, ValueError, TypeError) as exc:
             errors.append(f"{candidate_model}: {exc}")
@@ -6689,13 +6710,26 @@ async def _refine_hard_surface_cage_incrementally(
             feature_task=feature_task,
         )
 
-    allow_replan = stall_count >= 2
+    recent_rejections = [
+        item for item in load_history(root)
+        if item.get("event") == "cage_edit_rejected"
+    ][-2:]
+    repeated_global_rescale = (
+        len(recent_rejections) == 2
+        and all(item.get("operation") == "reshape_cage_proportions" for item in recent_rejections)
+    )
+    blocked_operations = {"reshape_cage_proportions"} if repeated_global_rescale else set()
+    # Two failures from the same global edit family are not evidence that the
+    # representation itself is wrong. Force a different bounded edit family
+    # before representation replanning becomes eligible.
+    allow_replan = stall_count >= 2 and not repeated_global_rescale
     action = await _decide_hard_surface_cage_edit(
         job_id,
         baseline_version=baseline_version,
         spec=baseline_spec,
         feature_task=feature_task,
         allow_replan=allow_replan,
+        blocked_operations=blocked_operations,
     )
     if action.operation == "replan_representation":
         append_history(

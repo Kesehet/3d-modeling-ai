@@ -59,7 +59,7 @@ from .generic_builder import generic_scene_script
 from .hard_surface_builder import hard_surface_cage_script
 from .history import append_history, load_history
 from .mesh_builder import adaptive_loft_script
-from .mesh_parts import geometry_context, validate_mesh_part
+from .mesh_parts import ParametricGeometry, geometry_context, validate_mesh_part
 from .ollama import OllamaProxyClient, OllamaProxyError
 from .quality import evaluate_scene_spec_structural, get_benchmark
 from .repair import print_repair_script
@@ -848,11 +848,11 @@ class SubjectInventory(BaseModel):
     major_parts: list[SubjectPartSpec] = Field(min_length=2, max_length=24)
 
 
-class SceneObjectSpec(BaseModel):
+class SceneObjectSpec(ParametricGeometry):
     name: str = Field(min_length=1, max_length=80)
-    shape: Literal["sphere", "cube", "cylinder", "cone", "torus", "rod", "beam", "frustum", "wedge", "mesh"]
+    shape: Literal["sphere", "cube", "cylinder", "cone", "torus", "rod", "beam", "frustum", "wedge", "mesh", "lathe", "sweep"]
     location: list[float] = Field(min_length=3, max_length=3)
-    scale: list[float] = Field(min_length=3, max_length=3)
+    scale: list[float] = Field(default_factory=lambda: [1.0, 1.0, 1.0], min_length=3, max_length=3, description="Legacy local scale: standard primitives are size 2 (radius 1). Prefer full dimensions. Lathe/sweep coordinates are already in local units; normally use scale=[1,1,1].")
     rotation_deg: list[float] = Field(default_factory=lambda: [0.0, 0.0, 0.0], min_length=3, max_length=3)
     start: list[float] | None = Field(default=None, min_length=3, max_length=3)
     end: list[float] | None = Field(default=None, min_length=3, max_length=3)
@@ -1998,7 +1998,7 @@ def _normalize_scene_spec_payload(data: object, fallback_title: str) -> dict:
     normalized.setdefault("rationale", "")
     normalized.setdefault("presentation_base", True)
 
-    allowed_shapes = {"sphere", "cube", "cylinder", "cone", "torus", "rod", "beam", "frustum", "wedge", "mesh"}
+    allowed_shapes = {"sphere", "cube", "cylinder", "cone", "torus", "rod", "beam", "frustum", "wedge", "mesh", "lathe", "sweep"}
     shape_aliases = {
         "ellipsoid": "sphere",
         "ball": "sphere",
@@ -2118,6 +2118,10 @@ def _normalize_scene_spec_payload(data: object, fallback_title: str) -> dict:
                 "color": color_hex(item.get("color", "#808080")),
                 "bevel": bool(item.get("bevel", True)),
                 "smooth": bool(item.get("smooth", True)),
+                "dimensions": item.get("dimensions"),
+                "profile": item.get("profile") or [],
+                "path": item.get("path") or [],
+                "segments": item.get("segments", 64),
                 "vertices": item.get("vertices") or [],
                 "faces": item.get("faces") or [],
             }
@@ -5016,6 +5020,12 @@ def _generic_spatial_guidance(_: str) -> str:
     return (
         "- Coordinate convention: X is left/right, Y is depth, Z is up.\n"
         "- The front camera sits on negative Y and looks toward positive Y.\n"
+        "- Primitive location is its center. Prefer dimensions=[full width, full depth, full height] BEFORE rotation.\n"
+        "- Legacy scale is NOT dimensions: a cube/cylinder/sphere has native size 2; scale=[1,1,1] is 2 units wide.\n"
+        "- For a box, bottom Z = location[2] - dimensions[2]/2 and top Z = location[2] + dimensions[2]/2.\n"
+        "- Lathe revolves a closed [radius,Z] material profile around local Z; include inner and outer walls to make cavities.\n"
+        "- Sweep builds a smooth, capped round tube along a local XYZ path with an explicit radius.\n"
+        "- Lathe/sweep/mesh use local coordinates plus location offset; normally keep scale=[1,1,1].\n"
         "- Visible details should sit on the intended surface instead of being buried inside another part.\n"
         "- Connected parts should touch or overlap when the real object is physically connected.\n"
         "- Use rod/beam only when start and end are explicitly defined; otherwise use a solid primitive.\n"
@@ -5086,7 +5096,10 @@ async def _build_generic_scene_spec(job_id: str, auto_research: bool) -> Generic
 
     system = (
         "You are the modeling agent for Blender. Inspect the user request and supplied reference images, then "
-        "design the best safe declarative SceneSpec you can with the available primitive vocabulary. You own the "
+        "design the best declarative SceneSpec with primitives, lathe, sweep and arbitrary mesh parts. "
+        "Lathe revolves a closed [radius,Z] material profile, preserving hollow interiors when the profile includes "
+        "inner walls. Sweep makes smooth round-section curved parts from a short XYZ path and radius. "
+        "Use these parametric tools instead of approximating curves with boxes. You own the "
         "geometry decisions: silhouette, proportions, primitive choice, number of parts, placement, rotation, "
         "connectivity and colors. Do not rely on hard-coded object-family templates. Return JSON only matching "
         "the supplied schema. Use rod or beam only when both start and end are explicitly provided. Coordinates "
@@ -5190,6 +5203,7 @@ async def _execute_generic_spec(
     spec: GenericSceneSpec,
     *,
     version: int,
+    activate_status: bool = True,
 ) -> dict:
     root = _require_job(job_id)
     require_unused_version(root, version)
@@ -5258,21 +5272,23 @@ async def _execute_generic_spec(
         blend=blend_path.name,
         qa=qa_path.name,
     )
-    status = _write_status(
-        root,
-        state="ready",
-        stage=f"generic_rendered_v{version}",
-        generic_model={
+    candidate_model = {
             "version": version,
             "title": spec.title,
             "blend": blend_path.name,
             "renders": expected,
             "qa": qa_path.name,
-        },
+        }
+    status = _write_status(
+        root,
+        state="ready",
+        stage=f"generic_rendered_v{version}",
+        **({"generic_model": candidate_model} if activate_status else {}),
     )
     return {
         "job_id": job_id,
         "status": status,
+        "candidate_model": candidate_model,
         "spec": spec.model_dump(),
         "renders": expected,
         "worker_result": result,
@@ -6442,7 +6458,9 @@ async def _decide_hard_surface_cage_edit(
         "cut. add_attachment adds a missing in-place primitive or shaped mesh panel; adjust_attachment or remove_attachment "
         "edits an existing part; add_cutter creates a deliberate opening. set_surface changes subdivision, "
         "bevel or shading when modifiers have rounded a crisp intended silhouette. "
-        "Primitive transforms use local scales then Euler XYZ rotation; locations use world X/Y/Z. "
+        "Primitive transforms use full dimensions (preferred) or legacy local scales, then Euler XYZ rotation. "
+        "Standard cubes/cylinders/spheres have native full size 2, so scale is half the final dimensions. "
+        "Lathe and sweep describe curved parts directly; their profile/path coordinates are local. Locations use world X/Y/Z. "
         "Cylinders extend along local Z: rotation around Z does NOT change their axial direction. "
         "Protect unrelated good geometry. Do not repeat a recent rejected edit with effectively the same "
         "target and parameters. "
@@ -8281,7 +8299,10 @@ async def _ask_modeling_director(
         "half-profile swept horizontally along X or Y, suited to bilateral shells. adaptive_loft uses full closed "
         "cross-sections along ANY axis, including Z for upright forms. Choose the construction that actually fits "
         "the feature; do not force an upright radial form into a horizontal half-cage. build_procedural supports "
-        "assemblies of beams, boxes, cylinders and other primitives. Ignore filenames and object names as proof "
+        "assemblies of beams, boxes, cylinders, arbitrary polygon mesh parts, lathe (revolve a closed material "
+        "profile around Z, including interior cavities) and sweep (a smooth capped tube along a 3D path). "
+        "Use build_procedural for rotational or curved-tube forms that these tools describe directly, as well as assemblies. "
+        "Do not struggle with hand-written loft ring coordinates when a parametric part fits. Ignore filenames and object names as proof "
         "of correctness: judge the visible geometry. "
         "Return JSON only matching the schema."
     )
@@ -8312,7 +8333,9 @@ async def _ask_modeling_director(
         f"Next/active feature sub-job: {json.dumps(feature_task_context, ensure_ascii=False)}\n"
         f"Images in order: {labels}\n"
         "Give concrete instructions for the next modeling pass. When a feature sub-job is supplied, prioritize its "
-        "acceptance criteria while protecting already-accepted features and the best-so-far silhouette. Preserve geometry "
+        "acceptance criteria while protecting already-accepted features and the best-so-far silhouette. "
+        "During an active feature pass, missing geometry owned by later features is expected; do not switch representation "
+        "or rebuild the primary shape simply because those later components are absent. Preserve geometry "
         "that is already moving toward the reference instead of repeatedly restarting. Spend the available reasoning "
         "budget on visual comparison and specific geometry decisions rather than generic commentary."
     )
@@ -8541,59 +8564,78 @@ async def _generate_generic_scene_candidate(job_id: str, request: GenericGenerat
     if initial_action in {"build_mesh", "rebuild_mesh"}:
         return await _generate_directed_mesh(job_id, initial_decision)
 
-    _write_status(root, state="running", stage="agent_selected_procedural", modeling_strategy="procedural")
+    return await _generate_procedural_candidate(job_id)
+
+
+async def _generate_procedural_candidate(job_id: str, *, feature_task: FeatureTask | None = None) -> dict:
+    root = _require_job(job_id)
+    previous = _read_status(root)
+    feature_task = feature_task or begin_feature(root)
+    _write_status(root, state="running", stage="planning_procedural_geometry")
     spec = await _build_generic_scene_spec(job_id, auto_research=False)
     version = reserve_model_version(root)
-    build = await _execute_generic_spec(job_id, spec, version=version)
+    build = await _execute_generic_spec(job_id, spec, version=version, activate_status=False)
+    return await _review_procedural_candidate(job_id, build, previous, feature_task)
 
-    try:
-        quality_gate = await _generic_recognizability_check(
-            job_id,
-            stage="generic_initial_quality",
-        )
-    except HTTPException as exc:
-        append_history(root, "generic_initial_quality_unavailable", error=str(exc.detail))
-        status = _write_status(
-            root,
-            state="ready",
-            stage="generic_quality_unverified",
-            modeling_strategy="procedural",
-            quality_gate={"recognizable": None, "error": str(exc.detail)},
-        )
-        build["status"] = status
-        build["quality_gate"] = None
-        return build
 
-    if quality_gate.get("recognizable") is True:
-        status = _write_status(
-            root,
-            state="ready",
-            stage="generic_initial_recognizable",
-            modeling_strategy="procedural",
-            quality_gate=quality_gate,
+async def _review_procedural_candidate(
+    job_id: str, build: dict, previous: dict, feature_task: FeatureTask | None,
+    *, evaluation: dict | None = None,
+) -> dict:
+    """Keep better construction drafts; accept features only at the unchanged strict QA gate."""
+    root = _require_job(job_id)
+    candidate_model = build["candidate_model"]
+    version = candidate_model["version"]
+    baseline = (previous.get("generic_model") or {}).get("version")
+    comparison = None
+    if baseline is not None and baseline != version:
+        comparison = await _compare_generic_versions(root, baseline_version=baseline, candidate_version=version)
+    kept = baseline is None or baseline == version or (comparison or {}).get("candidate_is_better") is True
+    accepted = False
+    if feature_task is not None:
+        evaluation = evaluation or await _evaluate_feature_candidate(
+            job_id, feature_task, baseline_version=baseline if baseline != version else None,
+            candidate_version=version,
         )
-        build["status"] = status
-        build["quality_gate"] = quality_gate
-        return build
-
-    if quality_gate.get("director_action") in {"build_mesh", "rebuild_mesh"}:
-        append_history(
-            root,
-            "automatic_strategy_switch",
-            from_strategy="procedural",
-            to_strategy="hard_surface_cage",
-            reason=quality_gate.get("summary"),
-        )
-        return await _generate_directed_mesh(job_id, quality_gate.get("director") or quality_gate)
-
-    _write_status(
-        root,
-        state="ready",
-        stage="generic_needs_refinement",
-        modeling_strategy="procedural",
-        quality_gate=quality_gate,
-    )
-    return await refine_generic_scene(job_id, GenericRefineRequest(iterations=2))
+        kept = kept and evaluation.get("regression_detected") is not True
+        accepted = kept and _feature_evaluation_accepts(feature_task, evaluation)
+        quality = {
+            "scope": "feature", "active_feature_id": feature_task.id,
+            "active_feature_passed": accepted, "representation": "procedural",
+            "candidate_version": version, "baseline_version": baseline, "candidate_improved": kept,
+            "recognizable": evaluation.get("subject_recognizable"),
+            "subject_match_score": evaluation.get("reference_match_score"),
+            "summary": evaluation.get("summary"), "problems": evaluation.get("problems") or [],
+        }
+        if accepted:
+            finish_feature(root, feature_task.id, accepted=True, version=version, verified=True,
+                           summary=str(evaluation.get("summary") or ""),
+                           acceptance_score=float(evaluation.get("reference_match_score") or 0),
+                           acceptance_model=evaluation.get("model"))
+        elif kept:
+            record_feature_progress(root, feature_task.id, version=version,
+                                    summary=str(evaluation.get("summary") or ""))
+        else:
+            finish_feature(root, feature_task.id, accepted=False, version=None,
+                           summary=str(evaluation.get("summary") or ""),
+                           error="Candidate did not improve the preserved model.")
+    else:
+        quality = await _generic_recognizability_check(job_id, stage="generic_final_quality", render_version=version)
+        accepted = kept and quality.get("recognizable") is True
+    if kept:
+        status = _write_status(root, state="ready", modeling_strategy="procedural",
+                               stage="generic_feature_complete" if accepted else "generic_needs_refinement",
+                               generic_model=candidate_model, working_cage_version=None, quality_gate=quality)
+    else:
+        status = _write_status(root, state="ready", stage=previous.get("stage") or "generic_needs_refinement",
+                               modeling_strategy=previous.get("modeling_strategy") or "procedural",
+                               generic_model=previous.get("generic_model"), quality_gate=previous.get("quality_gate"))
+    append_history(root, "procedural_candidate_reviewed", candidate_version=version, baseline_version=baseline,
+                   feature_id=feature_task.id if feature_task else None, kept=kept, accepted=accepted,
+                   summary=quality.get("summary"))
+    status = await _ensure_final_model_quality(job_id, status)
+    return {**build, "status": status, "kept": kept, "accepted": accepted, "comparison": comparison,
+            "feature_evaluation": evaluation, "quality_gate": status.get("quality_gate")}
 
 
 @app.post("/v1/jobs/{job_id}/generate", dependencies=[Depends(require_api_token)])
@@ -8682,46 +8724,17 @@ async def refine_generic_scene(job_id: str, request: GenericRefineRequest) -> di
                 dependencies=feature_task.depends_on,
                 via="auto_feature_queue",
             )
-            # A strict failure on the same feature means the representation, not
-            # merely its numbers, is suspect. Do not burn more vision/model calls
-            # endlessly rewriting an adaptive loft.
-            quality_gate = (
-                status_payload.get("quality_gate")
-                if isinstance(status_payload.get("quality_gate"), dict)
-                else {}
-            )
-            severe_representation_failure, active_score = _catastrophic_visual_failure(
-                quality_gate
-            )
-            # A catastrophic visual miss is evidence that the representation is
-            # wrong, not merely that its numeric parameters need another pass.
-            # Human artists would change construction strategy here instead of
-            # rebuilding the same coarse loft. Switch immediately; otherwise
-            # allow one ordinary retry before exhausting adaptive_loft.
-            if severe_representation_failure or feature_task.attempts >= 2:
-                append_history(
-                    root,
-                    "representation_strategy_exhausted",
-                    feature_id=feature_task.id,
-                    feature_name=feature_task.name,
-                    exhausted_strategy="adaptive_loft",
-                    next_strategy="hard_surface_cage",
-                    attempt=feature_task.attempts,
-                    severe_visual_failure=severe_representation_failure,
-                    visual_score=active_score,
+            quality_gate = status_payload.get("quality_gate") or {}
+            severe_failure, _ = _catastrophic_visual_failure(quality_gate)
+            if severe_failure or feature_task.attempts >= 2:
+                decision = await _ask_modeling_director(
+                    job_id, stage="adaptive_representation_review", current_strategy="adaptive_loft",
+                    include_renders=True,
                 )
-                return await _generate_hard_surface_cage(
-                    job_id,
-                    reason=(
-                        f"Adaptive loft failed strict visual QA for {feature_task.name} "
-                        f"(score={active_score:.2f}). Do not regenerate another loft. "
-                        "Rebuild this feature the way a human Blender hard-surface artist would: "
-                        "reference-driven low-poly half-cage, Mirror before Subdivision, deliberate "
-                        "support loops/edge flow, bounded bevels/booleans, and separate visible components. "
-                        "Preserve the previous best model until this candidate wins strict comparison."
-                    ),
-                    feature_task=feature_task,
-                )
+                if decision["action"] in {"build_procedural", "revise_procedural"}:
+                    return await _generate_procedural_candidate(job_id, feature_task=feature_task)
+                if decision["action"] in {"build_mesh", "rebuild_mesh"}:
+                    return await _generate_directed_mesh(job_id, decision, feature_task=feature_task)
             decision = {
                 "action": "refine_mesh",
                 "subject_match_score": (
@@ -8761,23 +8774,10 @@ async def refine_generic_scene(job_id: str, request: GenericRefineRequest) -> di
                 quality_gate=quality_gate,
             )
             return {"job_id": job_id, "iterations": [], "rejected": None, "quality_gate": quality_gate, "status": status}
-        if decision["action"] == "rebuild_mesh":
-            append_history(
-                root,
-                "adaptive_mesh_rebuild_requested",
-                score=decision.get("subject_match_score"),
-                reason=decision.get("summary"),
-                next_strategy="hard_surface_cage",
-            )
-            return await _generate_hard_surface_cage(
-                job_id,
-                reason=(decision.get("summary") or "")
-                + "\n"
-                + "\n".join(decision.get("instructions") or []),
-                feature_task=feature_task,
-            )
-        # Once a usable mesh exists, build_mesh/revise_procedural/refine_mesh all mean
-        # improve the existing best-so-far mesh rather than discarding it.
+        if decision["action"] in {"build_procedural", "revise_procedural"}:
+            return await _generate_procedural_candidate(job_id, feature_task=feature_task)
+        if decision["action"] in {"build_mesh", "rebuild_mesh"}:
+            return await _generate_directed_mesh(job_id, decision, feature_task=feature_task)
         return await _refine_adaptive_mesh(
             job_id,
             decision=decision,
@@ -8803,129 +8803,67 @@ async def refine_generic_scene(job_id: str, request: GenericRefineRequest) -> di
     job_request = json.loads((root / "request.json").read_text(encoding="utf-8"))
     inventory = _load_subject_inventory(root)
     completed: list[dict] = []
-
     for offset in range(request.iterations):
         feature_task = begin_feature(root)
         if feature_task is not None and feature_task.build_mode == "component_job":
             return await _build_and_install_component_feature(job_id, feature_task)
+        current_evaluation = None
         if feature_task is not None:
-            append_history(
-                root,
-                "feature_subjob_started",
-                feature_id=feature_task.id,
-                feature_name=feature_task.name,
-                attempt=feature_task.attempts,
-                strategy=feature_task.strategy,
-                dependencies=feature_task.depends_on,
+            # Existing assemblies may already contain a finished feature. Review
+            # its actual pixels before spending tokens rebuilding good geometry.
+            current_evaluation = await _evaluate_feature_candidate(
+                job_id, feature_task, baseline_version=None, candidate_version=current_version,
             )
+            if _feature_evaluation_accepts(feature_task, current_evaluation):
+                result = await _review_procedural_candidate(
+                    job_id, {"candidate_model": _read_status(root)["generic_model"], "spec": current_spec.model_dump()},
+                    _read_status(root), feature_task, evaluation=current_evaluation,
+                )
+                completed.append(result)
+                continue
         decision = await _ask_modeling_director(
-            job_id,
-            stage=f"agent_refinement_{offset + 1}",
-            current_strategy="procedural",
-            include_renders=True,
+            job_id, stage=f"agent_refinement_{offset + 1}", current_strategy="procedural",
+            include_renders=True, render_version=current_version,
         )
-        if decision["action"] == "accept":
-            if feature_task is not None:
-                feature_evaluation = await _evaluate_feature_candidate(
-                    job_id,
-                    feature_task,
-                    baseline_version=None,
-                    candidate_version=current_version,
-                )
-                feature_passed = _feature_evaluation_accepts(
-                    feature_task,
-                    feature_evaluation,
-                )
-                finish_feature(
-                    root,
-                    feature_task.id,
-                    accepted=feature_passed,
-                    version=current_version if feature_passed else None,
-                    summary=str(feature_evaluation.get("summary") or decision.get("summary") or ""),
-                    error="" if feature_passed else "Strict feature QA rejected the current geometry.",
-                    verified=feature_passed,
-                    acceptance_score=float(
-                        feature_evaluation.get("reference_match_score") or 0.0
-                    ),
-                    acceptance_model=(
-                        str(feature_evaluation.get("model"))
-                        if feature_evaluation.get("model")
-                        else None
-                    ),
-                )
-                append_history(
-                    root,
-                    "feature_subjob_accepted" if feature_passed else "feature_subjob_retry",
-                    feature_id=feature_task.id,
-                    feature_name=feature_task.name,
-                    version=current_version if feature_passed else None,
-                    accepted_without_rebuild=True,
-                    strict_qa=True,
-                )
-            break
         if decision["action"] in {"build_mesh", "rebuild_mesh"}:
-            append_history(
-                root,
-                "agent_strategy_switch",
-                from_strategy="procedural",
-                to_strategy="hard_surface_cage",
-                reason=decision.get("summary"),
-            )
-            return await _generate_hard_surface_cage(
-                job_id,
-                reason=(decision.get("summary") or "")
-                + "\n"
-                + "\n".join(decision.get("instructions") or []),
-                feature_task=feature_task,
-            )
-
-        images, labels = _collect_images(
-            root,
-            VisionAnalyzeRequest(
-                stage=f"agent_scene_revision_{offset + 1}",
-                include_references=True,
-                include_renders=True,
-                max_images=10,
-            ),
-        )
+            return await _generate_directed_mesh(job_id, decision, feature_task=feature_task)
+        if decision["action"] == "accept" and feature_task is None:
+            break
+        decision["feature_evaluation"] = current_evaluation
+        images, labels = _collect_images(root, VisionAnalyzeRequest(
+            stage="agent_scene_revision", include_references=True, include_renders=True,
+            max_images=10, render_version=current_version,
+        ))
+        plan = load_feature_plan(root)
         system = (
-            "You are the autonomous 3D modeling agent revising a declarative SceneSpec. The AI modeling director "
-            "has already inspected the references and current renders. Follow its instructions and return the full "
-            "replacement SceneSpec. You may preserve, move, resize, rotate, replace, add or delete geometry as needed; "
-            "the current spec is not sacred. Do not use object-family templates. Base decisions on the supplied images "
-            "and director critique. Use rod/beam only with explicit start and end. Return JSON only matching the schema."
+            "You construct geometry for an autonomous Blender modeler. The visual director and feature reviewer "
+            "have already diagnosed the actual renders. Correct the diagnosed geometry and return the complete "
+            "replacement SceneSpec. Preserve useful parts and their names. Use full dimensions for primitives, "
+            "lathe for revolved material profiles (including hollow walls), sweep for curved round sections, "
+            "or mesh for arbitrary polygons. Do not use subject templates. Return JSON only matching the schema."
         )
         prompt = (
-            f"Exact user request: {job_request.get('prompt', '')}\n"
-            f"Reference scope: {'parent object; focus only on component '+str(job_request.get('component_name')) if job_request.get('component_job') else 'requested whole object'}\n"
-            f"Current SceneSpec: {json.dumps(current_spec.model_dump(), ensure_ascii=False)}\n"
-            f"AI director decision: {json.dumps(decision, ensure_ascii=False)}\n"
-            f"AI-generated subject inventory: "
-            f"{json.dumps(inventory.model_dump() if inventory else {}, ensure_ascii=False)}\n"
-            f"ACTIVE FEATURE SUB-JOB: {json.dumps(feature_task.model_dump() if feature_task else {}, ensure_ascii=False)}\n"
-            f"Universal coordinate guidance:\n{_generic_spatial_guidance('')}\n"
-            f"Images in order: {labels}\n"
-            "Return the complete next SceneSpec. Spend the available token budget on concrete geometry."
+            f"User request: {job_request.get('prompt', '')}\n"
+            f"Current SceneSpec: {json.dumps(current_spec.model_dump())}\n"
+            f"Visual diagnosis: {json.dumps(decision)}\n"
+            f"Subject inventory: {json.dumps(inventory.model_dump() if inventory else {})}\n"
+            f"Feature plan: {json.dumps(plan.model_dump() if plan else {})}\n"
+            f"ACTIVE FEATURE: {json.dumps(feature_task.model_dump() if feature_task else {})}\n"
+            f"Coordinate contract: {_generic_spatial_guidance('')}\n"
+            f"Reference/current image order: {labels}\n"
+            "Fix the active feature and protect other geometry. Never create parts owned by component_job entries; "
+            "the assembler installs those separately. Check local dimensions and resulting world extents for every changed part."
         )
-
-        revised = None
-        selected_model = None
-        errors: list[str] = []
+        revised, selected_model, errors = None, None, []
         client = OllamaProxyClient()
-        candidate_models = VISION_MODELS if images else (REASONING_MODEL, *VISION_MODELS)
-        for candidate_model in candidate_models:
+        for candidate_model in (REASONING_MODEL, *VISION_MODELS):
             try:
                 result = await client.chat_json(
-                    model=candidate_model,
-                    system=system,
-                    prompt=prompt,
-                    images=images or None,
-                    schema=GenericSceneSpec.model_json_schema(),
-                    temperature=0.0,
-                    num_predict=8192,
+                    model=candidate_model, system=system, prompt=prompt,
+                    images=(images or None) if candidate_model in VISION_MODELS else None,
+                    schema=GenericSceneSpec.model_json_schema(), temperature=0.0, num_predict=8192,
                 )
-                normalized = _normalize_scene_spec_payload(result.data, current_spec.title)
-                revised = GenericSceneSpec.model_validate(normalized)
+                revised = GenericSceneSpec.model_validate(_normalize_scene_spec_payload(result.data, current_spec.title))
                 if job_request.get("component_job") is True:
                     revised.presentation_base = False
             except (OllamaProxyError, httpx.HTTPError, ValidationError, ValueError, TypeError) as exc:
@@ -8933,192 +8871,27 @@ async def refine_generic_scene(job_id: str, request: GenericRefineRequest) -> di
                 continue
             selected_model = candidate_model
             break
-
-        if revised is None or selected_model is None:
-            detail = "AI SceneSpec revision failed across configured models: " + " | ".join(errors[-4:])
-            if feature_task is not None:
-                finish_feature(
-                    root,
-                    feature_task.id,
-                    accepted=False,
-                    version=None,
-                    error=detail,
-                )
-                append_history(
-                    root,
-                    "feature_subjob_failed",
-                    feature_id=feature_task.id,
-                    feature_name=feature_task.name,
-                    error=detail,
-                )
-            raise HTTPException(status_code=502, detail=detail)
+        if revised is None:
+            raise HTTPException(status_code=502, detail="Scene revision failed: " + " | ".join(errors[-3:]))
         if revised.model_dump() == current_spec.model_dump():
-            append_history(root, "agent_refinement_stop", reason="AI returned an unchanged SceneSpec")
-            if feature_task is not None:
-                finish_feature(
-                    root,
-                    feature_task.id,
-                    accepted=False,
-                    version=None,
-                    summary="The feature worker returned an unchanged SceneSpec.",
-                )
-                append_history(
-                    root,
-                    "feature_subjob_retry",
-                    feature_id=feature_task.id,
-                    feature_name=feature_task.name,
-                    reason="unchanged SceneSpec",
-                )
+            append_history(root, "agent_refinement_stop", reason="AI returned unchanged geometry")
+            if feature_task:
+                finish_feature(root, feature_task.id, accepted=False, version=None,
+                               error="Modeler returned unchanged geometry after failed feature review.")
             break
-
-        previous_iteration_status = _read_status(root)
+        previous = _read_status(root)
         version = reserve_model_version(root)
-        build = await _execute_generic_spec(job_id, revised, version=version)
-        append_history(
-            root,
-            "agent_revision",
-            version=version,
-            model=selected_model,
-            object_count=len(revised.objects),
-            director_summary=decision.get("summary"),
-        )
-
-        feature_evaluation = None
-        feature_passed = True
-        if feature_task is not None:
-            feature_evaluation = await _evaluate_feature_candidate(
-                job_id,
-                feature_task,
-                baseline_version=current_version,
-                candidate_version=version,
-            )
-            feature_passed = _feature_evaluation_accepts(
-                feature_task,
-                feature_evaluation,
-            )
-            finish_feature(
-                root,
-                feature_task.id,
-                accepted=feature_passed,
-                version=version if feature_passed else None,
-                summary=str(feature_evaluation.get("summary") or ""),
-                error="" if feature_passed else "Strict feature QA rejected the candidate.",
-                verified=feature_passed,
-                acceptance_score=float(
-                    feature_evaluation.get("reference_match_score") or 0.0
-                ),
-                acceptance_model=(
-                    str(feature_evaluation.get("model"))
-                    if feature_evaluation.get("model")
-                    else None
-                ),
-            )
-            append_history(
-                root,
-                "feature_subjob_accepted" if feature_passed else "feature_subjob_retry",
-                feature_id=feature_task.id,
-                feature_name=feature_task.name,
-                version=version if feature_passed else None,
-                strict_qa=True,
-                reference_match_score=feature_evaluation.get("reference_match_score"),
-                confidence=feature_evaluation.get("confidence"),
-            )
-
-        completed.append(
-            {
-                "director": decision,
-                "spec": revised.model_dump(),
-                "build": build,
-                "feature_evaluation": feature_evaluation,
-                "accepted": feature_passed,
-            }
-        )
-
-        if feature_task is not None and not feature_passed:
-            previous_model = previous_iteration_status.get("generic_model")
-            _write_status(
-                root,
-                state="ready",
-                stage=previous_iteration_status.get("stage") or "generic_needs_refinement",
-                modeling_strategy=previous_iteration_status.get("modeling_strategy") or "procedural",
-                generic_model=previous_model if isinstance(previous_model, dict) else None,
-                quality_gate=previous_iteration_status.get("quality_gate"),
-            )
-            append_history(
-                root,
-                "feature_candidate_rejected",
-                feature_id=feature_task.id,
-                feature_name=feature_task.name,
-                candidate_version=version,
-                preserved_version=current_version,
-                reason=str((feature_evaluation or {}).get("summary") or "strict feature QA failed"),
-            )
+        build = await _execute_generic_spec(job_id, revised, version=version, activate_status=False)
+        result = await _review_procedural_candidate(job_id, build, previous, feature_task)
+        append_history(root, "agent_revision", version=version, model=selected_model,
+                       object_count=len(revised.objects), kept=result["kept"])
+        completed.append(result)
+        if not result["kept"]:
             break
-
-        current_spec = revised
-        current_version = version
-
-    try:
-        final_quality = await _generic_recognizability_check(
-            job_id,
-            stage="generic_final_quality",
-        )
-    except HTTPException as exc:
-        append_history(root, "generic_final_quality_unavailable", error=str(exc.detail))
-        status = _write_status(
-            root,
-            state="ready",
-            stage="generic_quality_unverified",
-            modeling_strategy="procedural",
-            quality_gate={"recognizable": None, "error": str(exc.detail)},
-        )
-        return {
-            "job_id": job_id,
-            "iterations": completed,
-            "rejected": None,
-            "quality_gate": None,
-            "status": status,
-        }
-
-    if final_quality.get("recognizable") is True:
-        final_stage = "generic_refinement_complete"
-    elif final_quality.get("director_action") in {"build_mesh", "rebuild_mesh"}:
-        return await _generate_adaptive_mesh_fallback(
-            job_id,
-            reason=(final_quality.get("summary") or "")
-            + "\n"
-            + "\n".join(final_quality.get("instructions") or []),
-        )
-    else:
-        final_stage = "generic_needs_refinement"
-
-    status = _write_status(
-        root,
-        state="ready",
-        stage=final_stage,
-        modeling_strategy="procedural",
-        generic_model={
-            "version": current_version,
-            "title": current_spec.title,
-            "blend": f"model-v{current_version}.blend",
-            "renders": [
-                f"model-v{current_version}-{view}.png"
-                for view in (
-                    "front", "front-left", "left", "back-left", "back",
-                    "back-right", "right", "front-right", "top",
-                )
-            ],
-            "qa": f"model-v{current_version}-qa.json",
-        },
-        quality_gate=final_quality,
-    )
-    return {
-        "job_id": job_id,
-        "iterations": completed,
-        "rejected": None,
-        "quality_gate": final_quality,
-        "status": status,
-    }
+        current_spec, current_version = revised, version
+    status = await _ensure_final_model_quality(job_id, _read_status(root))
+    return {"job_id": job_id, "iterations": completed, "status": status,
+            "quality_gate": status.get("quality_gate")}
 
 
 @app.post("/v1/jobs/{job_id}/improve", dependencies=[Depends(require_api_token)])

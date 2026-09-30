@@ -121,7 +121,9 @@ def build_loft():
 def add_attachment(item):
     shape = item.get("shape", "cube")
     location = tuple(item.get("location", [0, 0, 0]))
-    if shape == "mesh":
+    if shape in {"lathe", "sweep"}:
+        create_parametric_part(item, location)
+    elif shape == "mesh":
         create_mesh_part(item, location)
     elif shape == "rod":
         start = Vector(item.get("start") or location)
@@ -190,11 +192,7 @@ def add_attachment(item):
     obj = bpy.context.object
     obj.name = str(item.get("name") or shape)[:80]
     if shape not in {"rod", "beam"}:
-        scale = item.get("scale", [1, 1, 1])
-        obj.scale = tuple(max(0.03, min(20.0, float(value))) for value in scale)
-        rotation = item.get("rotation_deg", [0, 0, 0])
-        obj.rotation_euler = tuple(math.radians(float(value)) for value in rotation)
-        bpy.ops.object.transform_apply(location=False, rotation=False, scale=True)
+        apply_part_transform(obj, item)
     obj.data.materials.append(material_for(item.get("color", "#808080")))
 
     if item.get("bevel", True):

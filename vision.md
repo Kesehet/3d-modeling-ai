@@ -59,7 +59,7 @@ structure. Relative review preferred v4 over working v1, but comparison against 
 it and incorrectly discarded progress in the working construction track. Four subsequent automatic
 rounds did not finish the model. This is not a production-quality Prius.
 
-Current general-engine change (verify CI/deploy before assuming live):
+PR #66 merged as `fcdf8f3c251c0f9e3294ab9e809eadb266ec20a2`; CI `36643792103` and deployment `36643960960` succeeded:
 
 - Arbitrary declarative polygon mesh parts work in primitive, loft and cage builders, and bounded
   attachment edits. This supports shaped panels and components beyond the original primitive vocabulary.
@@ -75,6 +75,30 @@ Current general-engine change (verify CI/deploy before assuming live):
   design is included in the generator or used as evidence that autonomous generation works.
 - An optional TRELLIS public-image experiment reached a ZeroGPU quota limit; no external reconstruction
   backend was added. Do not rotate hosts/accounts to bypass that limit.
+
+### Live geometry findings and current follow-up
+
+Normal API generation after #66, without supplied designs or canned models:
+
+- Table `c0f70b5c-cae9-4d17-84f4-04748711303e`: v1/v2 export correctly but vertical parts protrude
+  through the tabletop. The planner used full leg height as Blender scale, doubling its actual height.
+  The schema had no dimension/half-scale contract. v2 failed strict local review and v1 was retained.
+- Mug `d0a6eb4e-d115-420e-8144-19d564eb2468`: v2 correctly uses Z-up but the reasoning model wrote square
+  ring coordinates while describing them as circular. Actual pixels show a rounded rectangular block.
+  Quality remained failed, score 0.1. Do not claim these objects are finished.
+
+Follow-up under development (verify merge and deployment):
+
+- Full local `dimensions` override legacy `scale` for scene parts; existing saved scales retain their meaning.
+- Generic `lathe` revolves an AI-authored closed radius/height material profile, including hollow walls.
+  Generic `sweep` follows an AI-authored curved centerline with a round section and capped ends.
+  These are geometric operations, not object templates. They work in all three builders and attachment edits.
+- Procedural generation reviews the active feature before whole-object completion, retains relative improvement
+  without falsely accepting the feature, and checks already-present features before rewriting geometry.
+- Procedural revision uses visual diagnosis plus the reasoning model for coordinates. Representation switching
+  respects the director's choice; failed upright lofts are no longer forced into a horizontal cage.
+- Real Blender CI must verify a hollow revolved profile by raycast, a capped curved sweep, and exact full-size
+  dimensions after rotation. Unit/lifecycle tests cover progress, regressions and unchanged strict QA thresholds.
 
 ### Next action and release gate
 

@@ -94,3 +94,18 @@ Production follows the same pattern used by the other Hostinger projects:
 The GitHub repository needs the same `HOSTINGER_API_KEY` secret used by the other VPS deployment workflows. AI credentials should be added as repository/environment secrets rather than committed.
 
 See `tasks.md` and `docs/architecture.md`.
+
+### Parametric modeling parts
+
+The same declarative part vocabulary is available to scene generation and loft/cage attachments:
+
+- `dimensions: [x, y, z]` specifies **full local size before rotation** and overrides legacy `scale`.
+  Existing scale-only designs retain Blender's original primitive dimensions (a unit-scale cube is size 2).
+- `shape: "lathe"` with `profile: [[radius, z], ...]` revolves a closed material cross-section around local Z.
+  Outer and inner profile walls describe hollow forms; zero-radius points close a profile on the axis.
+- `shape: "sweep"` with `path: [[x, y, z], ...]` and `radius` builds a smooth curved tube with capped ends.
+- `shape: "mesh"` accepts local vertices and indexed faces for arbitrary polygon parts.
+
+The AI chooses profiles, paths, dimensions and placement from the request and references. These operations
+contain no subject-specific geometry. Generated candidates still require visual comparison and strict feature
+review; successful export alone does not certify a finished model.

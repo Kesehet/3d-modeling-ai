@@ -60,6 +60,8 @@ jobs:
           path: |
             blender-artifacts/mesh_part/*.png
             blender-artifacts/cage_panel/*.png
+            blender-artifacts/hollow_revolve/*.png
+            blender-artifacts/path_sweep/*.png
             blender-artifacts/**/*qa.json
             blender-artifacts/**/blender.log
           retention-days: 7

@@ -104,6 +104,27 @@ def main():
     run(root, "mesh_part", generic_scene_script(), {"spec": {
         "title": "Polygon panel", "presentation_base": False, "objects": [panel]}})
     run(root, "cage_panel", hard_surface_cage_script(), {"spec": {**spec, "attachments": [panel]}})
+    run(root, "hollow_revolve", generic_scene_script() + r"""
+body = objects[0]
+hit, location, normal, index = body.ray_cast(Vector((0, 0, 3)), Vector((0, 0, -1)))
+assert hit and abs(location.z - 0.2) < 0.001, (hit, location)
+""", {"spec": {"title": "Closed revolved material profile", "presentation_base": False,
+                "objects": [{"name": "profile", "shape": "lathe", "location": [0, 0, 0],
+                             "profile": [[0,0],[1,0],[1,2],[0.8,2],[0.8,0.2],[0,0.2]],
+                             "bevel": False}]}})
+    run(root, "path_sweep", generic_scene_script(), {"spec": {
+        "title": "Curved tube", "presentation_base": False,
+        "objects": [{"name": "path", "shape": "sweep", "location": [0,0,0],
+                     "path": [[-1,0,-1],[-1.8,0,0],[-1,0,1]], "radius": 0.1, "bevel": False}],
+    }})
+    run(root, "full_dimensions", generic_scene_script() + r"""
+body = objects[0]
+points = [body.matrix_world @ Vector(corner) for corner in body.bound_box]
+actual = [max(p[i] for p in points) - min(p[i] for p in points) for i in range(3)]
+assert all(abs(a-b) < 0.001 for a,b in zip(actual, [0.3,2.5,1.5])), actual
+""", {"spec": {"title": "Sized and rotated block", "presentation_base": False,
+                "objects": [{"name": "block", "shape": "cube", "location": [0,0,0],
+                             "dimensions": [0.3,1.5,2.5], "rotation_deg": [90,0,0], "bevel": False}]}})
     print("BLENDER_INTEGRATION_OK", root)
 
 

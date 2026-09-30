@@ -178,7 +178,7 @@ def test_initial_procedural_planner_is_scoped_to_active_feature(tmp_path, monkey
 
 
 def test_generate_procedural_candidate_passes_active_feature_to_planner(tmp_path, monkeypatch):
-    root, feature = setup_job(tmp_path, monkeypatch)
+    _, feature = setup_job(tmp_path, monkeypatch)
     seen = {}
 
     async def build_spec(job_id, auto_research, *, feature_task=None):

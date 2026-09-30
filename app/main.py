@@ -2935,7 +2935,14 @@ def _is_usable_reference_record(record: dict) -> bool:
         score = float(record.get("match_score") or 0.0)
     except (TypeError, ValueError):
         score = 0.0
-    return score >= 0.70 and bool(record.get("exact_identity_match", True))
+    identity_ok = bool(record.get("exact_identity_match", False)) or bool(
+        record.get("generic_geometry_reference", False)
+    )
+    return (
+        score >= 0.70
+        and identity_ok
+        and bool(record.get("useful_for_geometry", True))
+    )
 
 
 def _usable_reference_index(root: Path) -> list[dict]:
@@ -3986,6 +3993,11 @@ async def _verify_reference_batch(
             "verification_model": selected_model,
             "verification_query": query,
             "metadata_identity_support": _metadata_supports_reference_identity(plan, record),
+            "generic_geometry_reference": bool(
+                generic_geometry_mode
+                and decision.useful_for_geometry
+                and decision.match_score >= 0.70
+            ),
             "verified_at": datetime.now(UTC).isoformat(),
         }
         metadata_identity = _metadata_supports_reference_identity(plan, record)

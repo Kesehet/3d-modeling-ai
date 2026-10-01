@@ -7613,7 +7613,7 @@ async def _generate_hard_surface_cage(
             baseline_version is None
             or (comparison and comparison.get("candidate_is_better") is True)
         )
-        feature_complete, keep_candidate = _feature_candidate_review_decision(
+        feature_complete, _ = _feature_candidate_review_decision(
             feature_task,
             feature_evaluation,
             relative_improved=candidate_improved,

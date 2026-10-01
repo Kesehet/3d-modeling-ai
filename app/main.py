@@ -76,6 +76,7 @@ AUTO_IMPROVE_HARD_ROUND_CAP = 60
 COMPONENT_MAX_DEPTH = 2
 COMPONENT_AUTO_IMPROVE_ROUNDS = 6
 COMPONENT_MAX_INSTANCES = 16
+ASSEMBLY_REPAIR_MAX_ATTEMPTS = 2
 
 
 @app.on_event("startup")
@@ -998,6 +999,11 @@ class ComponentAssemblySpec(BaseModel):
     instances: list[ComponentInstanceSpec] = Field(min_length=1, max_length=COMPONENT_MAX_INSTANCES)
 
 
+class AssemblyRepairDecision(BaseModel):
+    rationale: str = Field(default="", max_length=2000)
+    parent_feature_ids: list[str] = Field(default_factory=list, max_length=12)
+
+
 class SubjectPartSpec(BaseModel):
     name: str = Field(min_length=1, max_length=100)
     count: int = Field(default=1, ge=1, le=12)
@@ -1819,6 +1825,367 @@ def _read_json_if_present(path: Path) -> dict:
     return value if isinstance(value, dict) else {}
 
 
+def _component_assembly_chain(
+    root: Path,
+    current_version: int,
+) -> tuple[int, list[dict]]:
+    """Return the preserved parent version and consecutive component installs."""
+
+    version = int(current_version)
+    chain: list[dict] = []
+    seen: set[int] = set()
+    while version not in seen:
+        seen.add(version)
+        payload = _read_json_if_present(root / f"component-assembly-v{version}.json")
+        if not payload:
+            break
+        try:
+            baseline_version = int(payload["baseline_version"])
+            candidate_version = int(payload.get("candidate_version") or version)
+        except (KeyError, TypeError, ValueError):
+            break
+        if candidate_version != version or baseline_version <= 0 or baseline_version >= version:
+            break
+        feature_id = str(payload.get("feature_id") or "").strip()
+        child_job_id = str(payload.get("child_job_id") or "").strip()
+        if not feature_id or not child_job_id:
+            break
+        chain.append(payload)
+        version = baseline_version
+    chain.reverse()
+    return version, chain
+
+
+async def _plan_assembled_parent_repair(
+    job_id: str,
+    *,
+    status: dict,
+    source_parent_version: int,
+    component_feature_ids: list[str],
+) -> AssemblyRepairDecision:
+    """Map final integrity defects to accepted parent features that need local repair."""
+
+    root = _require_job(job_id)
+    plan = load_feature_plan(root)
+    if plan is None:
+        raise HTTPException(status_code=409, detail="Feature plan is required for assembly repair.")
+
+    eligible = [
+        feature
+        for feature in plan.features
+        if (
+            feature.build_mode != "component_job"
+            and feature.status == "accepted"
+            and feature.acceptance_verified
+            and feature.accepted_version is not None
+            and feature.accepted_version <= source_parent_version
+        )
+    ]
+    eligible_ids = {feature.id for feature in eligible}
+    quality = status.get("quality_gate") if isinstance(status.get("quality_gate"), dict) else {}
+    current_version = (status.get("generic_model") or {}).get("version")
+
+    image_paths: list[Path] = []
+    for record in _usable_reference_index(root)[-2:]:
+        stored_name = str(record.get("stored_name") or "")
+        path = root / "references" / Path(stored_name).name
+        if path.is_file():
+            image_paths.append(path)
+    if isinstance(current_version, int):
+        for view in ("front", "front-left", "left", "front-right", "top"):
+            path = root / "renders" / f"model-v{current_version}-{view}.png"
+            if path.is_file():
+                image_paths.append(path)
+    for view in ("front-left", "left", "top"):
+        path = root / "renders" / f"model-v{source_parent_version}-{view}.png"
+        if path.is_file():
+            image_paths.append(path)
+
+    images = _encode_vision_images(image_paths) if image_paths else []
+    labels = [f"{path.parent.name}/{path.name}" for path in image_paths]
+    eligible_context = [
+        {
+            "id": feature.id,
+            "name": feature.name,
+            "strategy": feature.strategy,
+            "target_regions": feature.target_regions,
+            "owner_scope": feature.owner_scope,
+            "acceptance_criteria": feature.acceptance_criteria,
+            "assembly_anchor": feature.assembly_anchor,
+        }
+        for feature in eligible
+    ]
+
+    system = (
+        "You coordinate a conservative repair of an already-recognizable multi-part 3D model. "
+        "The current assembly failed final contact/integrity QA. Frozen component children will be reinstalled separately; "
+        "do NOT redesign them and do NOT select component_job features. Select only accepted IN-PLACE parent feature IDs "
+        "whose own geometry or mounting interface visibly needs correction before component reinstallation. "
+        "If a defect can be fixed solely by changing the component instance transform, return no parent_feature_ids. "
+        "If a parent seam/contact is visibly wrong, select the narrowest owning parent feature(s), preferring a socket, cap, "
+        "joint, mount, interface or local support feature over a broad primary body when possible. "
+        "Do not reopen good geometry merely because it is near a bad joint. Return JSON only matching the schema."
+    )
+    prompt = (
+        f"Current failed model version: {current_version}\n"
+        f"Preserved pre-install parent version: {source_parent_version}\n"
+        f"Frozen component feature IDs that will be reinstalled: {component_feature_ids}\n"
+        f"Final integrity QA: {json.dumps(quality.get('assembly_integrity') or quality, ensure_ascii=False)}\n"
+        f"Eligible accepted parent features: {json.dumps(eligible_context, ensure_ascii=False)}\n"
+        f"Images in order: {labels}\n"
+        "Choose zero or more parent_feature_ids from the eligible list only. Keep the repair surface area minimal."
+    )
+
+    client = OllamaProxyClient()
+    errors: list[str] = []
+    models = VISION_MODELS if images else (REASONING_MODEL, *VISION_MODELS)
+    for candidate_model in models:
+        try:
+            result = await client.chat_json(
+                model=candidate_model,
+                system=system,
+                prompt=prompt,
+                images=images or None,
+                schema=AssemblyRepairDecision.model_json_schema(),
+                temperature=0.0,
+                num_predict=3072,
+            )
+            decision = AssemblyRepairDecision.model_validate(result.data)
+            unknown = set(decision.parent_feature_ids) - eligible_ids
+            if unknown:
+                raise ValueError(
+                    "Assembly repair coordinator selected ineligible parent features: "
+                    + ", ".join(sorted(unknown))
+                )
+            decision.parent_feature_ids = list(dict.fromkeys(decision.parent_feature_ids))
+        except (OllamaProxyError, httpx.HTTPError, ValidationError, ValueError, TypeError) as exc:
+            errors.append(f"{candidate_model}: {exc}")
+            continue
+
+        payload = {
+            "job_id": job_id,
+            "failed_version": current_version,
+            "source_parent_version": source_parent_version,
+            "component_feature_ids": component_feature_ids,
+            "decision": decision.model_dump(),
+            "model": candidate_model,
+            "images": labels,
+            "created_at": datetime.now(UTC).isoformat(),
+        }
+        _write_llm_log(root, "assembly-repair-plan", payload)
+        append_history(
+            root,
+            "assembly_repair_planned",
+            failed_version=current_version,
+            source_parent_version=source_parent_version,
+            parent_feature_ids=decision.parent_feature_ids,
+            component_feature_ids=component_feature_ids,
+            rationale=decision.rationale,
+        )
+        return decision
+
+    raise HTTPException(
+        status_code=502,
+        detail="Assembly repair planning failed across configured models: " + " | ".join(errors[-4:]),
+    )
+
+
+def _advance_assembly_repair_if_ready(root: Path, status: dict) -> dict:
+    """After parent repairs pass strict QA, requeue frozen component installs."""
+
+    repair = status.get("assembly_repair")
+    if not isinstance(repair, dict) or repair.get("phase") != "repair_parent":
+        return status
+
+    plan = load_feature_plan(root)
+    if plan is None:
+        return status
+    by_id = {feature.id: feature for feature in plan.features}
+    parent_ids = [str(item) for item in repair.get("parent_feature_ids") or []]
+    if any(
+        feature_id not in by_id
+        or by_id[feature_id].status != "accepted"
+        or not by_id[feature_id].acceptance_verified
+        for feature_id in parent_ids
+    ):
+        return status
+
+    component_ids = [str(item) for item in repair.get("component_feature_ids") or []]
+    for feature_id in component_ids:
+        if feature_id in by_id:
+            retry_feature(root, feature_id, reset_attempts=True)
+
+    updated_repair = {
+        **repair,
+        "phase": "reinstall_components",
+        "reinstall_started_at": datetime.now(UTC).isoformat(),
+    }
+    quality = {
+        "scope": "feature",
+        "recognizable": False,
+        "summary": (
+            "Parent contact repairs passed strict QA. Reinstalling the same frozen "
+            "component geometry with newly planned transforms."
+        ),
+    }
+    updated = _write_status(
+        root,
+        state="ready",
+        stage="assembly_repair_reinstall_ready",
+        quality_gate=quality,
+        assembly_repair=updated_repair,
+        error="",
+    )
+    append_history(
+        root,
+        "assembly_repair_components_requeued",
+        component_feature_ids=component_ids,
+        source_parent_version=repair.get("source_parent_version"),
+        failed_version=repair.get("failed_version"),
+    )
+    return updated
+
+
+async def _prepare_assembled_parent_repair(job_id: str, status: dict) -> dict:
+    """Unwind a failed assembly to a preserved parent and schedule targeted repair."""
+
+    root = _require_job(job_id)
+    quality = status.get("quality_gate")
+    model = status.get("generic_model")
+    if (
+        not isinstance(quality, dict)
+        or quality.get("recognition_passed") is not True
+        or quality.get("assembly_integrity_pass") is not False
+        or not isinstance(model, dict)
+        or not isinstance(model.get("version"), int)
+    ):
+        return {"prepared": False, "reason": "Current state is not a repairable failed assembly."}
+
+    previous_repair = status.get("assembly_repair")
+    previous_attempt = (
+        int(previous_repair.get("attempt") or 0)
+        if isinstance(previous_repair, dict)
+        else 0
+    )
+    attempt = previous_attempt + 1
+    if attempt > ASSEMBLY_REPAIR_MAX_ATTEMPTS:
+        return {
+            "prepared": False,
+            "reason": (
+                "Coordinated assembly repair exhausted its bounded retry budget "
+                f"({ASSEMBLY_REPAIR_MAX_ATTEMPTS})."
+            ),
+        }
+
+    current_version = int(model["version"])
+    source_parent_version, chain = _component_assembly_chain(root, current_version)
+    if not chain:
+        return {
+            "prepared": False,
+            "reason": "No preserved component-assembly chain is available for safe repair.",
+        }
+
+    plan = load_feature_plan(root)
+    if plan is None:
+        return {"prepared": False, "reason": "Feature plan is unavailable."}
+    by_id = {feature.id: feature for feature in plan.features}
+    component_feature_ids: list[str] = []
+    previous_assemblies: dict[str, dict] = {}
+    for payload in chain:
+        feature_id = str(payload.get("feature_id") or "")
+        task = by_id.get(feature_id)
+        if task is None or task.build_mode != "component_job" or not task.component_job_id:
+            return {
+                "prepared": False,
+                "reason": f"Assembly chain references an unavailable component feature: {feature_id}",
+            }
+        if feature_id not in component_feature_ids:
+            component_feature_ids.append(feature_id)
+        assembly = payload.get("assembly")
+        if isinstance(assembly, dict):
+            previous_assemblies[feature_id] = assembly
+
+    decision = await _plan_assembled_parent_repair(
+        job_id,
+        status=status,
+        source_parent_version=source_parent_version,
+        component_feature_ids=component_feature_ids,
+    )
+    preserved_model, strategy = _preserved_model_metadata(
+        root,
+        source_parent_version,
+        title=str(model.get("title") or "Assembly repair parent"),
+    )
+
+    for feature_id in decision.parent_feature_ids:
+        retry_feature(root, feature_id, reset_attempts=True)
+
+    phase = "repair_parent" if decision.parent_feature_ids else "reinstall_components"
+    if not decision.parent_feature_ids:
+        for feature_id in component_feature_ids:
+            retry_feature(root, feature_id, reset_attempts=True)
+
+    repair = {
+        "attempt": attempt,
+        "phase": phase,
+        "failed_version": current_version,
+        "source_parent_version": source_parent_version,
+        "parent_feature_ids": decision.parent_feature_ids,
+        "component_feature_ids": component_feature_ids,
+        "previous_assemblies": previous_assemblies,
+        "blocking_defects": list(quality.get("blocking_geometry_defects") or []),
+        "repair_instructions": list(quality.get("instructions") or []),
+        "rationale": decision.rationale,
+        "prepared_at": datetime.now(UTC).isoformat(),
+    }
+    active_feature = (
+        decision.parent_feature_ids[0]
+        if decision.parent_feature_ids
+        else component_feature_ids[0]
+    )
+    new_quality = {
+        "scope": "feature",
+        "active_feature_id": active_feature,
+        "active_feature_passed": False,
+        "recognizable": False,
+        "summary": (
+            "Coordinated assembly repair is preserving the pre-install parent and frozen child geometry. "
+            "Only QA-selected parent contacts and component transforms will be reconsidered."
+        ),
+    }
+    updated = _write_status(
+        root,
+        state="ready",
+        stage=(
+            "assembly_repair_parent_ready"
+            if decision.parent_feature_ids
+            else "assembly_repair_reinstall_ready"
+        ),
+        modeling_strategy=strategy,
+        generic_model=preserved_model,
+        quality_gate=new_quality,
+        assembly_repair=repair,
+        error="",
+    )
+    append_history(
+        root,
+        "assembly_repair_prepared",
+        attempt=attempt,
+        failed_version=current_version,
+        source_parent_version=source_parent_version,
+        parent_feature_ids=decision.parent_feature_ids,
+        component_feature_ids=component_feature_ids,
+    )
+    return {
+        "prepared": True,
+        "attempt": attempt,
+        "source_parent_version": source_parent_version,
+        "parent_feature_ids": decision.parent_feature_ids,
+        "component_feature_ids": component_feature_ids,
+        "status": updated,
+    }
+
+
 async def _plan_component_assembly(
     parent_job_id: str,
     feature_task: FeatureTask,
@@ -1836,6 +2203,11 @@ async def _plan_component_assembly(
     parent_version, _, parent_model = parent_active
     child_version, _, child_model = child_active
     parent_request = _read_json_if_present(parent_root / "request.json")
+    repair_context = (
+        parent_status.get("assembly_repair")
+        if isinstance(parent_status.get("assembly_repair"), dict)
+        else {}
+    )
 
     active_parent_spec = _read_json_if_present(parent_root / f"scene-spec-v{parent_version}.json")
     if not active_parent_spec:
@@ -1854,6 +2226,12 @@ async def _plan_component_assembly(
         path = parent_root / "renders" / f"model-v{parent_version}-{view}.png"
         if path.is_file():
             image_paths.append(path)
+    failed_version = repair_context.get("failed_version")
+    if isinstance(failed_version, int) and failed_version != parent_version:
+        for view in ("front", "front-left", "left", "front-right", "top"):
+            path = parent_root / "renders" / f"model-v{failed_version}-{view}.png"
+            if path.is_file():
+                image_paths.append(path)
     for view in ("front", "left", "front-right", "top"):
         path = child_root / "renders" / f"model-v{child_version}-{view}.png"
         if path.is_file():
@@ -1862,7 +2240,12 @@ async def _plan_component_assembly(
     images = _encode_vision_images(image_paths) if image_paths else []
     labels = [
         (
-            f"parent/{path.name}"
+            (
+                f"failed-assembly/{path.name}"
+                if isinstance(failed_version, int)
+                and path.name.startswith(f"model-v{failed_version}-")
+                else f"parent/{path.name}"
+            )
             if path.parent == parent_root / "renders"
             else f"child/{path.name}"
             if path.parent == child_root / "renders"
@@ -1879,6 +2262,9 @@ async def _plan_component_assembly(
         "front camera is on negative Y. Each instance location is the parent-space point where the frozen child blend's "
         "global origin/assembly anchor must land. Use parent dimensions/spec and pixels to place that anchor on the correct "
         "visible mounting region. Preserve realistic contact with the parent and avoid floating/intersection errors. "
+        "When an ASSEMBLY REPAIR CONTEXT is supplied, the previous transform(s) produced a visible integrity failure. "
+        "Use the failed renders, blocking defects and repair instructions to make a deliberate contact correction; do not "
+        "blindly repeat the old transforms. Keep the frozen child geometry unchanged. "
         f"Return exactly {expected_instances} instance transform(s). For repeated identical parts, reuse this one "
         "frozen component with separate transforms. If unsure, prefer conservative scale and physically plausible contact."
     )
@@ -1888,6 +2274,9 @@ async def _plan_component_assembly(
         f"Parent active spec/context: {json.dumps(active_parent_spec, ensure_ascii=False)[:12000]}\n"
         f"Parent QA/bounds: {json.dumps(parent_qa, ensure_ascii=False)}\n"
         f"Frozen child QA/bounds: {json.dumps(child_qa, ensure_ascii=False)}\n"
+        f"ASSEMBLY REPAIR CONTEXT: {json.dumps(repair_context, ensure_ascii=False)[:10000]}\n"
+        f"Previous transform for this feature: "
+        f"{json.dumps((repair_context.get('previous_assemblies') or {}).get(feature_task.id) or {}, ensure_ascii=False)}\n"
         f"Image labels: {labels}\n"
         f"Return exactly {expected_instances} transforms. The frozen child's global origin is preserved as its assembly "
         "anchor; transforms are applied relative to that origin, not its bounds center."
@@ -2887,6 +3276,7 @@ async def _run_auto_improve(job_id: str, max_rounds: int) -> None:
         if not root.is_dir():
             return
 
+        current_status = _advance_assembly_repair_if_ready(root, _read_status(root))
         blocked, unresolved = _feature_queue_is_blocked(root)
         if blocked:
             status = _read_status(root)
@@ -2912,8 +3302,32 @@ async def _run_auto_improve(job_id: str, max_rounds: int) -> None:
             )
             return
 
-        before = await _ensure_final_model_quality(job_id, _read_status(root))
+        before = await _ensure_final_model_quality(job_id, current_status)
         if _assembled_parent_requires_safe_stop(root, before):
+            try:
+                repair = await _prepare_assembled_parent_repair(job_id, before)
+            except Exception as exc:  # noqa: BLE001 - preserve current assembly if repair planning fails
+                detail = str(exc.detail) if isinstance(exc, HTTPException) else str(exc)
+                repair = {"prepared": False, "reason": detail}
+                append_history(root, "assembly_repair_planning_failed", error=detail)
+            if repair.get("prepared") is True:
+                append_history(
+                    root,
+                    "auto_improve_round_completed",
+                    round=round_number,
+                    progress_changed=True,
+                    reason="coordinated assembly repair prepared",
+                )
+                no_progress_rounds = 0
+                continue
+
+            reason = str(
+                repair.get("reason")
+                or (
+                    "All frozen required components are installed, but whole-object QA still needs work. "
+                    "No safe coordinated repair could be prepared."
+                )
+            )
             _write_status(
                 root,
                 state="ready",
@@ -2922,17 +3336,15 @@ async def _run_auto_improve(job_id: str, max_rounds: int) -> None:
                     state="assembled_needs_review",
                     current_round=round_number,
                     max_rounds=round_limit,
-                    reason=(
-                        "All frozen required components are installed, but whole-object QA still needs work. "
-                        "Generic SceneSpec rebuilding is paused because it could erase accepted component geometry."
-                    ),
+                    reason=reason,
                 ),
             )
             append_history(
                 root,
                 "auto_improve_stopped",
                 round=round_number,
-                reason="preserved frozen component assembly before destructive global rebuild",
+                reason="coordinated assembly repair unavailable",
+                detail=reason,
             )
             return
 

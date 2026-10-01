@@ -54,21 +54,30 @@ if not parent_objects:
 with bpy.data.libraries.load(COMPONENT_BLEND, link=False) as (data_from, data_to):
     data_to.objects = list(data_from.objects)
 
+loaded_objects = [obj for obj in data_to.objects if obj is not None]
 source_objects = [
     obj
-    for obj in data_to.objects
-    if obj is not None
-    and obj.type in {"MESH", "CURVE", "SURFACE", "FONT"}
+    for obj in loaded_objects
+    if obj.type in {"MESH", "CURVE", "SURFACE", "FONT"}
     and "presentation base" not in obj.name.lower()
     and "ground" not in obj.name.lower()
 ]
 if not source_objects:
     raise RuntimeError("Accepted component blend contains no installable geometry.")
 
-# Preserve the child blend's world origin as the assembly anchor. Child jobs are
-# responsible for placing their intended mounting point at that origin. Re-centering
-# imported geometry by its bounding box would destroy that semantic anchor for
-# asymmetric components.
+# Library-loaded objects are not part of a view layer yet, so matrix_world can be
+# stale/identity even when the child blend stores meaningful object offsets. Stage
+# the whole loaded hierarchy long enough for Blender to evaluate the frozen child's
+# true world transforms, then flatten those transforms into the installed copies.
+staging = bpy.data.collections.new("__component_staging__")
+scene.collection.children.link(staging)
+for obj in loaded_objects:
+    staging.objects.link(obj)
+bpy.context.view_layer.update()
+source_world_matrices = {
+    source.name: source.matrix_world.copy()
+    for source in source_objects
+}
 installed_objects = []
 for instance_index, instance in enumerate(INSTANCES, start=1):
     location = instance.get("location", [0.0, 0.0, 0.0])
@@ -89,14 +98,19 @@ for instance_index, instance in enumerate(INSTANCES, start=1):
             clone.data = source.data.copy()
         scene.collection.objects.link(clone)
         clone.name = f"{COMPONENT_NAME}_{instance_index}_{source.name}"[:63]
-        clone.matrix_world = instance_matrix @ source.matrix_world
+        clone.parent = None
+        clone.matrix_world = instance_matrix @ source_world_matrices[source.name]
         installed_objects.append(clone)
 
-for source in source_objects:
+for source in loaded_objects:
     try:
         bpy.data.objects.remove(source, do_unlink=True)
     except Exception:
         pass
+try:
+    bpy.data.collections.remove(staging)
+except Exception:
+    pass
 
 all_model_objects = [*parent_objects, *installed_objects]
 bpy.context.view_layer.update()

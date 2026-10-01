@@ -162,3 +162,72 @@ def test_component_assembly_executor_imports_frozen_child_and_renders_parent():
     assert '"front-right"' in script
     assert 'bpy.ops.wm.save_as_mainfile(filepath=BLEND)' in script
     assert '"installed_component": COMPONENT_NAME' in script
+
+
+
+def test_parent_component_retry_reopens_failed_child_without_resetting_verified_siblings(
+    tmp_path, monkeypatch
+):
+    parent_id, root, feature = _parent_job(tmp_path, monkeypatch)
+    child_id = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+    child_root = main.JOBS_ROOT / child_id
+    child_root.mkdir(parents=True)
+    for category in main.ARTIFACT_CATEGORIES:
+        (child_root / category).mkdir(exist_ok=True)
+    (child_root / "request.json").write_text(
+        json.dumps({"job_id": child_id, "prompt": "Isolated generic component"}),
+        encoding="utf-8",
+    )
+
+    child_plan = FeaturePlan(
+        features=[
+            FeatureTask(
+                id="verified-base",
+                name="Verified base",
+                status="accepted",
+                accepted_version=2,
+                acceptance_verified=True,
+                acceptance_score=0.9,
+            ),
+            FeatureTask(
+                id="failed-detail",
+                name="Failed detail",
+                status="failed",
+                attempts=3,
+                depends_on=["verified-base"],
+            ),
+            FeatureTask(
+                id="dependent-finish",
+                name="Dependent finish",
+                status="blocked",
+                depends_on=["failed-detail"],
+            ),
+        ]
+    )
+    save_feature_plan(child_root, child_plan)
+
+    parent_plan = load_feature_plan(root)
+    assert parent_plan is not None
+    parent_feature = parent_plan.features[0]
+    parent_feature.component_job_id = child_id
+    parent_feature.status = "failed"
+    save_feature_plan(root, parent_plan)
+
+    reopened = main._requeue_linked_component_child(
+        parent_feature,
+        reset_attempts=True,
+    )
+
+    assert reopened == ["failed-detail"]
+    persisted = load_feature_plan(child_root)
+    assert persisted is not None
+    verified, failed, dependent = persisted.features
+    assert verified.status == "accepted"
+    assert verified.acceptance_verified is True
+    assert verified.accepted_version == 2
+    assert failed.status == "retry"
+    assert failed.attempts == 0
+    assert dependent.status == "pending"
+    child_status = main._read_status(child_root)
+    assert child_status["state"] == "ready"
+    assert child_status["stage"] == "component_feature_retry_ready"

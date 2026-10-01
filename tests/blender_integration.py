@@ -104,10 +104,13 @@ def main():
     run(root, "origin_anchor_assembly", component_assembly_script() + r"""
 assert len(installed_objects) == 1, len(installed_objects)
 installed = installed_objects[0]
-translation = installed.matrix_world.translation
-assert abs(translation.x - 3.0) < 0.001, translation
-assert abs(translation.y) < 0.001, translation
-assert abs(translation.z) < 0.001, translation
+anchor = installed.matrix_world.translation
+assert abs(anchor.x - 2.0) < 0.001, anchor
+assert abs(anchor.y) < 0.001, anchor
+assert abs(anchor.z) < 0.001, anchor
+world_points = [installed.matrix_world @ Vector(corner) for corner in installed.bound_box]
+geometry_center_x = (min(point.x for point in world_points) + max(point.x for point in world_points)) / 2
+assert abs(geometry_center_x - 3.0) < 0.001, geometry_center_x
 """, {
         "parent_blend_path": str(parent / "model-v1.blend"),
         "component_blend_path": str(anchored_child / "model-v1.blend"),

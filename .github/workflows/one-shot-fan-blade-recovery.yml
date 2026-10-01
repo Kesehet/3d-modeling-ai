@@ -1,8 +1,8 @@
-name: One-shot fan blade recovery test
+name: One-shot blade child recovery test
 
 on:
-  pull_request:
-    branches: [main]
+  push:
+    branches: [test-fan-blade-recovery-20261001]
 
 permissions:
   contents: read
@@ -15,9 +15,9 @@ jobs:
     env:
       THREED_API_TOKEN: ${{ secrets.THREED_API_TOKEN }}
       THREED_HOSTNAME: ${{ vars.THREED_HOSTNAME || '3d-modeling-ai.srv1058562.hstgr.cloud' }}
-      JOB_ID: c310811a-7699-4c52-9d57-6f74752ff682
+      JOB_ID: b6fd24bf-ce87-48a8-8b0a-1f0b34a22264
     steps:
-      - name: Retry preserved blade component and run autonomous improvement
+      - name: Retry preserved blade mounting arm and run autonomous improvement
         run: |
           set -euo pipefail
           BASE_URL="https://$THREED_HOSTNAME"
@@ -27,7 +27,7 @@ jobs:
             -H "Authorization: Bearer $THREED_API_TOKEN" \
             -H "Content-Type: application/json" \
             -X POST \
-            -d '{"feature_id":"blade-component","model_version":32,"reset_attempts":true}' \
+            -d '{"feature_id":"blade-mounting-arm","model_version":1,"reset_attempts":true}' \
             -w '%{http_code}' -o diagnostics/json/retry.json \
             "$BASE_URL/v1/jobs/$JOB_ID/features/retry")
           echo "RETRY_HTTP=$retry_code"
@@ -37,7 +37,7 @@ jobs:
           auto_code=$(curl --silent --show-error --retry 3 --retry-all-errors --retry-delay 3 \
             -H "Authorization: Bearer $THREED_API_TOKEN" \
             -H "Content-Type: application/json" \
-            -X POST -d '{"rounds":20}' \
+            -X POST -d '{"rounds":12}' \
             -w '%{http_code}' -o diagnostics/json/auto-start.json \
             "$BASE_URL/v1/jobs/$JOB_ID/auto-improve")
           echo "AUTO_HTTP=$auto_code"

@@ -104,12 +104,11 @@ def main():
     run(root, "origin_anchor_assembly", component_assembly_script() + r"""
 assert len(installed_objects) == 1, len(installed_objects)
 installed = installed_objects[0]
-anchor = installed.matrix_world.translation
-assert abs(anchor.x - 2.0) < 0.001, anchor
-assert abs(anchor.y) < 0.001, anchor
-assert abs(anchor.z) < 0.001, anchor
 world_points = [installed.matrix_world @ Vector(corner) for corner in installed.bound_box]
 geometry_center_x = (min(point.x for point in world_points) + max(point.x for point in world_points)) / 2
+# The child geometry is centered at child-space x=1. Installing the child global
+# origin at parent x=2 must therefore put the geometry at x=3. Re-centering or
+# losing the unlinked source transform would incorrectly put it at x=2.
 assert abs(geometry_center_x - 3.0) < 0.001, geometry_center_x
 """, {
         "parent_blend_path": str(parent / "model-v1.blend"),

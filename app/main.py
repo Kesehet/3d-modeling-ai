@@ -76,7 +76,7 @@ AUTO_IMPROVE_HARD_ROUND_CAP = 60
 COMPONENT_MAX_DEPTH = 2
 COMPONENT_AUTO_IMPROVE_ROUNDS = 6
 COMPONENT_MAX_INSTANCES = 16
-ASSEMBLY_REPAIR_MAX_ATTEMPTS = 2
+ASSEMBLY_REPAIR_MAX_ATTEMPTS = 3
 
 
 @app.on_event("startup")
@@ -2305,8 +2305,13 @@ async def _plan_component_assembly(
         "When an ASSEMBLY REPAIR CONTEXT is supplied, the previous transform(s) produced a visible integrity failure. "
         "Use the failed renders, blocking defects and repair instructions to make a deliberate correction; do not "
         "blindly repeat the old transforms. Location, rotation and instance scale are all available repair controls. "
-        "If the frozen child is locally correct but visibly too thin/small/large after installation, adjust instance scale "
-        "conservatively instead of redesigning the child. Keep the frozen child geometry unchanged. "
+        "Treat the PREVIOUS TRANSFORM as an explicit baseline: when QA says the installed component is still too short, "
+        "small, thin, large, offset, or deeply intersecting, make the next transform directionally correct relative to "
+        "that baseline rather than resetting to a generic scale. Inspect the child views to infer which local dimensions "
+        "correspond to length, width/chord, and thickness; non-uniform scale is allowed when only some installed dimensions "
+        "need correction. Do not enlarge thickness merely because length or width is deficient. "
+        "If the frozen child is locally correct but visibly wrong in parent-context proportion, adjust instance scale "
+        "instead of redesigning the child. Keep the frozen child geometry unchanged. "
         f"Return exactly {expected_instances} instance transform(s). For repeated identical parts, reuse this one "
         "frozen component with separate transforms. If unsure, prefer conservative scale and physically plausible contact."
     )

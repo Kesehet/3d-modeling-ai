@@ -34,6 +34,17 @@ jobs:
               curl -fsSL -H "Authorization: Bearer $THREED_API_TOKEN" "$BASE_URL/v1/jobs/$id/artifacts/renders/$enc" -o "$dest/$name" || true
             done <<< "$names"
           done
+          mkdir -p snapshot/child-evidence snapshot/child-logs
+          for name in model-v13.obj model-v18.obj model-v23.obj model-v24.obj model-v13-qa.json model-v18-qa.json model-v23-qa.json model-v24-qa.json; do
+            enc=$(python -c 'import sys,urllib.parse;print(urllib.parse.quote(sys.argv[1],safe=""))' "$name")
+            curl -fsSL -H "Authorization: Bearer $THREED_API_TOKEN" "$BASE_URL/v1/jobs/$CHILD_JOB/artifacts/exports/$enc" -o "snapshot/child-evidence/$name" || true
+          done
+          lognames=$(jq -r '.artifacts.logs[]?.name // empty' snapshot/json/child-artifacts.json | grep -E 'adaptive-loft-(spec|revision)|feature-qa-' | tail -n 20)
+          while IFS= read -r name; do
+            [ -n "$name" ] || continue
+            enc=$(python -c 'import sys,urllib.parse;print(urllib.parse.quote(sys.argv[1],safe=""))' "$name")
+            curl -fsSL -H "Authorization: Bearer $THREED_API_TOKEN" "$BASE_URL/v1/jobs/$CHILD_JOB/artifacts/logs/$enc" -o "snapshot/child-logs/$name" || true
+          done <<< "$lognames"
           echo "PARENT"; jq '{state,stage,modeling_strategy,auto_improve,quality_gate,feature_plan,generic_model}' snapshot/json/parent.json
           echo "CHILD"; jq '{state,stage,modeling_strategy,auto_improve,quality_gate,feature_plan,generic_model}' snapshot/json/child.json
       - uses: actions/upload-artifact@v4

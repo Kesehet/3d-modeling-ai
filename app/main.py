@@ -1429,7 +1429,9 @@ def _component_child_prompt(
             if exclusions
             else ""
         )
-        + "Keep the component centered around a sensible mounting/origin point. Decompose it recursively only when "
+        + "Place the intended parent attachment/mounting anchor exactly at Blender world origin [0, 0, 0], and orient " +
+        "the component consistently around that anchor. The parent assembler preserves this global origin as the " +
+        "assembly anchor; do not shift the component merely to center its bounding box. Decompose it recursively only when "
         "a visible child assembly has meaningful independent geometry AND is not reserved by a parent-owned exclusion; "
         "do not recurse into microscopic or trivial details."
     )
@@ -1723,8 +1725,9 @@ async def _plan_component_assembly(
         "You are the assembly coordinator for an autonomous Blender system. The child component is FROZEN accepted "
         "geometry; do not redesign it. Decide only where/how to instance it in the parent. Return JSON matching the "
         "ComponentAssemblySpec schema. Coordinates are Blender world coordinates: X left/right, Y depth, Z up; the "
-        "front camera is on negative Y. Use parent dimensions/spec and pixels to place the component on the correct "
-        "visible mounting regions. Preserve realistic contact with the parent and avoid floating/intersection errors. "
+        "front camera is on negative Y. Each instance location is the parent-space point where the frozen child blend's "
+        "global origin/assembly anchor must land. Use parent dimensions/spec and pixels to place that anchor on the correct "
+        "visible mounting region. Preserve realistic contact with the parent and avoid floating/intersection errors. "
         f"Return exactly {expected_instances} instance transform(s). For repeated identical parts, reuse this one "
         "frozen component with separate transforms. If unsure, prefer conservative scale and physically plausible contact."
     )
@@ -1735,8 +1738,8 @@ async def _plan_component_assembly(
         f"Parent QA/bounds: {json.dumps(parent_qa, ensure_ascii=False)}\n"
         f"Frozen child QA/bounds: {json.dumps(child_qa, ensure_ascii=False)}\n"
         f"Image labels: {labels}\n"
-        f"Return exactly {expected_instances} transforms. The child geometry is normalized around its own bounds center "
-        "before each transform is applied."
+        f"Return exactly {expected_instances} transforms. The frozen child's global origin is preserved as its assembly "
+        "anchor; transforms are applied relative to that origin, not its bounds center."
     )
 
     client = OllamaProxyClient()

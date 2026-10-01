@@ -1,0 +1,96 @@
+name: One-shot fan blade recovery test
+
+on:
+  push:
+    branches: [test-fan-blade-recovery-20261001]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    environment: production
+    timeout-minutes: 50
+    env:
+      THREED_API_TOKEN: ${{ secrets.THREED_API_TOKEN }}
+      THREED_HOSTNAME: ${{ vars.THREED_HOSTNAME || '3d-modeling-ai.srv1058562.hstgr.cloud' }}
+      JOB_ID: c310811a-7699-4c52-9d57-6f74752ff682
+    steps:
+      - name: Retry preserved blade component and run autonomous improvement
+        run: |
+          set -euo pipefail
+          BASE_URL="https://$THREED_HOSTNAME"
+          mkdir -p diagnostics/json diagnostics/renders
+
+          retry_code=$(curl --silent --show-error --retry 3 --retry-all-errors --retry-delay 3 \
+            -H "Authorization: Bearer $THREED_API_TOKEN" \
+            -H "Content-Type: application/json" \
+            -X POST \
+            -d '{"feature_id":"blade-component","model_version":32,"reset_attempts":true}' \
+            -w '%{http_code}' -o diagnostics/json/retry.json \
+            "$BASE_URL/v1/jobs/$JOB_ID/features/retry")
+          echo "RETRY_HTTP=$retry_code"
+          cat diagnostics/json/retry.json | jq .
+          test "$retry_code" -ge 200 -a "$retry_code" -lt 300
+
+          auto_code=$(curl --silent --show-error --retry 3 --retry-all-errors --retry-delay 3 \
+            -H "Authorization: Bearer $THREED_API_TOKEN" \
+            -H "Content-Type: application/json" \
+            -X POST -d '{"rounds":20}' \
+            -w '%{http_code}' -o diagnostics/json/auto-start.json \
+            "$BASE_URL/v1/jobs/$JOB_ID/auto-improve")
+          echo "AUTO_HTTP=$auto_code"
+          cat diagnostics/json/auto-start.json | jq .
+          test "$auto_code" -ge 200 -a "$auto_code" -lt 300
+
+          sleep 10
+          for attempt in $(seq 1 180); do
+            curl --fail --silent --show-error --retry 2 \
+              "$BASE_URL/dashboard/api" -o diagnostics/json/dashboard.json
+            jq --arg id "$JOB_ID" '.jobs[] | select(.job_id == $id)' \
+              diagnostics/json/dashboard.json > diagnostics/json/job.json
+            state=$(jq -r '.state // ""' diagnostics/json/job.json)
+            stage=$(jq -r '.stage // ""' diagnostics/json/job.json)
+            ai=$(jq -r '.auto_improve.state // ""' diagnostics/json/job.json)
+            reason=$(jq -r '.auto_improve.reason // ""' diagnostics/json/job.json)
+            echo "poll=$attempt state=$state stage=$stage auto=$ai reason=$reason"
+            if [ "$state" != "running" ] && [ "$ai" != "running" ] && [ "$ai" != "queued" ] && [ "$ai" != "starting" ]; then
+              break
+            fi
+            sleep 15
+          done
+
+          curl --fail --silent --show-error \
+            -H "Authorization: Bearer $THREED_API_TOKEN" \
+            "$BASE_URL/v1/jobs/$JOB_ID/history" -o diagnostics/json/history.json
+          curl --fail --silent --show-error \
+            -H "Authorization: Bearer $THREED_API_TOKEN" \
+            "$BASE_URL/v1/jobs/$JOB_ID/artifacts" -o diagnostics/json/artifacts.json
+
+          jq --arg id "$JOB_ID" '.jobs[] | select(.job_id == $id)' \
+            diagnostics/json/dashboard.json > diagnostics/json/job.json
+          jq '{
+            job_id,state,stage,modeling_strategy,auto_improve,quality_gate,
+            feature_plan,
+            render_count:(.renders|length)
+          }' diagnostics/json/job.json
+
+          names=$(jq -r '.artifacts.renders[]?.name // empty' diagnostics/json/artifacts.json \
+            | sort -V | tail -n 45)
+          while IFS= read -r name; do
+            [ -n "$name" ] || continue
+            encoded=$(python -c 'import sys,urllib.parse;print(urllib.parse.quote(sys.argv[1],safe=""))' "$name")
+            curl --fail --silent --show-error --retry 1 \
+              -H "Authorization: Bearer $THREED_API_TOKEN" \
+              "$BASE_URL/v1/jobs/$JOB_ID/artifacts/renders/$encoded" \
+              -o "diagnostics/renders/$name" || true
+          done <<< "$names"
+
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fan-blade-recovery-diagnostics
+          path: diagnostics
+          retention-days: 7

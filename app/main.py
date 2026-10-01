@@ -1999,9 +1999,13 @@ async def _build_and_install_component_feature(
         baseline_version=baseline_version,
         candidate_version=candidate_version,
     )
-    feature_passed = _feature_evaluation_accepts(refreshed_task, evaluation)
     better = bool(comparison.get("candidate_is_better"))
-    accept_candidate = bool(feature_passed and better)
+    feature_passed, _ = _feature_candidate_review_decision(
+        refreshed_task,
+        evaluation,
+        relative_improved=better,
+    )
+    accept_candidate = feature_passed
 
     if accept_candidate:
         finish_feature(
@@ -4719,6 +4723,58 @@ def _preserved_model_metadata(root: Path, version: int, *, title: str) -> tuple[
     return model, strategy
 
 
+def _requeue_linked_component_child(
+    feature_task: FeatureTask,
+    *,
+    reset_attempts: bool,
+) -> list[str]:
+    """Reopen failed work in a linked component child while preserving verified siblings."""
+
+    if feature_task.build_mode != "component_job" or not feature_task.component_job_id:
+        return []
+
+    child_root = JOBS_ROOT / feature_task.component_job_id
+    if not child_root.is_dir():
+        return []
+
+    child_plan = load_feature_plan(child_root)
+    if child_plan is None:
+        return []
+
+    reopen_ids = [
+        item.id
+        for item in child_plan.features
+        if item.status in {"failed", "retry"} and not item.acceptance_verified
+    ]
+    for feature_id in reopen_ids:
+        retry_feature(
+            child_root,
+            feature_id,
+            reset_attempts=reset_attempts,
+        )
+
+    if reopen_ids:
+        child_status = _read_status(child_root)
+        _write_status(
+            child_root,
+            state="ready",
+            stage="component_feature_retry_ready",
+            modeling_strategy=child_status.get("modeling_strategy") or "procedural",
+            generic_model=child_status.get("generic_model"),
+            quality_gate=child_status.get("quality_gate"),
+            error="",
+        )
+        append_history(
+            child_root,
+            "component_features_requeued_from_parent",
+            parent_feature_id=feature_task.id,
+            reopened_feature_ids=reopen_ids,
+            reset_attempts=reset_attempts,
+        )
+
+    return reopen_ids
+
+
 @app.post("/v1/jobs/{job_id}/features/retry", dependencies=[Depends(require_api_token)])
 async def retry_job_feature(job_id: str, request: FeatureRetryRequest) -> dict:
     root = _require_job(job_id)
@@ -4742,6 +4798,10 @@ async def retry_job_feature(job_id: str, request: FeatureRetryRequest) -> dict:
     retry_feature(
         root,
         task.id,
+        reset_attempts=request.reset_attempts,
+    )
+    reopened_child_features = _requeue_linked_component_child(
+        task,
         reset_attempts=request.reset_attempts,
     )
     quality = {
@@ -4783,11 +4843,13 @@ async def retry_job_feature(job_id: str, request: FeatureRetryRequest) -> dict:
         feature_name=task.name,
         preserved_version=request.model_version,
         reset_attempts=request.reset_attempts,
+        reopened_child_features=reopened_child_features,
     )
     return {
         "job_id": job_id,
         "feature_id": task.id,
         "preserved_version": request.model_version,
+        "reopened_child_features": reopened_child_features,
         "feature_plan": feature_plan_summary(root),
         "status": status,
     }
@@ -5183,6 +5245,32 @@ def _feature_evaluation_accepts(
         and confidence >= 0.75
         and match_score >= minimum_match
     )
+
+
+def _feature_candidate_review_decision(
+    feature_task: FeatureTask,
+    evaluation: dict,
+    *,
+    relative_improved: bool,
+) -> tuple[bool, bool]:
+    """Return (feature_complete, keep_candidate) for a feature-scoped candidate.
+
+    Strict feature QA is the authoritative completion gate because it already
+    checks visibility, acceptance criteria, confidence, reference match and
+    protected-geometry regression. Relative comparison is still useful for
+    ranking incomplete drafts, but a passing candidate must not be rejected
+    merely because it is visually equivalent to the preserved best.
+    """
+
+    feature_complete = _feature_evaluation_accepts(feature_task, evaluation)
+    keep_candidate = bool(
+        feature_complete
+        or (
+            relative_improved
+            and evaluation.get("regression_detected") is not True
+        )
+    )
+    return feature_complete, keep_candidate
 
 
 async def _evaluate_feature_candidate(
@@ -7237,7 +7325,11 @@ async def _refine_hard_surface_cage_incrementally(
             baseline_version=baseline_version,
             candidate_version=version,
         )
-        feature_complete = _feature_evaluation_accepts(feature_task, feature_evaluation)
+        feature_complete, _ = _feature_candidate_review_decision(
+            feature_task,
+            feature_evaluation,
+            relative_improved=improved,
+        )
     elif improved:
         try:
             recognizability = await _generic_recognizability_check(
@@ -7276,7 +7368,7 @@ async def _refine_hard_surface_cage_incrementally(
             )
             better_than_active = active_comparison.get("candidate_is_better") is True
 
-    if improved and not better_than_active:
+    if improved and not better_than_active and not feature_complete:
         status = _retain_working_cage_progress(root, previous_status, version, feature_task,
                                                feature_evaluation, comparison)
         return {**build, "status": status, "baseline_version": baseline_version,
@@ -7284,9 +7376,9 @@ async def _refine_hard_surface_cage_incrementally(
                 "action": action.model_dump(), "comparison": comparison,
                 "feature_evaluation": feature_evaluation}
 
-    if improved:
+    if improved or feature_complete:
         candidate_model = build.get("candidate_model")
-        if recognizability and recognizability.get("recognizable") is True:
+        if feature_complete or (recognizability and recognizability.get("recognizable") is True):
             better_than_active = True
         next_active_model = candidate_model if better_than_active else active_model
         quality = dict(
@@ -7310,7 +7402,7 @@ async def _refine_hard_surface_cage_incrementally(
             quality["summary"] = comparison.get("summary") or quality.get("summary")
         quality["representation"] = "hard_surface_cage"
         quality["working_cage_version"] = version
-        quality["candidate_improved"] = True
+        quality["candidate_improved"] = improved
 
         status = _write_status(
             root,
@@ -7517,10 +7609,14 @@ async def _generate_hard_surface_cage(
             baseline_version=baseline_version,
             candidate_version=version,
         )
-        feature_complete = _feature_evaluation_accepts(feature_task, feature_evaluation)
         candidate_improved = bool(
             baseline_version is None
             or (comparison and comparison.get("candidate_is_better") is True)
+        )
+        feature_complete, keep_candidate = _feature_candidate_review_decision(
+            feature_task,
+            feature_evaluation,
+            relative_improved=candidate_improved,
         )
 
         working_improved = candidate_improved
@@ -7530,7 +7626,7 @@ async def _generate_hard_surface_cage(
             )
             candidate_improved = active_comparison.get("candidate_is_better") is True
 
-        if working_improved and not candidate_improved:
+        if working_improved and not candidate_improved and not feature_complete:
             status = _retain_working_cage_progress(root, previous_status, version, feature_task,
                                                    feature_evaluation, comparison or {})
             return {**build, "status": status, "accepted": False, "kept": True, "promoted": False,
@@ -7561,7 +7657,7 @@ async def _generate_hard_surface_cage(
         candidate_model = build.get("candidate_model")
         previous_stall_count = int(previous_status.get("cage_edit_stall_count") or 0)
 
-        if feature_complete and candidate_improved:
+        if feature_complete:
             status = _write_status(
                 root,
                 state="ready",
@@ -8513,15 +8609,15 @@ async def _generate_adaptive_mesh_fallback(
     if feature_task is not None:
         previous_quality = _quality_snapshot(previous_status.get("quality_gate"))
         quality = dict(previous_quality)
-        feature_passed = bool(
-            feature_evaluation
-            and _feature_evaluation_accepts(feature_task, feature_evaluation)
-        )
         better = bool(
             baseline_version is None
             or (comparison and comparison.get("candidate_is_better") is True)
         )
-        accept_candidate = better
+        feature_passed, accept_candidate = _feature_candidate_review_decision(
+            feature_task,
+            feature_evaluation or {},
+            relative_improved=better,
+        )
         recognizable = (
             (feature_evaluation or {}).get("subject_recognizable")
             if (feature_evaluation or {}).get("subject_recognizable") is not None
@@ -9114,15 +9210,19 @@ async def _review_procedural_candidate(
     comparison = None
     if baseline is not None and baseline != version:
         comparison = await _compare_generic_versions(root, baseline_version=baseline, candidate_version=version)
-    kept = baseline is None or baseline == version or (comparison or {}).get("candidate_is_better") is True
+    relative_kept = baseline is None or baseline == version or (comparison or {}).get("candidate_is_better") is True
+    kept = relative_kept
     accepted = False
     if feature_task is not None:
         evaluation = evaluation or await _evaluate_feature_candidate(
             job_id, feature_task, baseline_version=baseline if baseline != version else None,
             candidate_version=version,
         )
-        kept = kept and evaluation.get("regression_detected") is not True
-        accepted = kept and _feature_evaluation_accepts(feature_task, evaluation)
+        accepted, kept = _feature_candidate_review_decision(
+            feature_task,
+            evaluation,
+            relative_improved=relative_kept,
+        )
         quality = {
             "scope": "feature", "active_feature_id": feature_task.id,
             "active_feature_passed": accepted, "representation": "procedural",

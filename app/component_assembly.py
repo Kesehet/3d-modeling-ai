@@ -65,27 +65,10 @@ source_objects = [
 if not source_objects:
     raise RuntimeError("Accepted component blend contains no installable geometry.")
 
-source_points = []
-for obj in source_objects:
-    if not hasattr(obj, "bound_box"):
-        continue
-    source_points.extend(obj.matrix_world @ Vector(corner) for corner in obj.bound_box)
-if not source_points:
-    raise RuntimeError("Accepted component geometry has no usable bounds.")
-
-component_min = Vector((
-    min(point.x for point in source_points),
-    min(point.y for point in source_points),
-    min(point.z for point in source_points),
-))
-component_max = Vector((
-    max(point.x for point in source_points),
-    max(point.y for point in source_points),
-    max(point.z for point in source_points),
-))
-component_center = (component_min + component_max) / 2
-normalize = Matrix.Translation(-component_center)
-
+# Preserve the child blend's world origin as the assembly anchor. Child jobs are
+# responsible for placing their intended mounting point at that origin. Re-centering
+# imported geometry by its bounding box would destroy that semantic anchor for
+# asymmetric components.
 installed_objects = []
 for instance_index, instance in enumerate(INSTANCES, start=1):
     location = instance.get("location", [0.0, 0.0, 0.0])
@@ -106,7 +89,7 @@ for instance_index, instance in enumerate(INSTANCES, start=1):
             clone.data = source.data.copy()
         scene.collection.objects.link(clone)
         clone.name = f"{COMPONENT_NAME}_{instance_index}_{source.name}"[:63]
-        clone.matrix_world = instance_matrix @ normalize @ source.matrix_world
+        clone.matrix_world = instance_matrix @ source.matrix_world
         installed_objects.append(clone)
 
 for source in source_objects:
@@ -225,6 +208,7 @@ qa = {
     "scene_dimensions_blender_units": [round(float(value), 4) for value in size],
     "component_source_blend": COMPONENT_BLEND,
     "parent_source_blend": PARENT_BLEND,
+    "assembly_anchor": "component_global_origin",
     "print_ready": False,
     "note": "Assembly candidate requires parent-level visual acceptance before it becomes the active model.",
 }

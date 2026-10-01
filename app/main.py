@@ -25,6 +25,7 @@ from .builders import pikachu_script
 from .cage_edits import CageEditAction, apply_cage_edit_action
 from .component_assembly import component_assembly_script
 from .config import (
+    AUTO_IMPROVE_ROUND_TIMEOUT_SECONDS,
     JOBS_ROOT,
     OLLAMA_PROXY_BASE_URL,
     REASONING_MODEL,
@@ -2838,10 +2839,19 @@ async def _run_auto_improve(job_id: str, max_rounds: int) -> None:
         )
 
         try:
-            await refine_generic_scene(job_id, GenericRefineRequest(iterations=1))
+            await asyncio.wait_for(
+                refine_generic_scene(job_id, GenericRefineRequest(iterations=1)),
+                timeout=AUTO_IMPROVE_ROUND_TIMEOUT_SECONDS,
+            )
         except Exception as exc:  # noqa: BLE001 - background loop must persist/report arbitrary worker failures
             consecutive_errors += 1
-            detail = str(exc.detail) if isinstance(exc, HTTPException) else str(exc)
+            if isinstance(exc, TimeoutError):
+                detail = (
+                    "Autonomous refinement round exceeded "
+                    f"{AUTO_IMPROVE_ROUND_TIMEOUT_SECONDS:g} seconds and was cancelled."
+                )
+            else:
+                detail = str(exc.detail) if isinstance(exc, HTTPException) else str(exc)
             fallback_state = "ready" if isinstance(before.get("generic_model"), dict) else "failed"
             _write_status(
                 root,

@@ -10,6 +10,15 @@ def env(name: str, default: str = "") -> str:
     return os.environ.get(name, default).strip()
 
 
+def float_env(name: str, default: float, *, minimum: float = 0.0) -> float:
+    raw = env(name, str(default))
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        value = default
+    return max(minimum, value)
+
+
 def secret_env(name: str) -> str:
     raw = env(name)
     if raw:
@@ -31,6 +40,16 @@ API_TOKEN = secret_env("THREED_API_TOKEN")
 # This is intentionally fixed to our existing MediaPitch Ollama proxy.
 OLLAMA_PROXY_BASE_URL = "https://mediapitch.in/ollama-proxy"
 OLLAMA_PROXY_API_KEY = secret_env("OLLAMA_PROXY_API_KEY")
+OLLAMA_PROXY_TIMEOUT_SECONDS = float_env(
+    "OLLAMA_PROXY_TIMEOUT_SECONDS",
+    180.0,
+    minimum=30.0,
+)
+AUTO_IMPROVE_ROUND_TIMEOUT_SECONDS = float_env(
+    "AUTO_IMPROVE_ROUND_TIMEOUT_SECONDS",
+    240.0,
+    minimum=60.0,
+)
 REASONING_MODEL = env("REASONING_MODEL", "gpt-oss:120b")
 VISION_MODEL = env("VISION_MODEL", "gemma4:31b-cloud")
 VISION_MODEL_FALLBACKS = tuple(

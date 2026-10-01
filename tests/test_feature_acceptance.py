@@ -175,3 +175,21 @@ def test_relative_improvement_does_not_keep_regressing_feature_draft():
 
     assert complete is False
     assert keep is False
+
+
+
+def test_bilateral_shape_feature_qa_includes_top_view():
+    task = FeatureTask(
+        id="symmetric-panel",
+        name="Symmetric panel",
+        strategy="base_mesh_region",
+        symmetry="bilateral",
+        acceptance_criteria=["Outline visibly varies along its length"],
+    )
+
+    views = _feature_diagnostic_views(task)
+
+    assert views[0] == "top"
+    assert "front-left" in views
+    assert "left" in views
+    assert "back-right" in views

@@ -76,7 +76,7 @@ AUTO_IMPROVE_HARD_ROUND_CAP = 60
 COMPONENT_MAX_DEPTH = 2
 COMPONENT_AUTO_IMPROVE_ROUNDS = 6
 COMPONENT_MAX_INSTANCES = 16
-ASSEMBLY_REPAIR_MAX_ATTEMPTS = 2
+ASSEMBLY_REPAIR_MAX_ATTEMPTS = 3
 
 
 @app.on_event("startup")
@@ -2226,6 +2226,33 @@ async def _prepare_assembled_parent_repair(job_id: str, status: dict) -> dict:
     }
 
 
+def _component_local_axis_context(child_qa: dict) -> dict:
+    """Describe frozen-child XYZ extents so assembly scaling can be axis-aware."""
+
+    raw = child_qa.get("scene_dimensions_blender_units") if isinstance(child_qa, dict) else None
+    if not isinstance(raw, list) or len(raw) < 3:
+        return {}
+    try:
+        dimensions = [abs(float(raw[index])) for index in range(3)]
+    except (TypeError, ValueError):
+        return {}
+    if any(not math.isfinite(value) or value <= 1e-6 for value in dimensions):
+        return {}
+
+    axes = ("X", "Y", "Z")
+    ranked = sorted(range(3), key=lambda index: dimensions[index], reverse=True)
+    return {
+        "dimensions_xyz": [round(value, 6) for value in dimensions],
+        "largest_extent_axis": axes[ranked[0]],
+        "middle_extent_axis": axes[ranked[1]],
+        "smallest_extent_axis": axes[ranked[2]],
+        "scale_contract": (
+            "instance.scale=[sx,sy,sz] multiplies frozen child local X,Y,Z respectively "
+            "BEFORE instance rotation"
+        ),
+    }
+
+
 async def _plan_component_assembly(
     parent_job_id: str,
     feature_task: FeatureTask,
@@ -2254,6 +2281,7 @@ async def _plan_component_assembly(
         active_parent_spec = _read_json_if_present(parent_root / f"mesh-spec-v{parent_version}.json")
     parent_qa = _read_json_if_present(parent_root / "exports" / str(parent_model.get("qa") or ""))
     child_qa = _read_json_if_present(child_root / "exports" / str(child_model.get("qa") or ""))
+    child_axis_context = _component_local_axis_context(child_qa)
 
     image_paths: list[Path] = []
     for record in _usable_reference_index(parent_root)[-2:]:
@@ -2305,8 +2333,13 @@ async def _plan_component_assembly(
         "When an ASSEMBLY REPAIR CONTEXT is supplied, the previous transform(s) produced a visible integrity failure. "
         "Use the failed renders, blocking defects and repair instructions to make a deliberate correction; do not "
         "blindly repeat the old transforms. Location, rotation and instance scale are all available repair controls. "
-        "If the frozen child is locally correct but visibly too thin/small/large after installation, adjust instance scale "
-        "conservatively instead of redesigning the child. Keep the frozen child geometry unchanged. "
+        "IMPORTANT SCALE CONTRACT: scale=[sx,sy,sz] multiplies the frozen child's LOCAL X,Y,Z axes BEFORE rotation. "
+        "Use the supplied child local-axis envelope to reason about length/width/thickness. If the visible defect is "
+        "axis-specific (too short/long, narrow/wide, thin/thick), prefer ANISOTROPIC scale and change the relevant local "
+        "axis or axes instead of uniformly inflating the whole component. Preserve local axes whose proportions are already "
+        "credible. Estimate the resulting local XYZ dimensions from source_dimensions * scale and mention that reasoning "
+        "in the rationale. If the frozen child is locally correct but visibly too small/large in every dimension, uniform "
+        "scale is acceptable. Keep the frozen child geometry unchanged. "
         f"Return exactly {expected_instances} instance transform(s). For repeated identical parts, reuse this one "
         "frozen component with separate transforms. If unsure, prefer conservative scale and physically plausible contact."
     )
@@ -2316,6 +2349,7 @@ async def _plan_component_assembly(
         f"Parent active spec/context: {json.dumps(active_parent_spec, ensure_ascii=False)[:12000]}\n"
         f"Parent QA/bounds: {json.dumps(parent_qa, ensure_ascii=False)}\n"
         f"Frozen child QA/bounds: {json.dumps(child_qa, ensure_ascii=False)}\n"
+        f"Frozen child LOCAL AXIS CONTEXT: {json.dumps(child_axis_context, ensure_ascii=False)}\n"
         f"ASSEMBLY REPAIR CONTEXT: {json.dumps(repair_context, ensure_ascii=False)[:10000]}\n"
         f"Previous transform for this feature: "
         f"{json.dumps((repair_context.get('previous_assemblies') or {}).get(feature_task.id) or {}, ensure_ascii=False)}\n"
@@ -2356,6 +2390,7 @@ async def _plan_component_assembly(
             "feature_id": feature_task.id,
             "model": candidate_model,
             "images": labels,
+            "child_axis_context": child_axis_context,
             "assembly": assembly.model_dump(),
             "created_at": datetime.now(UTC).isoformat(),
         }

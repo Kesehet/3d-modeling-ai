@@ -159,7 +159,10 @@ def test_component_assembly_executor_imports_frozen_child_and_renders_parent():
 
     assert 'bpy.ops.wm.open_mainfile(filepath=PARENT_BLEND)' in script
     assert 'bpy.data.libraries.load(COMPONENT_BLEND, link=False)' in script
-    assert 'clone.matrix_world = instance_matrix @ source.matrix_world' in script
+    assert 'source_world_matrices' in script
+    assert 'bpy.context.view_layer.update()' in script
+    assert 'clone.parent = None' in script
+    assert 'clone.matrix_world = instance_matrix @ source_world_matrices[source.name]' in script
     assert 'component_center' not in script
     assert '@ normalize @' not in script
     assert '"assembly_anchor": "component_global_origin"' in script

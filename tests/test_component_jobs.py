@@ -587,5 +587,5 @@ def test_component_local_axis_context_rejects_missing_or_degenerate_bounds():
     ) == {}
 
 
-def test_coordinated_repair_has_one_axis_aware_retry_after_previous_budget():
-    assert main.ASSEMBLY_REPAIR_MAX_ATTEMPTS == 3
+def test_coordinated_repair_remains_bounded_after_axis_aware_retry_extension():
+    assert main.ASSEMBLY_REPAIR_MAX_ATTEMPTS == 4

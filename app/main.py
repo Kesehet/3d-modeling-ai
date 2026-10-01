@@ -863,7 +863,15 @@ class SceneObjectSpec(ParametricGeometry):
     rotation_deg: list[float] = Field(default_factory=lambda: [0.0, 0.0, 0.0], min_length=3, max_length=3)
     start: list[float] | None = Field(default=None, min_length=3, max_length=3)
     end: list[float] | None = Field(default=None, min_length=3, max_length=3)
-    radius: float | None = Field(default=None, gt=0.01, le=5.0)
+    radius: float | None = Field(
+        default=None,
+        gt=0.01,
+        le=5.0,
+        description=(
+            "Explicit radial size for rods/sweeps and for cylinder/cone primitives "
+            "when full dimensions are not supplied. Legacy scale remains multiplicative."
+        ),
+    )
     color: str = Field(default="#808080", pattern=r"^#[0-9A-Fa-f]{6}$")
     bevel: bool = True
     smooth: bool = True
@@ -5190,12 +5198,17 @@ async def _compare_generic_versions(
 
 
 def _feature_diagnostic_views(feature_task: FeatureTask) -> tuple[str, ...]:
-    if feature_task.strategy == "base_mesh_region":
-        return ("front-left", "left", "back-right")
     if feature_task.symmetry == "radial" and feature_task.count > 1:
         # Repeated radial features cannot be count-verified from side views alone.
         # Include the top view plus opposed obliques so QA can see the pattern.
         return ("top", "front-left", "left", "back-right")
+    if feature_task.symmetry == "bilateral":
+        # Bilateral parts often encode their defining outline/width variation in
+        # plan view. Give visual QA one orthographic top view in addition to the
+        # obliques instead of forcing it to infer that shape from foreshortening.
+        return ("top", "front-left", "left", "back-right")
+    if feature_task.strategy == "base_mesh_region":
+        return ("front-left", "left", "back-right")
     text = " ".join(
         [
             feature_task.name,

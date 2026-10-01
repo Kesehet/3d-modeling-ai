@@ -70,6 +70,7 @@ def test_component_child_job_is_linked_to_parent_feature(tmp_path, monkeypatch):
     assert child_request["parent_feature_id"] == "wheel"
     assert "Model ONLY the isolated component 'Wheel assembly'" in child_request["prompt"]
     assert "Do NOT model the complete parent object" in child_request["prompt"]
+    assert "attachment/mounting anchor exactly at Blender world origin [0, 0, 0]" in child_request["prompt"]
 
     persisted = load_feature_plan(root)
     assert persisted is not None
@@ -158,7 +159,10 @@ def test_component_assembly_executor_imports_frozen_child_and_renders_parent():
 
     assert 'bpy.ops.wm.open_mainfile(filepath=PARENT_BLEND)' in script
     assert 'bpy.data.libraries.load(COMPONENT_BLEND, link=False)' in script
-    assert 'clone.matrix_world = instance_matrix @ normalize @ source.matrix_world' in script
+    assert 'clone.matrix_world = instance_matrix @ source.matrix_world' in script
+    assert 'component_center' not in script
+    assert '@ normalize @' not in script
+    assert '"assembly_anchor": "component_global_origin"' in script
     assert '"front-right"' in script
     assert 'bpy.ops.wm.save_as_mainfile(filepath=BLEND)' in script
     assert '"installed_component": COMPONENT_NAME' in script

@@ -54,38 +54,30 @@ if not parent_objects:
 with bpy.data.libraries.load(COMPONENT_BLEND, link=False) as (data_from, data_to):
     data_to.objects = list(data_from.objects)
 
+loaded_objects = [obj for obj in data_to.objects if obj is not None]
 source_objects = [
     obj
-    for obj in data_to.objects
-    if obj is not None
-    and obj.type in {"MESH", "CURVE", "SURFACE", "FONT"}
+    for obj in loaded_objects
+    if obj.type in {"MESH", "CURVE", "SURFACE", "FONT"}
     and "presentation base" not in obj.name.lower()
     and "ground" not in obj.name.lower()
 ]
 if not source_objects:
     raise RuntimeError("Accepted component blend contains no installable geometry.")
 
-source_points = []
-for obj in source_objects:
-    if not hasattr(obj, "bound_box"):
-        continue
-    source_points.extend(obj.matrix_world @ Vector(corner) for corner in obj.bound_box)
-if not source_points:
-    raise RuntimeError("Accepted component geometry has no usable bounds.")
-
-component_min = Vector((
-    min(point.x for point in source_points),
-    min(point.y for point in source_points),
-    min(point.z for point in source_points),
-))
-component_max = Vector((
-    max(point.x for point in source_points),
-    max(point.y for point in source_points),
-    max(point.z for point in source_points),
-))
-component_center = (component_min + component_max) / 2
-normalize = Matrix.Translation(-component_center)
-
+# Library-loaded objects are not part of a view layer yet, so matrix_world can be
+# stale/identity even when the child blend stores meaningful object offsets. Stage
+# the whole loaded hierarchy long enough for Blender to evaluate the frozen child's
+# true world transforms, then flatten those transforms into the installed copies.
+staging = bpy.data.collections.new("__component_staging__")
+scene.collection.children.link(staging)
+for obj in loaded_objects:
+    staging.objects.link(obj)
+bpy.context.view_layer.update()
+source_world_matrices = {
+    source.name: source.matrix_world.copy()
+    for source in source_objects
+}
 installed_objects = []
 for instance_index, instance in enumerate(INSTANCES, start=1):
     location = instance.get("location", [0.0, 0.0, 0.0])
@@ -106,14 +98,19 @@ for instance_index, instance in enumerate(INSTANCES, start=1):
             clone.data = source.data.copy()
         scene.collection.objects.link(clone)
         clone.name = f"{COMPONENT_NAME}_{instance_index}_{source.name}"[:63]
-        clone.matrix_world = instance_matrix @ normalize @ source.matrix_world
+        clone.parent = None
+        clone.matrix_world = instance_matrix @ source_world_matrices[source.name]
         installed_objects.append(clone)
 
-for source in source_objects:
+for source in loaded_objects:
     try:
         bpy.data.objects.remove(source, do_unlink=True)
     except Exception:
         pass
+try:
+    bpy.data.collections.remove(staging)
+except Exception:
+    pass
 
 all_model_objects = [*parent_objects, *installed_objects]
 bpy.context.view_layer.update()
@@ -225,6 +222,7 @@ qa = {
     "scene_dimensions_blender_units": [round(float(value), 4) for value in size],
     "component_source_blend": COMPONENT_BLEND,
     "parent_source_blend": PARENT_BLEND,
+    "assembly_anchor": "component_global_origin",
     "print_ready": False,
     "note": "Assembly candidate requires parent-level visual acceptance before it becomes the active model.",
 }

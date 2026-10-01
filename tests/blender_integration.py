@@ -96,6 +96,25 @@ def main():
         "instances": [{"location": [0, 0, 1], "scale": [0.5, 0.5, 0.5],
                        "rotation_deg": [0, 0, 0]}],
     })
+    anchored_child = run(root, "anchored_component", generic_scene_script(), {"spec": {
+        "title": "Origin-anchored generic component", "presentation_base": False,
+        "objects": [{"name": "offset_part", "shape": "cube", "location": [1, 0, 0],
+                     "scale": [0.2, 0.2, 0.2], "color": "#456789", "bevel": False}],
+    }})
+    run(root, "origin_anchor_assembly", component_assembly_script() + r"""
+assert len(installed_objects) == 1, len(installed_objects)
+installed = installed_objects[0]
+translation = installed.matrix_world.translation
+assert abs(translation.x - 3.0) < 0.001, translation
+assert abs(translation.y) < 0.001, translation
+assert abs(translation.z) < 0.001, translation
+""", {
+        "parent_blend_path": str(parent / "model-v1.blend"),
+        "component_blend_path": str(anchored_child / "model-v1.blend"),
+        "component_name": "origin_test",
+        "instances": [{"location": [2, 0, 0], "scale": [1, 1, 1],
+                       "rotation_deg": [0, 0, 0]}],
+    })
     panel = {"name": "Shaped panel", "shape": "mesh", "location": [0, 0, 1], "scale": [1, 1, 1],
              "color": "#123456", "bevel": False,
              "vertices": [[-.3,-.2,0],[.3,-.2,0],[.2,.2,0],[-.2,.2,0],

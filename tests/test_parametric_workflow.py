@@ -365,3 +365,62 @@ def test_director_representation_constraint_is_narrow():
         current_strategy="adaptive_loft",
         feature_task=cutout,
     ) == "refine_mesh"
+
+
+
+def test_hard_surface_cage_accepts_thin_but_noncollapsed_geometry():
+    payload = {
+        "title": "Thin generic panel",
+        "axis": "y",
+        "intended_dimensions_xyz": [0.20, 0.60, 0.04],
+        "stations": [
+            {
+                "position": position,
+                "profile": [
+                    [0.0, -0.02],
+                    [0.10, -0.02],
+                    [0.10, 0.02],
+                    [0.0, 0.02],
+                ],
+            }
+            for position in (-0.30, -0.10, 0.10, 0.30)
+        ],
+    }
+
+    normalized = main._normalize_hard_surface_cage_payload(
+        payload,
+        "Thin generic panel",
+        complexity="simple",
+    )
+    spec = main.HardSurfaceCageSpec.model_validate(normalized)
+
+    main._validate_cage_dimensions(spec, [0.20, 0.60, 0.04])
+
+    with pytest.raises(ValueError, match="contradict"):
+        main._validate_cage_dimensions(spec, [0.20, 0.60, 0.20])
+
+
+def test_hard_surface_cage_still_rejects_collapsed_geometry():
+    payload = {
+        "title": "Collapsed generic panel",
+        "axis": "y",
+        "stations": [
+            {
+                "position": position,
+                "profile": [
+                    [0.0, 0.0],
+                    [0.10, 0.0],
+                    [0.10, 0.0],
+                    [0.0, 0.0],
+                ],
+            }
+            for position in (-0.30, -0.10, 0.10, 0.30)
+        ],
+    }
+
+    with pytest.raises(ValueError, match="degenerate body dimensions"):
+        main._normalize_hard_surface_cage_payload(
+            payload,
+            "Collapsed generic panel",
+            complexity="simple",
+        )

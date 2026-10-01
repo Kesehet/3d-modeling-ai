@@ -6164,7 +6164,15 @@ def _normalize_hard_surface_cage_payload(
     min_z = min(point[1] for station in deduped for point in station["profile"])
     max_z = max(point[1] for station in deduped for point in station["profile"])
     height_span = max_z - min_z
-    if axis_span < 0.5 or max_half_width < 0.1 or height_span < 0.2:
+
+    # Degeneracy is scale-relative: thin panels, fins, covers and other sheet-like
+    # parts are valid geometry. Intended-dimension validation below is responsible
+    # for catching plans whose proportions disagree with the planner. Reject only
+    # spans that have effectively collapsed to zero relative to the part itself.
+    full_width = 2.0 * max_half_width
+    largest_span = max(axis_span, full_width, height_span)
+    collapse_epsilon = max(1e-6, largest_span * 1e-4)
+    if min(axis_span, full_width, height_span) <= collapse_epsilon:
         raise ValueError("Hard-surface cage has degenerate body dimensions.")
 
     normalized["stations"] = deduped[:16]

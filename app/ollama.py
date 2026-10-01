@@ -6,7 +6,11 @@ from typing import Any
 
 import httpx
 
-from .config import OLLAMA_PROXY_API_KEY, OLLAMA_PROXY_BASE_URL
+from .config import (
+    OLLAMA_PROXY_API_KEY,
+    OLLAMA_PROXY_BASE_URL,
+    OLLAMA_PROXY_TIMEOUT_SECONDS,
+)
 
 
 class OllamaProxyError(RuntimeError):
@@ -111,11 +115,15 @@ class OllamaProxyClient:
         *,
         api_key: str = OLLAMA_PROXY_API_KEY,
         base_url: str = OLLAMA_PROXY_BASE_URL,
-        timeout_seconds: float = 600.0,
+        timeout_seconds: float | None = None,
     ) -> None:
         self.api_key = api_key.strip()
         self.base_url = base_url.rstrip("/")
-        self.timeout_seconds = timeout_seconds
+        self.timeout_seconds = (
+            OLLAMA_PROXY_TIMEOUT_SECONDS
+            if timeout_seconds is None
+            else max(1.0, float(timeout_seconds))
+        )
 
     def _headers(self) -> dict[str, str]:
         if not self.api_key:

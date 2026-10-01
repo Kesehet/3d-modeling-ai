@@ -316,6 +316,14 @@ class RefinementComparison(BaseModel):
     regressions: list[str] = Field(default_factory=list)
 
 
+class PreservationEvaluation(BaseModel):
+    preserved: bool
+    confidence: float = Field(ge=0.0, le=1.0)
+    damaged_feature_ids: list[str] = Field(default_factory=list, max_length=16)
+    summary: str = Field(min_length=1, max_length=1600)
+    notes: list[str] = Field(default_factory=list, max_length=16)
+
+
 class QualityBenchmarkRequest(BaseModel):
     key: Literal["pikachu", "desk-lamp", "sneaker", "office-chair", "quadruped-robot"]
 
@@ -5296,6 +5304,186 @@ def _feature_candidate_review_decision(
     return feature_complete, keep_candidate
 
 
+def _apply_preservation_audit(evaluation: dict, audit: dict) -> dict:
+    """Fail a feature candidate when an independent audit finds protected damage."""
+
+    result = dict(evaluation)
+    if audit.get("preserved") is not False:
+        return result
+
+    result["passed"] = False
+    result["regression_detected"] = True
+    problems = list(result.get("problems") or [])
+    notes = list(result.get("protected_geometry_notes") or [])
+    summary = str(audit.get("summary") or "Previously accepted geometry regressed.")
+    damaged = [str(item) for item in audit.get("damaged_feature_ids") or [] if str(item)]
+    problems.append("Protected accepted geometry regressed: " + summary)
+    if damaged:
+        notes.append("Damaged accepted features: " + ", ".join(damaged))
+    notes.extend(str(item) for item in audit.get("notes") or [] if str(item))
+    result["problems"] = problems[:12]
+    result["protected_geometry_notes"] = notes[:12]
+    return result
+
+
+async def _evaluate_protected_feature_preservation(
+    job_id: str,
+    active_feature: FeatureTask,
+    *,
+    baseline_version: int | None,
+    candidate_version: int,
+) -> dict:
+    """Independently verify that already-accepted features survived the edit."""
+
+    if baseline_version is None or baseline_version == candidate_version:
+        return {
+            "preserved": True,
+            "confidence": 1.0,
+            "damaged_feature_ids": [],
+            "summary": "No distinct trusted baseline requires a preservation audit.",
+            "notes": [],
+            "model": None,
+        }
+
+    root = _require_job(job_id)
+    plan = load_feature_plan(root)
+    protected = [
+        feature
+        for feature in (plan.features if plan else [])
+        if (
+            feature.id != active_feature.id
+            and feature.status == "accepted"
+            and feature.acceptance_verified
+            and feature.accepted_version is not None
+            and feature.accepted_version <= baseline_version
+        )
+    ]
+    if not protected:
+        return {
+            "preserved": True,
+            "confidence": 1.0,
+            "damaged_feature_ids": [],
+            "summary": "No previously accepted features require protection.",
+            "notes": [],
+            "model": None,
+        }
+
+    views = ("top", "front-left", "left", "back-right")
+    baseline_paths = [root / "renders" / f"model-v{baseline_version}-{view}.png" for view in views]
+    candidate_paths = [root / "renders" / f"model-v{candidate_version}-{view}.png" for view in views]
+    if not all(path.is_file() for path in baseline_paths + candidate_paths):
+        return {
+            "preserved": False,
+            "confidence": 1.0,
+            "damaged_feature_ids": [feature.id for feature in protected],
+            "summary": "Preservation audit could not verify the candidate because baseline/candidate renders are missing.",
+            "notes": ["Failing closed to protect already accepted geometry."],
+            "model": None,
+        }
+
+    image_paths = baseline_paths + candidate_paths
+    images = _encode_vision_images(image_paths)
+    labels = [f"{path.parent.name}/{path.name}" for path in image_paths]
+    protected_context = [
+        {
+            "id": feature.id,
+            "name": feature.name,
+            "accepted_version": feature.accepted_version,
+            "acceptance_criteria": feature.acceptance_criteria,
+            "target_regions": feature.target_regions,
+            "owner_scope": feature.owner_scope,
+        }
+        for feature in protected
+    ]
+
+    system = (
+        "You are an independent regression auditor for an autonomous 3D modeler. "
+        "Your ONLY job is to protect geometry that was already visually accepted. "
+        "Compare BASELINE renders to CANDIDATE renders and decide whether each protected feature remains visibly intact. "
+        "Do not reward improvements to the active feature and do not judge whole-object completeness. "
+        "Expected localized changes explicitly required by the active feature are allowed, but unrelated removal, opening, "
+        "flattening, clipping, relocation, scale changes, silhouette damage, or loss of previously accepted surfaces is a regression. "
+        "When uncertain about substantial damage, set preserved=false. Return JSON only matching the schema."
+    )
+    prompt = (
+        f"ACTIVE FEATURE: {json.dumps(active_feature.model_dump(), ensure_ascii=False)}\n"
+        f"PROTECTED ACCEPTED FEATURES: {json.dumps(protected_context, ensure_ascii=False)}\n"
+        f"Images in order: BASELINE v{baseline_version} {list(views)}, then CANDIDATE v{candidate_version} {list(views)}.\n"
+        f"Image labels: {labels}\n"
+        "Judge preservation only. damaged_feature_ids must contain only IDs from PROTECTED ACCEPTED FEATURES."
+    )
+
+    client = OllamaProxyClient()
+    errors: list[str] = []
+    protected_ids = {feature.id for feature in protected}
+    for candidate_model in VISION_MODELS:
+        try:
+            result = await client.chat_json(
+                model=candidate_model,
+                system=system,
+                prompt=prompt,
+                images=images,
+                schema=PreservationEvaluation.model_json_schema(),
+                temperature=0.0,
+                num_predict=2048,
+            )
+            audit = PreservationEvaluation.model_validate(result.data)
+            unknown_ids = set(audit.damaged_feature_ids) - protected_ids
+            if unknown_ids:
+                raise ValueError("Preservation audit named features outside the protected set.")
+        except (OllamaProxyError, httpx.HTTPError, ValidationError, ValueError, TypeError) as exc:
+            errors.append(f"{candidate_model}: {exc}")
+            continue
+
+        payload = {
+            **audit.model_dump(),
+            "model": candidate_model,
+            "baseline_version": baseline_version,
+            "candidate_version": candidate_version,
+            "active_feature_id": active_feature.id,
+            "protected_feature_ids": sorted(protected_ids),
+            "images": labels,
+            "created_at": datetime.now(UTC).isoformat(),
+        }
+        _write_llm_log(root, "protected-geometry-audit", payload)
+        append_history(
+            root,
+            "protected_geometry_audit",
+            active_feature_id=active_feature.id,
+            baseline_version=baseline_version,
+            candidate_version=candidate_version,
+            preserved=audit.preserved,
+            damaged_feature_ids=audit.damaged_feature_ids,
+            summary=audit.summary,
+        )
+        return payload
+
+    payload = {
+        "preserved": False,
+        "confidence": 0.0,
+        "damaged_feature_ids": sorted(protected_ids),
+        "summary": "Preservation audit failed across configured vision models.",
+        "notes": errors[-4:] or ["preservation audit unavailable"],
+        "model": None,
+        "baseline_version": baseline_version,
+        "candidate_version": candidate_version,
+        "active_feature_id": active_feature.id,
+        "protected_feature_ids": sorted(protected_ids),
+    }
+    _write_llm_log(root, "protected-geometry-audit", payload)
+    append_history(
+        root,
+        "protected_geometry_audit",
+        active_feature_id=active_feature.id,
+        baseline_version=baseline_version,
+        candidate_version=candidate_version,
+        preserved=False,
+        damaged_feature_ids=sorted(protected_ids),
+        summary=payload["summary"],
+    )
+    return payload
+
+
 async def _evaluate_feature_candidate(
     job_id: str,
     feature_task: FeatureTask,
@@ -5439,6 +5627,14 @@ async def _evaluate_feature_candidate(
             "images": labels,
             "created_at": datetime.now(UTC).isoformat(),
         }
+        if baseline_version is not None:
+            preservation = await _evaluate_protected_feature_preservation(
+                job_id,
+                feature_task,
+                baseline_version=baseline_version,
+                candidate_version=candidate_version,
+            )
+            response = _apply_preservation_audit(response, preservation)
         _write_llm_log(root, "feature-qa", response)
         append_history(
             root,

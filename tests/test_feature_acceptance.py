@@ -1,5 +1,6 @@
 from app.feature_tasks import FeatureTask
 from app.main import (
+    _apply_preservation_audit,
     _feature_candidate_review_decision,
     _feature_diagnostic_views,
     _feature_evaluation_accepts,
@@ -193,3 +194,53 @@ def test_bilateral_shape_feature_qa_includes_top_view():
     assert "front-left" in views
     assert "left" in views
     assert "back-right" in views
+
+
+
+def test_negative_preservation_audit_forces_regression_and_rejection():
+    evaluation = {
+        "passed": True,
+        "visible": True,
+        "criteria_satisfied": True,
+        "subject_recognizable": True,
+        "confidence": 0.96,
+        "reference_match_score": 0.92,
+        "regression_detected": False,
+        "summary": "Active feature looks complete.",
+        "problems": [],
+        "protected_geometry_notes": [],
+    }
+    audit = {
+        "preserved": False,
+        "damaged_feature_ids": ["body"],
+        "summary": "The previously accepted body was opened and shortened.",
+        "notes": ["Top cap disappeared."],
+    }
+
+    merged = _apply_preservation_audit(evaluation, audit)
+
+    assert merged["passed"] is False
+    assert merged["regression_detected"] is True
+    assert "body" in " ".join(merged["protected_geometry_notes"])
+    assert "opened and shortened" in " ".join(merged["problems"])
+
+
+def test_positive_preservation_audit_leaves_feature_verdict_unchanged():
+    evaluation = {
+        "passed": True,
+        "regression_detected": False,
+        "problems": [],
+        "protected_geometry_notes": [],
+    }
+
+    merged = _apply_preservation_audit(
+        evaluation,
+        {
+            "preserved": True,
+            "damaged_feature_ids": [],
+            "summary": "Protected geometry is unchanged.",
+            "notes": [],
+        },
+    )
+
+    assert merged == evaluation

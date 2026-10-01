@@ -125,6 +125,25 @@ assert all(abs(a-b) < 0.001 for a,b in zip(actual, [0.3,2.5,1.5])), actual
 """, {"spec": {"title": "Sized and rotated block", "presentation_base": False,
                 "objects": [{"name": "block", "shape": "cube", "location": [0,0,0],
                              "dimensions": [0.3,1.5,2.5], "rotation_deg": [90,0,0], "bevel": False}]}})
+    run(root, "primitive_radius", generic_scene_script() + r"""
+body = objects[0]
+points = [body.matrix_world @ Vector(corner) for corner in body.bound_box]
+actual = [max(p[i] for p in points) - min(p[i] for p in points) for i in range(3)]
+assert abs(actual[0] - 0.16) < 0.002, actual
+assert abs(actual[1] - 0.16) < 0.002, actual
+assert abs(actual[2] - 2.0) < 0.002, actual
+""", {"spec": {
+        "title": "Explicit-radius cylinder",
+        "presentation_base": False,
+        "objects": [{
+            "name": "shaft",
+            "shape": "cylinder",
+            "location": [0,0,0],
+            "radius": 0.08,
+            "scale": [1,1,1],
+            "bevel": False,
+        }],
+    }})
     run(root, "procedural_boolean_cutout", generic_scene_script() + r"""
 body = objects[0]
 center_hit, center_location, center_normal, center_index = body.ray_cast(

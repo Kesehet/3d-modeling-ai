@@ -1,0 +1,43 @@
+name: Temporary recovered-model snapshot
+on:
+  push:
+    branches: [snapshot-wrapup-results-20261001]
+permissions:
+  contents: read
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    environment: production
+    env:
+      THREED_API_TOKEN: ${{ secrets.THREED_API_TOKEN }}
+      THREED_HOSTNAME: ${{ vars.THREED_HOSTNAME || '3d-modeling-ai.srv1058562.hstgr.cloud' }}
+      PARENT_JOB: c310811a-7699-4c52-9d57-6f74752ff682
+      CHILD_JOB: b6fd24bf-ce87-48a8-8b0a-1f0b34a22264
+    steps:
+      - name: Capture recovered jobs
+        run: |
+          set -euo pipefail
+          BASE_URL="https://$THREED_HOSTNAME"
+          mkdir -p snapshot/json snapshot/parent-renders snapshot/child-renders
+          curl -fsSL "$BASE_URL/dashboard/api" -o snapshot/json/dashboard.json
+          jq --arg id "$PARENT_JOB" '.jobs[] | select(.job_id == $id)' snapshot/json/dashboard.json > snapshot/json/parent.json
+          jq --arg id "$CHILD_JOB" '.jobs[] | select(.job_id == $id)' snapshot/json/dashboard.json > snapshot/json/child.json
+          for pair in "$PARENT_JOB:parent" "$CHILD_JOB:child"; do
+            IFS=: read -r id key <<< "$pair"
+            curl -fsSL -H "Authorization: Bearer $THREED_API_TOKEN" "$BASE_URL/v1/jobs/$id/history" -o "snapshot/json/$key-history.json"
+            curl -fsSL -H "Authorization: Bearer $THREED_API_TOKEN" "$BASE_URL/v1/jobs/$id/artifacts" -o "snapshot/json/$key-artifacts.json"
+            dest="snapshot/$key-renders"
+            names=$(jq -r '.artifacts.renders[]?.name // empty' "snapshot/json/$key-artifacts.json" | sort -V | tail -n 18)
+            while IFS= read -r name; do
+              [ -n "$name" ] || continue
+              enc=$(python -c 'import sys,urllib.parse;print(urllib.parse.quote(sys.argv[1],safe=""))' "$name")
+              curl -fsSL -H "Authorization: Bearer $THREED_API_TOKEN" "$BASE_URL/v1/jobs/$id/artifacts/renders/$enc" -o "$dest/$name" || true
+            done <<< "$names"
+          done
+          echo "PARENT"; jq '{state,stage,modeling_strategy,auto_improve,quality_gate,feature_plan,generic_model}' snapshot/json/parent.json
+          echo "CHILD"; jq '{state,stage,modeling_strategy,auto_improve,quality_gate,feature_plan,generic_model}' snapshot/json/child.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: recovered-model-snapshot
+          path: snapshot
+          retention-days: 3

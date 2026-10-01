@@ -2809,7 +2809,14 @@ async def _ensure_final_model_quality(job_id: str, status: dict) -> dict:
     quality = status.get("quality_gate") or {}
     if not plan.get("required_complete") or version is None:
         return status
-    if quality.get("scope") == "whole_object" and quality.get("evaluated_version") == version:
+    if (
+        quality.get("scope") == "whole_object"
+        and quality.get("evaluated_version") == version
+        and (
+            quality.get("recognizable") is not True
+            or quality.get("assembly_integrity_pass") is not None
+        )
+    ):
         return status
     try:
         final_quality = await _generic_recognizability_check(

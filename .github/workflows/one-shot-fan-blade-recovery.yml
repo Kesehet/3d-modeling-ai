@@ -1,8 +1,8 @@
 name: One-shot fan blade recovery test
 
 on:
-  push:
-    branches: [test-fan-blade-recovery-20261001]
+  pull_request:
+    branches: [main]
 
 permissions:
   contents: read

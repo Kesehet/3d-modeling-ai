@@ -168,7 +168,7 @@ def test_component_assembly_executor_imports_frozen_child_and_renders_parent():
 def test_parent_component_retry_reopens_failed_child_without_resetting_verified_siblings(
     tmp_path, monkeypatch
 ):
-    parent_id, root, feature = _parent_job(tmp_path, monkeypatch)
+    _, root, _ = _parent_job(tmp_path, monkeypatch)
     child_id = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
     child_root = main.JOBS_ROOT / child_id
     child_root.mkdir(parents=True)

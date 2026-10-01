@@ -565,3 +565,99 @@ def test_unrecognizable_assembled_model_can_retry_frozen_component_transforms(
     assert reloaded is not None
     retried = next(feature for feature in reloaded.features if feature.id == component.id)
     assert retried.status == "retry"
+
+
+def test_coordinated_assembly_repair_allows_three_bounded_attempts(tmp_path, monkeypatch):
+    parent_id, root, _ = _parent_job(tmp_path, monkeypatch)
+    plan = load_feature_plan(root)
+    assert plan is not None
+    component = plan.features[-1]
+    component.status = "accepted"
+    component.accepted_version = 9
+    component.acceptance_verified = True
+    component.acceptance_score = 1.0
+    component.component_job_id = "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee"
+    save_feature_plan(root, plan)
+
+    child_root = main.JOBS_ROOT / component.component_job_id
+    child_root.mkdir(parents=True)
+    for category in main.ARTIFACT_CATEGORIES:
+        (child_root / category).mkdir(exist_ok=True)
+
+    _touch_preserved_model(root, 8)
+    _touch_preserved_model(root, 9)
+    (root / "component-assembly-v9.json").write_text(
+        json.dumps({
+            "baseline_version": 8,
+            "candidate_version": 9,
+            "feature_id": component.id,
+            "child_job_id": component.component_job_id,
+            "assembly": {
+                "instances": [{
+                    "location": [0.3, 0, 0.5],
+                    "rotation_deg": [0, 0, 0],
+                    "scale": [2.5, 2.5, 2.5],
+                }]
+            },
+        }),
+        encoding="utf-8",
+    )
+    main._write_status(
+        root,
+        generic_model={
+            "version": 9,
+            "title": "Assembled object",
+            "blend": "model-v9.blend",
+            "assembled_components": [{"feature_id": component.id}],
+        },
+        modeling_strategy="procedural",
+        quality_gate={
+            "scope": "whole_object",
+            "evaluated_version": 9,
+            "recognizable": False,
+            "recognition_passed": False,
+            "subject_match_score": 0.6,
+            "director_action": "revise_procedural",
+            "major_missing_parts": ["Installed component is still too short."],
+            "instructions": ["Increase its parent-context length while keeping contact clean."],
+        },
+        assembly_repair={"attempt": 2, "phase": "reinstall_components"},
+    )
+
+    async def plan_repair(*args, **kwargs):
+        return main.AssemblyRepairDecision(
+            rationale="The parent is sound; refine only the frozen-component transform.",
+            parent_feature_ids=[],
+        )
+
+    monkeypatch.setattr(main, "_plan_assembled_parent_repair", plan_repair)
+    prepared = __import__("asyncio").run(
+        main._prepare_assembled_parent_repair(parent_id, main._read_status(root))
+    )
+
+    assert prepared["prepared"] is True
+    assert prepared["attempt"] == 3
+    assert main._read_status(root)["assembly_repair"]["phase"] == "reinstall_components"
+
+    status = main._read_status(root)
+    status["generic_model"] = {
+        "version": 9,
+        "title": "Assembled object",
+        "blend": "model-v9.blend",
+        "assembled_components": [{"feature_id": component.id}],
+    }
+    status["quality_gate"] = {
+        "scope": "whole_object",
+        "evaluated_version": 9,
+        "recognizable": False,
+        "director_action": "revise_procedural",
+        "major_missing_parts": ["Still wrong."],
+    }
+    status["assembly_repair"]["attempt"] = 3
+    main._write_status(root, **status)
+
+    exhausted = __import__("asyncio").run(
+        main._prepare_assembled_parent_repair(parent_id, main._read_status(root))
+    )
+    assert exhausted["prepared"] is False
+    assert "exhausted" in exhausted["reason"].lower()

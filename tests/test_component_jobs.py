@@ -238,3 +238,230 @@ def test_parent_component_retry_reopens_failed_child_without_resetting_verified_
     child_status = main._read_status(child_root)
     assert child_status["state"] == "ready"
     assert child_status["stage"] == "component_feature_retry_ready"
+
+
+
+def _touch_preserved_model(root, version):
+    (root / "scene" / f"model-v{version}.blend").write_bytes(b"blend")
+    for view in (
+        "front", "front-left", "left", "back-left", "back",
+        "back-right", "right", "front-right", "top",
+    ):
+        (root / "renders" / f"model-v{version}-{view}.png").write_bytes(b"render")
+    (root / f"scene-spec-v{version}.json").write_text(
+        json.dumps({"version": version, "spec": {"title": "parent", "objects": []}}),
+        encoding="utf-8",
+    )
+
+
+def test_component_assembly_chain_unwinds_consecutive_installs(tmp_path, monkeypatch):
+    _, root, _ = _parent_job(tmp_path, monkeypatch)
+    (root / "component-assembly-v6.json").write_text(
+        json.dumps({
+            "baseline_version": 4,
+            "candidate_version": 6,
+            "feature_id": "first-component",
+            "child_job_id": "child-one",
+            "assembly": {"instances": [{"location": [0, 0, 0]}]},
+        }),
+        encoding="utf-8",
+    )
+    (root / "component-assembly-v7.json").write_text(
+        json.dumps({
+            "baseline_version": 6,
+            "candidate_version": 7,
+            "feature_id": "second-component",
+            "child_job_id": "child-two",
+            "assembly": {"instances": [{"location": [1, 0, 0]}]},
+        }),
+        encoding="utf-8",
+    )
+
+    source, chain = main._component_assembly_chain(root, 7)
+
+    assert source == 4
+    assert [item["feature_id"] for item in chain] == [
+        "first-component",
+        "second-component",
+    ]
+
+
+def test_coordinated_assembly_repair_reopens_parent_before_frozen_component(
+    tmp_path, monkeypatch
+):
+    parent_id, root, component = _parent_job(tmp_path, monkeypatch)
+    plan = load_feature_plan(root)
+    assert plan is not None
+    parent_feature = FeatureTask(
+        id="mount",
+        name="Mounting interface",
+        build_mode="in_place",
+        strategy="surface_cutout",
+        status="accepted",
+        accepted_version=4,
+        acceptance_verified=True,
+        acceptance_score=0.95,
+    )
+    plan.features.insert(0, parent_feature)
+    component.status = "accepted"
+    component.accepted_version = 5
+    component.acceptance_verified = True
+    component.acceptance_score = 0.95
+    component.component_job_id = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+    save_feature_plan(root, plan)
+
+    child_root = main.JOBS_ROOT / component.component_job_id
+    child_root.mkdir(parents=True)
+    for category in main.ARTIFACT_CATEGORIES:
+        (child_root / category).mkdir(exist_ok=True)
+
+    _touch_preserved_model(root, 4)
+    _touch_preserved_model(root, 5)
+    (root / "component-assembly-v5.json").write_text(
+        json.dumps({
+            "baseline_version": 4,
+            "candidate_version": 5,
+            "feature_id": component.id,
+            "child_job_id": component.component_job_id,
+            "assembly": {
+                "rationale": "old placement",
+                "instances": [{
+                    "location": [1, 0, 0],
+                    "rotation_deg": [0, 0, 0],
+                    "scale": [1, 1, 1],
+                }],
+            },
+        }),
+        encoding="utf-8",
+    )
+    main._write_status(
+        root,
+        state="ready",
+        modeling_strategy="procedural",
+        generic_model={
+            "version": 5,
+            "title": "Assembled object",
+            "blend": "model-v5.blend",
+            "renders": [],
+            "qa": "",
+            "assembled_components": [{"feature_id": component.id}],
+        },
+        quality_gate={
+            "scope": "whole_object",
+            "evaluated_version": 5,
+            "recognizable": False,
+            "recognition_passed": True,
+            "assembly_integrity_pass": False,
+            "blocking_geometry_defects": ["Visible bad contact"],
+            "instructions": ["Repair the mounting contact."],
+        },
+    )
+
+    async def plan_repair(*args, **kwargs):
+        return main.AssemblyRepairDecision(
+            rationale="The parent mounting interface also needs correction.",
+            parent_feature_ids=["mount"],
+        )
+
+    monkeypatch.setattr(main, "_plan_assembled_parent_repair", plan_repair)
+    prepared = __import__("asyncio").run(
+        main._prepare_assembled_parent_repair(parent_id, main._read_status(root))
+    )
+
+    assert prepared["prepared"] is True
+    assert prepared["source_parent_version"] == 4
+    status = main._read_status(root)
+    assert status["generic_model"]["version"] == 4
+    assert status["assembly_repair"]["phase"] == "repair_parent"
+    repaired_plan = load_feature_plan(root)
+    assert repaired_plan is not None
+    by_id = {feature.id: feature for feature in repaired_plan.features}
+    assert by_id["mount"].status == "retry"
+    assert by_id[component.id].status == "accepted"
+
+    by_id["mount"].status = "accepted"
+    by_id["mount"].accepted_version = 6
+    by_id["mount"].acceptance_verified = True
+    save_feature_plan(root, repaired_plan)
+    advanced = main._advance_assembly_repair_if_ready(root, main._read_status(root))
+
+    assert advanced["assembly_repair"]["phase"] == "reinstall_components"
+    reloaded = load_feature_plan(root)
+    assert reloaded is not None
+    by_id = {feature.id: feature for feature in reloaded.features}
+    assert by_id[component.id].status == "retry"
+    assert by_id[component.id].component_job_id == component.component_job_id
+
+
+def test_coordinated_assembly_repair_can_reinstall_without_parent_rebuild(
+    tmp_path, monkeypatch
+):
+    parent_id, root, component = _parent_job(tmp_path, monkeypatch)
+    plan = load_feature_plan(root)
+    assert plan is not None
+    component.status = "accepted"
+    component.accepted_version = 5
+    component.acceptance_verified = True
+    component.acceptance_score = 0.95
+    component.component_job_id = "cccccccc-cccc-cccc-cccc-cccccccccccc"
+    save_feature_plan(root, plan)
+    child_root = main.JOBS_ROOT / component.component_job_id
+    child_root.mkdir(parents=True)
+    for category in main.ARTIFACT_CATEGORIES:
+        (child_root / category).mkdir(exist_ok=True)
+
+    _touch_preserved_model(root, 4)
+    _touch_preserved_model(root, 5)
+    (root / "component-assembly-v5.json").write_text(
+        json.dumps({
+            "baseline_version": 4,
+            "candidate_version": 5,
+            "feature_id": component.id,
+            "child_job_id": component.component_job_id,
+            "assembly": {
+                "instances": [{
+                    "location": [2, 0, 0],
+                    "rotation_deg": [0, 0, 0],
+                    "scale": [1, 1, 1],
+                }]
+            },
+        }),
+        encoding="utf-8",
+    )
+    main._write_status(
+        root,
+        generic_model={
+            "version": 5,
+            "title": "Object",
+            "blend": "model-v5.blend",
+            "assembled_components": [{"feature_id": component.id}],
+        },
+        modeling_strategy="procedural",
+        quality_gate={
+            "recognizable": False,
+            "recognition_passed": True,
+            "assembly_integrity_pass": False,
+            "blocking_geometry_defects": ["Only the component placement is wrong"],
+        },
+    )
+
+    async def plan_repair(*args, **kwargs):
+        return main.AssemblyRepairDecision(
+            rationale="Parent geometry is sound; only reinstall the frozen component.",
+            parent_feature_ids=[],
+        )
+
+    monkeypatch.setattr(main, "_plan_assembled_parent_repair", plan_repair)
+    prepared = __import__("asyncio").run(
+        main._prepare_assembled_parent_repair(parent_id, main._read_status(root))
+    )
+
+    assert prepared["prepared"] is True
+    status = main._read_status(root)
+    assert status["assembly_repair"]["phase"] == "reinstall_components"
+    assert status["assembly_repair"]["previous_assemblies"][component.id]["instances"][0]["location"] == [2, 0, 0]
+    reloaded = load_feature_plan(root)
+    assert reloaded is not None
+    retried = next(feature for feature in reloaded.features if feature.id == component.id)
+    assert retried.status == "retry"
+    assert retried.acceptance_verified is False

@@ -1,5 +1,9 @@
 from app.feature_tasks import FeatureTask
-from app.main import _feature_diagnostic_views, _feature_evaluation_accepts
+from app.main import (
+    _feature_candidate_review_decision,
+    _feature_diagnostic_views,
+    _feature_evaluation_accepts,
+)
 
 
 def _body_task() -> FeatureTask:
@@ -91,3 +95,83 @@ def test_radial_repeated_feature_qa_includes_top_view():
     assert "front-left" in views
     assert "back-right" in views
     assert len(views) >= 3
+
+
+
+def test_strict_feature_pass_overrides_relative_equivalence():
+    task = FeatureTask(
+        id="local-part",
+        name="Generic local part",
+        strategy="attachment",
+        acceptance_criteria=["Requested part is visible and complete"],
+    )
+    evaluation = {
+        "passed": True,
+        "visible": True,
+        "criteria_satisfied": True,
+        "subject_recognizable": False,
+        "confidence": 0.96,
+        "reference_match_score": 0.90,
+        "regression_detected": False,
+    }
+
+    complete, keep = _feature_candidate_review_decision(
+        task,
+        evaluation,
+        relative_improved=False,
+    )
+
+    assert complete is True
+    assert keep is True
+
+
+def test_relative_improvement_keeps_incomplete_regression_free_draft():
+    task = FeatureTask(
+        id="local-part",
+        name="Generic local part",
+        strategy="attachment",
+    )
+    evaluation = {
+        "passed": False,
+        "visible": True,
+        "criteria_satisfied": False,
+        "subject_recognizable": False,
+        "confidence": 0.90,
+        "reference_match_score": 0.60,
+        "regression_detected": False,
+    }
+
+    complete, keep = _feature_candidate_review_decision(
+        task,
+        evaluation,
+        relative_improved=True,
+    )
+
+    assert complete is False
+    assert keep is True
+
+
+def test_relative_improvement_does_not_keep_regressing_feature_draft():
+    task = FeatureTask(
+        id="local-part",
+        name="Generic local part",
+        strategy="attachment",
+    )
+    evaluation = {
+        "passed": False,
+        "visible": True,
+        "criteria_satisfied": False,
+        "subject_recognizable": False,
+        "confidence": 0.90,
+        "reference_match_score": 0.60,
+        "regression_detected": True,
+    }
+
+    complete, keep = _feature_candidate_review_decision(
+        task,
+        evaluation,
+        relative_improved=True,
+    )
+
+    assert complete is False
+    assert keep is False

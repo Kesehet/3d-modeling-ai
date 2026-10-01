@@ -76,7 +76,7 @@ def evaluation(passed):
 
 
 @pytest.mark.parametrize("passed,better,kept,accepted", [
-    (False, True, True, False), (True, True, True, True), (True, False, False, False),
+    (False, True, True, False), (True, True, True, True), (True, False, True, True),
 ])
 def test_procedural_progress_completion_and_regression_are_separate(
     tmp_path, monkeypatch, passed, better, kept, accepted,

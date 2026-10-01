@@ -309,6 +309,157 @@ def _normalize_modeling_director_payload(data: object) -> dict:
     return normalized
 
 
+class FinalAssemblyIntegrityReport(BaseModel):
+    pass_integrity: bool
+    geometry_coherent: bool
+    attachment_contacts_sound: bool
+    unintended_open_seams: bool
+    floating_or_detached_parts: bool
+    implausible_intersections: bool
+    summary: str = Field(default="", max_length=2400)
+    blocking_defects: list[str] = Field(default_factory=list, max_length=20)
+    repair_instructions: list[str] = Field(default_factory=list, max_length=16)
+
+
+def _normalize_final_assembly_integrity_payload(data: object) -> dict:
+    """Normalize a strict visual assembly/contact verdict and recompute its pass flag."""
+
+    if not isinstance(data, dict):
+        raise TypeError("Final assembly integrity response is not a JSON object.")
+
+    def as_bool(value: object) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        return str(value).strip().lower() in {
+            "1", "true", "yes", "pass", "passed", "sound", "coherent", "ok",
+        }
+
+    def find_value(keys: tuple[str, ...]) -> object | None:
+        queue: list[dict] = [data]
+        seen: set[int] = set()
+        while queue:
+            node = queue.pop(0)
+            node_id = id(node)
+            if node_id in seen:
+                continue
+            seen.add(node_id)
+            for key in keys:
+                if key in node:
+                    return node[key]
+            for key in (
+                "analysis",
+                "evaluation",
+                "assessment",
+                "result",
+                "integrity",
+                "assembly_integrity",
+                "visual_quality",
+            ):
+                child = node.get(key)
+                if isinstance(child, dict):
+                    queue.append(child)
+        return None
+
+    def text_list(value: object, *, limit: int) -> list[str]:
+        items: list[str] = []
+        if isinstance(value, list):
+            raw_items = value
+        elif value is None:
+            raw_items = []
+        else:
+            raw_items = [value]
+        for item in raw_items:
+            if isinstance(item, dict):
+                text = (
+                    item.get("defect")
+                    or item.get("issue")
+                    or item.get("problem")
+                    or item.get("instruction")
+                    or item.get("action")
+                    or item.get("description")
+                    or item.get("text")
+                )
+            else:
+                text = item
+            if text is not None and str(text).strip():
+                items.append(str(text).strip()[:800])
+        return items[:limit]
+
+    normalized = {
+        "pass_integrity": as_bool(
+            find_value(("pass_integrity", "integrity_pass", "quality_gate_pass", "passed", "pass"))
+        ),
+        "geometry_coherent": as_bool(
+            find_value(("geometry_coherent", "coherent_geometry", "geometry_sound", "coherent"))
+        ),
+        "attachment_contacts_sound": as_bool(
+            find_value(
+                (
+                    "attachment_contacts_sound",
+                    "contacts_sound",
+                    "attachments_connected",
+                    "parts_connected",
+                )
+            )
+        ),
+        "unintended_open_seams": as_bool(
+            find_value(("unintended_open_seams", "open_seams", "unintended_gaps", "open_gaps"))
+        ),
+        "floating_or_detached_parts": as_bool(
+            find_value(("floating_or_detached_parts", "floating_parts", "detached_parts"))
+        ),
+        "implausible_intersections": as_bool(
+            find_value(
+                (
+                    "implausible_intersections",
+                    "bad_intersections",
+                    "self_intersections",
+                    "excessive_penetration",
+                )
+            )
+        ),
+        "summary": str(
+            find_value(("summary", "overall_summary", "assessment", "verdict", "critique")) or ""
+        ).strip()[:2400],
+        "blocking_defects": text_list(
+            find_value(
+                (
+                    "blocking_defects",
+                    "major_failures",
+                    "blocking_issues",
+                    "major_issues",
+                    "defects",
+                )
+            ),
+            limit=20,
+        ),
+        "repair_instructions": text_list(
+            find_value(
+                (
+                    "repair_instructions",
+                    "instructions",
+                    "recommended_fixes",
+                    "fixes",
+                    "next_steps",
+                )
+            ),
+            limit=16,
+        ),
+    }
+    normalized["pass_integrity"] = bool(
+        normalized["pass_integrity"]
+        and normalized["geometry_coherent"]
+        and normalized["attachment_contacts_sound"]
+        and not normalized["unintended_open_seams"]
+        and not normalized["floating_or_detached_parts"]
+        and not normalized["implausible_intersections"]
+        and not normalized["blocking_defects"]
+    )
+    return normalized
+
+
 class RefinementComparison(BaseModel):
     candidate_is_better: bool
     summary: str = Field(min_length=1, max_length=2400)
@@ -9239,6 +9390,118 @@ async def _ask_modeling_director(
     )
 
 
+async def _final_assembly_integrity_check(
+    job_id: str, *, stage: str, render_version: int | None = None
+) -> dict:
+    """Independently reject visibly broken assembly/contact geometry before completion."""
+
+    root = _require_job(job_id)
+    job_request = json.loads((root / "request.json").read_text(encoding="utf-8"))
+    status = _read_status(root)
+    images, labels = _collect_images(
+        root,
+        VisionAnalyzeRequest(
+            stage=stage,
+            include_references=True,
+            include_renders=True,
+            max_images=12,
+            render_version=render_version,
+        ),
+    )
+    if not images:
+        raise HTTPException(
+            status_code=424,
+            detail="Final assembly integrity QA requires current model renders.",
+        )
+
+    system = (
+        "You are a strict final 3D assembly and contact-quality inspector. This is NOT a subject-recognition task. "
+        "A model can be perfectly recognizable and still FAIL this gate. Inspect the current renders across side, "
+        "oblique, rear and top views and compare with the supplied references. Fail only for clearly visible geometry "
+        "defects: unintended open seams/gaps/through-holes where solid surfaces should meet; floating or detached major "
+        "parts; attachment roots that visibly fail to contact their supporting body; or implausible intersections/"
+        "penetration that read as broken construction rather than a deliberate joint. Intentional holes, vents, design "
+        "gaps, panel seams and ordinary embedded joints are not defects when supported by the reference or coherent "
+        "construction. Do not infer hidden topology from filenames or object names. Do not reward recognizability, "
+        "feature count, or style. Judge physical-looking continuity and contact only from visible evidence. "
+        "Set pass_integrity=false if geometry_coherent=false, attachment_contacts_sound=false, any defect boolean is "
+        "true, or blocking_defects is non-empty. Give concrete repair_instructions tied to visible locations/views. "
+        "Return JSON only matching the schema."
+    )
+    prompt = (
+        f"Exact user request: {job_request.get('prompt', '')}\n"
+        f"Intended use: {job_request.get('intended_use', '')}\n"
+        f"Current strategy: {status.get('modeling_strategy') or 'procedural'}\n"
+        f"Evaluated model version: {render_version or (status.get('generic_model') or {}).get('version')}\n"
+        f"Installed component metadata: "
+        f"{json.dumps((status.get('generic_model') or {}).get('assembled_components') or [], ensure_ascii=False)}\n"
+        f"Images in order: {labels}\n"
+        "Inspect every available current render. Give extra weight to side and oblique views for gaps, contact failures "
+        "and penetrations that may be hidden in a top/front silhouette."
+    )
+
+    schema = FinalAssemblyIntegrityReport.model_json_schema()
+    schema["required"] = [
+        "pass_integrity",
+        "geometry_coherent",
+        "attachment_contacts_sound",
+        "unintended_open_seams",
+        "floating_or_detached_parts",
+        "implausible_intersections",
+        "summary",
+        "blocking_defects",
+        "repair_instructions",
+    ]
+    client = OllamaProxyClient()
+    errors: list[str] = []
+    for candidate_model in VISION_MODELS:
+        try:
+            result = await client.chat_json(
+                model=candidate_model,
+                system=system,
+                prompt=prompt,
+                images=images,
+                schema=schema,
+                temperature=0.0,
+                num_predict=4096,
+            )
+            report = FinalAssemblyIntegrityReport.model_validate(
+                _normalize_final_assembly_integrity_payload(result.data)
+            )
+        except (OllamaProxyError, httpx.HTTPError, ValidationError, ValueError, TypeError) as exc:
+            errors.append(f"{candidate_model}: {exc}")
+            continue
+
+        payload = {
+            **report.model_dump(),
+            "model": candidate_model,
+            "endpoint": result.endpoint,
+            "usage": result.usage,
+            "images": labels,
+            "stage": stage,
+            "evaluated_version": render_version
+            or (status.get("generic_model") or {}).get("version"),
+            "created_at": datetime.now(UTC).isoformat(),
+        }
+        _write_llm_log(root, "final-assembly-integrity", payload)
+        append_history(
+            root,
+            "final_assembly_integrity",
+            version=payload["evaluated_version"],
+            model=candidate_model,
+            passed=report.pass_integrity,
+            blocking_defects=report.blocking_defects[:8],
+            summary=report.summary,
+        )
+        return payload
+
+    raise HTTPException(
+        status_code=502,
+        detail="Final assembly integrity QA failed across configured models: "
+        + " | ".join(errors[-4:]),
+    )
+
+
 async def _generic_recognizability_check(
     job_id: str, *, stage: str, render_version: int | None = None
 ) -> dict:
@@ -9260,23 +9523,82 @@ async def _generic_recognizability_check(
         render_version=render_version,
     )
     action = decision["action"]
-    recognizable = action == "accept" and float(decision.get("subject_match_score") or 0) >= 0.75
+    recognition_passed = (
+        action == "accept"
+        and float(decision.get("subject_match_score") or 0) >= 0.75
+    )
+    integrity: dict | None = None
+    if recognition_passed:
+        try:
+            integrity = await _final_assembly_integrity_check(
+                job_id,
+                stage=f"{stage}_assembly_integrity",
+                render_version=render_version,
+            )
+        except Exception as exc:  # noqa: BLE001 - failed integrity QA must block completion
+            detail = str(exc.detail) if isinstance(exc, HTTPException) else str(exc)
+            integrity = {
+                "pass_integrity": False,
+                "geometry_coherent": False,
+                "attachment_contacts_sound": False,
+                "unintended_open_seams": False,
+                "floating_or_detached_parts": False,
+                "implausible_intersections": False,
+                "blocking_defects": ["Assembly integrity evaluation unavailable."],
+                "repair_instructions": [],
+                "summary": "Assembly integrity evaluation unavailable: " + detail,
+            }
+            append_history(
+                root,
+                "final_assembly_integrity_unavailable",
+                version=render_version
+                or (_read_status(root).get("generic_model") or {}).get("version"),
+                error=detail,
+            )
+
+    integrity_passed = bool(
+        not recognition_passed
+        or (isinstance(integrity, dict) and integrity.get("pass_integrity") is True)
+    )
+    recognizable = bool(recognition_passed and integrity_passed)
     recommended_strategy = (
         "base_mesh"
         if action in {"build_mesh", "refine_mesh", "rebuild_mesh"}
-        else "procedural"
+        else current_strategy
     )
+    blocking_geometry_defects = (
+        list(integrity.get("blocking_defects") or [])
+        if isinstance(integrity, dict)
+        else []
+    )
+    instructions = list(decision.get("instructions") or [])
+    if isinstance(integrity, dict):
+        instructions.extend(integrity.get("repair_instructions") or [])
+    summary = str(decision.get("summary") or "")
+    if recognition_passed and isinstance(integrity, dict):
+        integrity_summary = str(integrity.get("summary") or "").strip()
+        if integrity_summary:
+            summary = (summary + " Assembly integrity: " + integrity_summary).strip()
+
     return {
         "scope": "whole_object",
         "evaluated_version": render_version or (_read_status(root).get("generic_model") or {}).get("version"),
         "recognizable": recognizable,
+        "recognition_passed": recognition_passed,
+        "assembly_integrity_pass": (
+            integrity.get("pass_integrity")
+            if isinstance(integrity, dict)
+            else None
+        ),
         "subject_match_score": decision.get("subject_match_score"),
         "recommended_strategy": recommended_strategy,
-        "summary": decision.get("summary"),
+        "summary": summary,
         "major_missing_parts": decision.get("major_problems") or [],
+        "blocking_geometry_defects": blocking_geometry_defects,
         "director_action": action,
-        "instructions": decision.get("instructions") or [],
+        "instructions": instructions[:24],
         "director": decision,
+        "assembly_integrity": integrity,
         "stage": stage,
     }
 

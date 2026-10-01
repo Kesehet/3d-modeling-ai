@@ -1917,11 +1917,13 @@ async def _plan_assembled_parent_repair(
     ]
 
     system = (
-        "You coordinate a conservative repair of an already-recognizable multi-part 3D model. "
-        "The current assembly failed final contact/integrity QA. Frozen component children will be reinstalled separately; "
+        "You coordinate a conservative repair of a multi-part 3D model that failed whole-object or assembly QA. "
+        "The failure may be contact/integrity, installed scale/proportion, or component-to-parent fit. "
+        "Frozen component children will be reinstalled separately; "
         "do NOT redesign them and do NOT select component_job features. Select only accepted IN-PLACE parent feature IDs "
         "whose own geometry or mounting interface visibly needs correction before component reinstallation. "
-        "If a defect can be fixed solely by changing the component instance transform, return no parent_feature_ids. "
+        "If a defect can be fixed solely by changing the component instance location/rotation/scale, return no parent_feature_ids. "
+        "Do not reopen parent geometry just because an installed frozen component is too small, thin, large, rotated, or offset. "
         "If a parent seam/contact is visibly wrong, select the narrowest owning parent feature(s), preferring a socket, cap, "
         "joint, mount, interface or local support feature over a broad primary body when possible. "
         "Do not reopen good geometry merely because it is near a bad joint. Return JSON only matching the schema."
@@ -1990,6 +1992,19 @@ async def _plan_assembled_parent_repair(
     )
 
 
+def _assembly_repair_forces_feature_edit(status: dict, feature_task: FeatureTask | None) -> bool:
+    """Whole-object repair evidence overrides a stale local pass for selected parent features."""
+
+    if feature_task is None:
+        return False
+    repair = status.get("assembly_repair")
+    return bool(
+        isinstance(repair, dict)
+        and repair.get("phase") == "repair_parent"
+        and feature_task.id in {str(item) for item in repair.get("parent_feature_ids") or []}
+    )
+
+
 def _advance_assembly_repair_if_ready(root: Path, status: dict) -> dict:
     """After parent repairs pass strict QA, requeue frozen component installs."""
 
@@ -2052,10 +2067,30 @@ async def _prepare_assembled_parent_repair(job_id: str, status: dict) -> dict:
     root = _require_job(job_id)
     quality = status.get("quality_gate")
     model = status.get("generic_model")
+    repairable_quality = bool(
+        isinstance(quality, dict)
+        and (
+            (
+                quality.get("recognition_passed") is True
+                and quality.get("assembly_integrity_pass") is False
+            )
+            or (
+                quality.get("scope") == "whole_object"
+                and quality.get("recognizable") is False
+                and (
+                    quality.get("director_action") in {
+                        "revise_procedural",
+                        "build_mesh",
+                        "refine_mesh",
+                        "rebuild_mesh",
+                    }
+                    or bool(quality.get("major_missing_parts"))
+                )
+            )
+        )
+    )
     if (
-        not isinstance(quality, dict)
-        or quality.get("recognition_passed") is not True
-        or quality.get("assembly_integrity_pass") is not False
+        not repairable_quality
         or not isinstance(model, dict)
         or not isinstance(model.get("version"), int)
     ):
@@ -2133,7 +2168,12 @@ async def _prepare_assembled_parent_repair(job_id: str, status: dict) -> dict:
         "parent_feature_ids": decision.parent_feature_ids,
         "component_feature_ids": component_feature_ids,
         "previous_assemblies": previous_assemblies,
-        "blocking_defects": list(quality.get("blocking_geometry_defects") or []),
+        "blocking_defects": list(dict.fromkeys(
+            [
+                *[str(item) for item in quality.get("blocking_geometry_defects") or []],
+                *[str(item) for item in quality.get("major_missing_parts") or []],
+            ]
+        )),
         "repair_instructions": list(quality.get("instructions") or []),
         "rationale": decision.rationale,
         "prepared_at": datetime.now(UTC).isoformat(),
@@ -2263,8 +2303,10 @@ async def _plan_component_assembly(
         "global origin/assembly anchor must land. Use parent dimensions/spec and pixels to place that anchor on the correct "
         "visible mounting region. Preserve realistic contact with the parent and avoid floating/intersection errors. "
         "When an ASSEMBLY REPAIR CONTEXT is supplied, the previous transform(s) produced a visible integrity failure. "
-        "Use the failed renders, blocking defects and repair instructions to make a deliberate contact correction; do not "
-        "blindly repeat the old transforms. Keep the frozen child geometry unchanged. "
+        "Use the failed renders, blocking defects and repair instructions to make a deliberate correction; do not "
+        "blindly repeat the old transforms. Location, rotation and instance scale are all available repair controls. "
+        "If the frozen child is locally correct but visibly too thin/small/large after installation, adjust instance scale "
+        "conservatively instead of redesigning the child. Keep the frozen child geometry unchanged. "
         f"Return exactly {expected_instances} instance transform(s). For repeated identical parts, reuse this one "
         "frozen component with separate transforms. If unsure, prefer conservative scale and physically plausible contact."
     )
@@ -9727,6 +9769,7 @@ async def _ask_modeling_director(
         f"Current strategy: {current_strategy}\n"
         f"Current stage: {stage}\n"
         f"Current quality gate: {json.dumps(status_payload.get('quality_gate') or {}, ensure_ascii=False)}\n"
+        f"Assembly repair context: {json.dumps(status_payload.get('assembly_repair') or {}, ensure_ascii=False)}\n"
         f"Recent director decisions: {json.dumps(recent_director_history, ensure_ascii=False)}\n"
         f"AI-generated subject inventory: "
         f"{json.dumps(inventory.model_dump() if inventory else {}, ensure_ascii=False)}\n"
@@ -9773,6 +9816,27 @@ async def _ask_modeling_director(
             # The whole object cannot be declared finished while the coordinator
             # still has an unresolved visible feature sub-job.
             action = "refine_mesh" if current_strategy == "adaptive_loft" else "revise_procedural"
+        repair_context = (
+            status_payload.get("assembly_repair")
+            if isinstance(status_payload.get("assembly_repair"), dict)
+            else {}
+        )
+        if (
+            feature_task is not None
+            and repair_context.get("phase") == "repair_parent"
+            and feature_task.id in {
+                str(item) for item in repair_context.get("parent_feature_ids") or []
+            }
+        ):
+            if current_strategy == "procedural" and action in {
+                "build_mesh",
+                "refine_mesh",
+                "rebuild_mesh",
+            }:
+                action = "revise_procedural"
+            elif current_strategy in {"adaptive_loft", "hard_surface_cage"} and action == "rebuild_mesh":
+                action = "refine_mesh"
+
         original_action = action
         action = _constrain_director_action_for_feature(
             action,
@@ -10401,10 +10465,14 @@ async def refine_generic_scene(job_id: str, request: GenericRefineRequest) -> di
             current_evaluation = await _evaluate_feature_candidate(
                 job_id, feature_task, baseline_version=None, candidate_version=current_version,
             )
-            if _feature_evaluation_accepts(feature_task, current_evaluation):
+            current_status = _read_status(root)
+            if (
+                _feature_evaluation_accepts(feature_task, current_evaluation)
+                and not _assembly_repair_forces_feature_edit(current_status, feature_task)
+            ):
                 result = await _review_procedural_candidate(
-                    job_id, {"candidate_model": _read_status(root)["generic_model"], "spec": current_spec.model_dump()},
-                    _read_status(root), feature_task, evaluation=current_evaluation,
+                    job_id, {"candidate_model": current_status["generic_model"], "spec": current_spec.model_dump()},
+                    current_status, feature_task, evaluation=current_evaluation,
                 )
                 completed.append(result)
                 continue
@@ -10444,6 +10512,7 @@ async def refine_generic_scene(job_id: str, request: GenericRefineRequest) -> di
             f"Subject inventory: {json.dumps(inventory.model_dump() if inventory else {})}\n"
             f"Feature plan: {json.dumps(plan.model_dump() if plan else {})}\n"
             f"ACTIVE FEATURE: {json.dumps(feature_task.model_dump() if feature_task else {})}\n"
+            f"ASSEMBLY REPAIR CONTEXT: {json.dumps(_read_status(root).get('assembly_repair') or {})}\n"
             f"Coordinate contract: {_generic_spatial_guidance('')}\n"
             f"Reference/current image order: {labels}\n"
             "Fix the active feature and protect other geometry. Never create parts owned by component_job entries; "

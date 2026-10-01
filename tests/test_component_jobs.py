@@ -467,3 +467,101 @@ def test_coordinated_assembly_repair_can_reinstall_without_parent_rebuild(
     retried = next(feature for feature in reloaded.features if feature.id == component.id)
     assert retried.status == "retry"
     assert retried.acceptance_verified is False
+
+
+
+def test_selected_parent_feature_cannot_be_reaccepted_unchanged_during_assembly_repair():
+    feature = FeatureTask(id="joint", name="Joint", build_mode="in_place")
+    status = {
+        "assembly_repair": {
+            "phase": "repair_parent",
+            "parent_feature_ids": ["joint"],
+        }
+    }
+
+    assert main._assembly_repair_forces_feature_edit(status, feature) is True
+    assert main._assembly_repair_forces_feature_edit(status, FeatureTask(id="other", name="Other")) is False
+    assert main._assembly_repair_forces_feature_edit({}, feature) is False
+
+
+def test_unrecognizable_assembled_model_can_retry_frozen_component_transforms(
+    tmp_path, monkeypatch
+):
+    parent_id, root, _ = _parent_job(tmp_path, monkeypatch)
+    plan = load_feature_plan(root)
+    assert plan is not None
+    component = plan.features[-1]
+    component.status = "accepted"
+    component.accepted_version = 6
+    component.acceptance_verified = True
+    component.acceptance_score = 1.0
+    component.component_job_id = "dddddddd-dddd-dddd-dddd-dddddddddddd"
+    save_feature_plan(root, plan)
+
+    child_root = main.JOBS_ROOT / component.component_job_id
+    child_root.mkdir(parents=True)
+    for category in main.ARTIFACT_CATEGORIES:
+        (child_root / category).mkdir(exist_ok=True)
+
+    _touch_preserved_model(root, 4)
+    _touch_preserved_model(root, 6)
+    (root / "component-assembly-v6.json").write_text(
+        json.dumps({
+            "baseline_version": 4,
+            "candidate_version": 6,
+            "feature_id": component.id,
+            "child_job_id": component.component_job_id,
+            "assembly": {
+                "instances": [{
+                    "location": [0.25, 0, 0.5],
+                    "rotation_deg": [0, 0, 0],
+                    "scale": [1, 1, 1],
+                }]
+            },
+        }),
+        encoding="utf-8",
+    )
+    main._write_status(
+        root,
+        generic_model={
+            "version": 6,
+            "title": "Assembled object",
+            "blend": "model-v6.blend",
+            "assembled_components": [{"feature_id": component.id}],
+        },
+        modeling_strategy="procedural",
+        quality_gate={
+            "scope": "whole_object",
+            "evaluated_version": 6,
+            "recognizable": False,
+            "recognition_passed": False,
+            "assembly_integrity_pass": None,
+            "subject_match_score": 0.6,
+            "director_action": "refine_mesh",
+            "major_missing_parts": ["Installed component is visibly too thin."],
+            "instructions": ["Increase installed component width/scale and clean up contact."],
+        },
+        assembly_repair={"attempt": 1, "phase": "reinstall_components"},
+    )
+
+    async def plan_repair(*args, **kwargs):
+        return main.AssemblyRepairDecision(
+            rationale="Parent is acceptable; revise only frozen-component installation.",
+            parent_feature_ids=[],
+        )
+
+    monkeypatch.setattr(main, "_plan_assembled_parent_repair", plan_repair)
+    prepared = __import__("asyncio").run(
+        main._prepare_assembled_parent_repair(parent_id, main._read_status(root))
+    )
+
+    assert prepared["prepared"] is True
+    assert prepared["attempt"] == 2
+    status = main._read_status(root)
+    assert status["generic_model"]["version"] == 4
+    assert status["assembly_repair"]["phase"] == "reinstall_components"
+    assert "Installed component is visibly too thin." in status["assembly_repair"]["blocking_defects"]
+    reloaded = load_feature_plan(root)
+    assert reloaded is not None
+    retried = next(feature for feature in reloaded.features if feature.id == component.id)
+    assert retried.status == "retry"

@@ -132,9 +132,30 @@ def add_object(item, *, decorate=True):
     elif shape == "sphere":
         bpy.ops.mesh.primitive_uv_sphere_add(segments=40, ring_count=20, location=location)
     elif shape == "cylinder":
-        bpy.ops.mesh.primitive_cylinder_add(vertices=48, radius=1, depth=2, location=location)
+        primitive_radius = (
+            1.0
+            if item.get("dimensions")
+            else max(0.02, min(5.0, float(item.get("radius") or 1.0)))
+        )
+        bpy.ops.mesh.primitive_cylinder_add(
+            vertices=48,
+            radius=primitive_radius,
+            depth=2,
+            location=location,
+        )
     elif shape == "cone":
-        bpy.ops.mesh.primitive_cone_add(vertices=48, radius1=1, radius2=0, depth=2, location=location)
+        primitive_radius = (
+            1.0
+            if item.get("dimensions")
+            else max(0.02, min(5.0, float(item.get("radius") or 1.0)))
+        )
+        bpy.ops.mesh.primitive_cone_add(
+            vertices=48,
+            radius1=primitive_radius,
+            radius2=0,
+            depth=2,
+            location=location,
+        )
     elif shape == "torus":
         bpy.ops.mesh.primitive_torus_add(
             major_radius=1,

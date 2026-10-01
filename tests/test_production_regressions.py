@@ -515,7 +515,12 @@ def test_final_quality_rechecks_whole_object_and_current_version(tmp_path, monke
 
     async def judge(_job_id, *, stage, render_version):
         calls.append(render_version)
-        return {"scope": "whole_object", "evaluated_version": render_version, "recognizable": True}
+        return {
+            "scope": "whole_object",
+            "evaluated_version": render_version,
+            "recognizable": True,
+            "assembly_integrity_pass": True,
+        }
 
     monkeypatch.setattr(main, "_generic_recognizability_check", judge)
     status = main._write_status(root, generic_model={"version": 4},
@@ -528,6 +533,42 @@ def test_final_quality_rechecks_whole_object_and_current_version(tmp_path, monke
     assert main._auto_improve_goal_reached(root, status) is False
     asyncio.run(main._ensure_final_model_quality("abc123", status))
     assert calls == [4, 5]
+
+
+def test_legacy_whole_object_pass_is_recertified_by_integrity_gate(tmp_path, monkeypatch):
+    root = job(tmp_path, monkeypatch)
+    monkeypatch.setattr(main, "feature_plan_summary", lambda _: {"required_complete": True})
+    calls = []
+
+    async def judge(_job_id, *, stage, render_version):
+        calls.append(render_version)
+        return {
+            "scope": "whole_object",
+            "evaluated_version": render_version,
+            "recognizable": False,
+            "recognition_passed": True,
+            "assembly_integrity_pass": False,
+            "blocking_geometry_defects": ["Visible open seam"],
+            "summary": "Recognizable, but the assembly has a visible open seam.",
+        }
+
+    monkeypatch.setattr(main, "_generic_recognizability_check", judge)
+    status = main._write_status(
+        root,
+        generic_model={"version": 5},
+        quality_gate={
+            "scope": "whole_object",
+            "evaluated_version": 5,
+            "recognizable": True,
+            "subject_match_score": 1.0,
+        },
+    )
+
+    status = asyncio.run(main._ensure_final_model_quality("abc123", status))
+
+    assert calls == [5]
+    assert status["quality_gate"]["recognizable"] is False
+    assert status["quality_gate"]["assembly_integrity_pass"] is False
 
 
 def test_final_quality_failure_is_persisted_and_retryable(tmp_path, monkeypatch):

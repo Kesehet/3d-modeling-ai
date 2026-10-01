@@ -1,0 +1,168 @@
+name: Temporary production wrap-up verification
+
+on:
+  push:
+    branches: [verify-wrapup-20261001]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    environment: production
+    timeout-minutes: 55
+    env:
+      THREED_API_TOKEN: ${{ secrets.THREED_API_TOKEN }}
+      THREED_HOSTNAME: ${{ vars.THREED_HOSTNAME || '3d-modeling-ai.srv1058562.hstgr.cloud' }}
+      PARENT_JOB: c310811a-7699-4c52-9d57-6f74752ff682
+      CHILD_JOB: b6fd24bf-ce87-48a8-8b0a-1f0b34a22264
+    steps:
+      - name: Recover preserved component and parent
+        run: |
+          set -u
+          BASE_URL="https://$THREED_HOSTNAME"
+          mkdir -p diagnostics/recovery diagnostics/fresh diagnostics/renders-parent diagnostics/renders-child diagnostics/renders-fresh
+
+          api() {
+            method="$1"; path="$2"; body="$3"; out="$4"
+            if [ -n "$body" ]; then
+              curl --silent --show-error --retry 3 --retry-all-errors --retry-delay 3 \
+                -H "Authorization: Bearer $THREED_API_TOKEN" -H "Content-Type: application/json" \
+                -X "$method" -d "$body" -w '%{http_code}' -o "$out" "$BASE_URL$path"
+            else
+              curl --silent --show-error --retry 3 --retry-all-errors --retry-delay 3 \
+                -H "Authorization: Bearer $THREED_API_TOKEN" \
+                -X "$method" -w '%{http_code}' -o "$out" "$BASE_URL$path"
+            fi
+          }
+
+          snapshot() {
+            job_id="$1"; out="$2"
+            curl --fail --silent --show-error "$BASE_URL/dashboard/api" -o diagnostics/dashboard.json
+            jq --arg id "$job_id" '.jobs[] | select(.job_id == $id)' diagnostics/dashboard.json > "$out"
+          }
+
+          poll_job() {
+            job_id="$1"; out="$2"
+            for attempt in $(seq 1 120); do
+              snapshot "$job_id" "$out"
+              state=$(jq -r '.state // ""' "$out")
+              ai=$(jq -r '.auto_improve.state // ""' "$out")
+              stage=$(jq -r '.stage // ""' "$out")
+              echo "$job_id poll=$attempt state=$state auto=$ai stage=$stage"
+              if [ "$state" != "running" ] && [ "$ai" != "running" ] && [ "$ai" != "queued" ] && [ "$ai" != "starting" ]; then
+                return 0
+              fi
+              sleep 10
+            done
+            return 0
+          }
+
+          echo "=== restore child v9 and retry generic failed feature ==="
+          code=$(api POST "/v1/jobs/$CHILD_JOB/features/retry" \
+            '{"feature_id":"blade-mounting-arm","model_version":9,"reset_attempts":true}' \
+            diagnostics/recovery/child-retry.json)
+          echo "child retry HTTP=$code"; cat diagnostics/recovery/child-retry.json | jq . || true
+
+          code=$(api POST "/v1/jobs/$CHILD_JOB/auto-improve" '{"rounds":24}' diagnostics/recovery/child-auto.json)
+          echo "child auto HTTP=$code"; cat diagnostics/recovery/child-auto.json | jq . || true
+          poll_job "$CHILD_JOB" diagnostics/recovery/child-final.json
+          api GET "/v1/jobs/$CHILD_JOB/history" "" diagnostics/recovery/child-history.json >/dev/null || true
+          api GET "/v1/jobs/$CHILD_JOB/artifacts" "" diagnostics/recovery/child-artifacts.json >/dev/null || true
+
+          echo "=== retry parent from preserved v32; this also exercises linked-child recovery ==="
+          code=$(api POST "/v1/jobs/$PARENT_JOB/features/retry" \
+            '{"feature_id":"blade-component","model_version":32,"reset_attempts":true}' \
+            diagnostics/recovery/parent-retry.json)
+          echo "parent retry HTTP=$code"; cat diagnostics/recovery/parent-retry.json | jq . || true
+
+          code=$(api POST "/v1/jobs/$PARENT_JOB/auto-improve" '{"rounds":30}' diagnostics/recovery/parent-auto.json)
+          echo "parent auto HTTP=$code"; cat diagnostics/recovery/parent-auto.json | jq . || true
+          poll_job "$PARENT_JOB" diagnostics/recovery/parent-final.json
+          api GET "/v1/jobs/$PARENT_JOB/history" "" diagnostics/recovery/parent-history.json >/dev/null || true
+          api GET "/v1/jobs/$PARENT_JOB/artifacts" "" diagnostics/recovery/parent-artifacts.json >/dev/null || true
+
+          echo "=== recovered states ==="
+          jq '{job_id,state,stage,modeling_strategy,auto_improve,quality_gate,feature_plan,render_count:(.renders|length)}' diagnostics/recovery/child-final.json
+          jq '{job_id,state,stage,modeling_strategy,auto_improve,quality_gate,feature_plan,render_count:(.renders|length)}' diagnostics/recovery/parent-final.json
+
+          for pair in "$CHILD_JOB:diagnostics/recovery/child-artifacts.json:diagnostics/renders-child" "$PARENT_JOB:diagnostics/recovery/parent-artifacts.json:diagnostics/renders-parent"; do
+            IFS=: read -r jid manifest dest <<< "$pair"
+            names=$(jq -r '.artifacts.renders[]?.name // empty' "$manifest" | sort -V | tail -n 36)
+            while IFS= read -r name; do
+              [ -n "$name" ] || continue
+              enc=$(python -c 'import sys,urllib.parse;print(urllib.parse.quote(sys.argv[1],safe=""))' "$name")
+              curl --fail --silent --show-error --retry 1 \
+                -H "Authorization: Bearer $THREED_API_TOKEN" \
+                "$BASE_URL/v1/jobs/$jid/artifacts/renders/$enc" -o "$dest/$name" || true
+            done <<< "$names"
+          done
+
+      - name: Run fresh autonomous fan from scratch
+        run: |
+          set -u
+          BASE_URL="https://$THREED_HOSTNAME"
+          api() {
+            method="$1"; path="$2"; body="$3"; out="$4"
+            if [ -n "$body" ]; then
+              curl --silent --show-error --retry 3 --retry-all-errors --retry-delay 3 \
+                -H "Authorization: Bearer $THREED_API_TOKEN" -H "Content-Type: application/json" \
+                -X "$method" -d "$body" -w '%{http_code}' -o "$out" "$BASE_URL$path"
+            else
+              curl --silent --show-error --retry 3 --retry-all-errors --retry-delay 3 \
+                -H "Authorization: Bearer $THREED_API_TOKEN" \
+                -X "$method" -w '%{http_code}' -o "$out" "$BASE_URL$path"
+            fi
+          }
+
+          prompt='Create a simple modern 3-blade ceiling fan. White finish, round central motor housing, short downrod, and three evenly spaced slightly tapered blades. Keep the object clean and recognizable, isolated without a room or ceiling. Use the normal autonomous modeling pipeline; no supplied design or object-specific geometry.'
+          payload=$(jq -nc --arg prompt "$prompt" '{prompt:$prompt,intended_use:"rendering"}')
+          code=$(api POST "/v1/jobs" "$payload" diagnostics/fresh/create.json)
+          echo "fresh create HTTP=$code"; cat diagnostics/fresh/create.json | jq . || true
+          FRESH_JOB=$(jq -r '.job_id // empty' diagnostics/fresh/create.json)
+          echo "$FRESH_JOB" > diagnostics/fresh/job-id.txt
+
+          if [ -n "$FRESH_JOB" ]; then
+            code=$(api POST "/v1/jobs/$FRESH_JOB/generate" '{"auto_research":true,"auto_improve_rounds":0}' diagnostics/fresh/generate.json)
+            echo "fresh generate HTTP=$code"; cat diagnostics/fresh/generate.json | jq . || true
+            code=$(api POST "/v1/jobs/$FRESH_JOB/auto-improve" '{"rounds":36}' diagnostics/fresh/auto.json)
+            echo "fresh auto HTTP=$code"; cat diagnostics/fresh/auto.json | jq . || true
+
+            for attempt in $(seq 1 180); do
+              curl --fail --silent --show-error "$BASE_URL/dashboard/api" -o diagnostics/fresh/dashboard.json
+              jq --arg id "$FRESH_JOB" '.jobs[] | select(.job_id == $id)' diagnostics/fresh/dashboard.json > diagnostics/fresh/final.json
+              state=$(jq -r '.state // ""' diagnostics/fresh/final.json)
+              ai=$(jq -r '.auto_improve.state // ""' diagnostics/fresh/final.json)
+              stage=$(jq -r '.stage // ""' diagnostics/fresh/final.json)
+              echo "fresh poll=$attempt state=$state auto=$ai stage=$stage"
+              if [ "$state" != "running" ] && [ "$ai" != "running" ] && [ "$ai" != "queued" ] && [ "$ai" != "starting" ]; then
+                break
+              fi
+              sleep 10
+            done
+
+            api GET "/v1/jobs/$FRESH_JOB/history" "" diagnostics/fresh/history.json >/dev/null || true
+            api GET "/v1/jobs/$FRESH_JOB/artifacts" "" diagnostics/fresh/artifacts.json >/dev/null || true
+            echo "=== fresh state ==="
+            jq '{job_id,state,stage,modeling_strategy,auto_improve,quality_gate,feature_plan,render_count:(.renders|length)}' diagnostics/fresh/final.json
+
+            names=$(jq -r '.artifacts.renders[]?.name // empty' diagnostics/fresh/artifacts.json | sort -V | tail -n 45)
+            while IFS= read -r name; do
+              [ -n "$name" ] || continue
+              enc=$(python -c 'import sys,urllib.parse;print(urllib.parse.quote(sys.argv[1],safe=""))' "$name")
+              curl --fail --silent --show-error --retry 1 \
+                -H "Authorization: Bearer $THREED_API_TOKEN" \
+                "$BASE_URL/v1/jobs/$FRESH_JOB/artifacts/renders/$enc" -o "diagnostics/renders-fresh/$name" || true
+            done <<< "$names"
+          fi
+
+      - name: Upload wrap-up diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wrap-up-production-diagnostics
+          path: diagnostics
+          retention-days: 7

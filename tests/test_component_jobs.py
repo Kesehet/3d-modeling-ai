@@ -565,3 +565,27 @@ def test_unrecognizable_assembled_model_can_retry_frozen_component_transforms(
     assert reloaded is not None
     retried = next(feature for feature in reloaded.features if feature.id == component.id)
     assert retried.status == "retry"
+
+
+
+def test_component_local_axis_context_exposes_xyz_scale_contract():
+    context = main._component_local_axis_context(
+        {"scene_dimensions_blender_units": [0.4, 2.5, 0.08]}
+    )
+
+    assert context["dimensions_xyz"] == [0.4, 2.5, 0.08]
+    assert context["largest_extent_axis"] == "Y"
+    assert context["middle_extent_axis"] == "X"
+    assert context["smallest_extent_axis"] == "Z"
+    assert "BEFORE instance rotation" in context["scale_contract"]
+
+
+def test_component_local_axis_context_rejects_missing_or_degenerate_bounds():
+    assert main._component_local_axis_context({}) == {}
+    assert main._component_local_axis_context(
+        {"scene_dimensions_blender_units": [1.0, 0.0, 2.0]}
+    ) == {}
+
+
+def test_coordinated_repair_has_one_axis_aware_retry_after_previous_budget():
+    assert main.ASSEMBLY_REPAIR_MAX_ATTEMPTS == 3

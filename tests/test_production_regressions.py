@@ -846,3 +846,119 @@ def test_visual_edit_brief_drives_reasoning_geometry_with_full_profiles(tmp_path
     action = asyncio.run(main._decide_hard_surface_cage_edit("abc123", baseline_version=1, spec=spec,
         feature_task=FeatureTask(id="body", name="Body", strategy="base_mesh_region"), allow_replan=False))
     assert action.operation == "reshape_profile_point" and len(calls) == 2
+
+
+def test_final_integrity_normalizer_cannot_pass_with_a_visible_blocking_defect():
+    normalized = main._normalize_final_assembly_integrity_payload(
+        {
+            "pass_integrity": True,
+            "geometry_coherent": True,
+            "attachment_contacts_sound": True,
+            "unintended_open_seams": True,
+            "floating_or_detached_parts": False,
+            "implausible_intersections": False,
+            "summary": "A clearly unintended open seam remains at an attachment root.",
+            "blocking_defects": ["Open seam at attachment root"],
+            "repair_instructions": ["Close the visible gap without changing the outer silhouette."],
+        }
+    )
+
+    assert normalized["pass_integrity"] is False
+    assert normalized["unintended_open_seams"] is True
+    assert normalized["blocking_defects"] == ["Open seam at attachment root"]
+
+
+def test_recognizable_model_still_fails_when_assembly_integrity_fails(tmp_path, monkeypatch):
+    root = job(tmp_path, monkeypatch)
+    main._write_status(
+        root,
+        state="ready",
+        modeling_strategy="procedural",
+        generic_model={"version": 5, "assembled_components": [{"name": "component"}]},
+    )
+
+    async def director(*args, **kwargs):
+        return {
+            "action": "accept",
+            "subject_match_score": 1.0,
+            "summary": "The requested subject is clearly recognizable.",
+            "major_problems": [],
+            "instructions": [],
+        }
+
+    async def integrity(*args, **kwargs):
+        return {
+            "pass_integrity": False,
+            "geometry_coherent": False,
+            "attachment_contacts_sound": False,
+            "unintended_open_seams": True,
+            "floating_or_detached_parts": False,
+            "implausible_intersections": False,
+            "summary": "Side views show an open attachment seam.",
+            "blocking_defects": ["Open attachment seam"],
+            "repair_instructions": ["Close the seam and restore plausible contact."],
+        }
+
+    monkeypatch.setattr(main, "_ask_modeling_director", director)
+    monkeypatch.setattr(main, "_final_assembly_integrity_check", integrity)
+
+    quality = asyncio.run(
+        main._generic_recognizability_check(
+            "abc123",
+            stage="final_whole_object_quality",
+            render_version=5,
+        )
+    )
+
+    assert quality["recognition_passed"] is True
+    assert quality["assembly_integrity_pass"] is False
+    assert quality["recognizable"] is False
+    assert quality["blocking_geometry_defects"] == ["Open attachment seam"]
+    assert "Close the seam" in quality["instructions"][-1]
+
+
+def test_recognizable_model_passes_only_when_integrity_is_clean(tmp_path, monkeypatch):
+    root = job(tmp_path, monkeypatch)
+    main._write_status(
+        root,
+        state="ready",
+        modeling_strategy="procedural",
+        generic_model={"version": 2},
+    )
+
+    async def director(*args, **kwargs):
+        return {
+            "action": "accept",
+            "subject_match_score": 0.91,
+            "summary": "The subject and proportions are credible.",
+            "major_problems": [],
+            "instructions": [],
+        }
+
+    async def integrity(*args, **kwargs):
+        return {
+            "pass_integrity": True,
+            "geometry_coherent": True,
+            "attachment_contacts_sound": True,
+            "unintended_open_seams": False,
+            "floating_or_detached_parts": False,
+            "implausible_intersections": False,
+            "summary": "No blocking contact or continuity defects are visible.",
+            "blocking_defects": [],
+            "repair_instructions": [],
+        }
+
+    monkeypatch.setattr(main, "_ask_modeling_director", director)
+    monkeypatch.setattr(main, "_final_assembly_integrity_check", integrity)
+
+    quality = asyncio.run(
+        main._generic_recognizability_check(
+            "abc123",
+            stage="generic_final_quality",
+            render_version=2,
+        )
+    )
+
+    assert quality["recognition_passed"] is True
+    assert quality["assembly_integrity_pass"] is True
+    assert quality["recognizable"] is True

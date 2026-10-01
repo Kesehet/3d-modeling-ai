@@ -5241,7 +5241,7 @@ def _feature_evaluation_accepts(
         evaluation.get("passed") is True
         and evaluation.get("visible") is True
         and evaluation.get("criteria_satisfied") is True
-        and evaluation.get("regression_detected") is not True
+        and evaluation.get("regression_detected") is False
         and confidence >= 0.75
         and match_score >= minimum_match
     )

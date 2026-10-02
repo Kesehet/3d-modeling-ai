@@ -64,6 +64,46 @@ def test_strict_primary_silhouette_can_pass_when_all_gates_are_met():
 
 
 
+def test_feature_completion_ignores_model_pass_when_whole_subject_is_incomplete():
+    task = FeatureTask(
+        id="mount",
+        name="Local mounting feature",
+        strategy="attachment",
+        acceptance_criteria=["The mounting feature visibly matches the reference."],
+    )
+    evaluation = {
+        "passed": False,
+        "visible": True,
+        "criteria_satisfied": True,
+        "subject_recognizable": False,
+        "confidence": 0.96,
+        "reference_match_score": 0.90,
+        "regression_detected": False,
+    }
+
+    assert _feature_evaluation_accepts(task, evaluation) is True
+
+
+def test_feature_completion_still_rejects_bad_local_reference_match():
+    task = FeatureTask(
+        id="mount",
+        name="Local mounting feature",
+        strategy="attachment",
+        acceptance_criteria=["The mounting feature visibly matches the reference."],
+    )
+    evaluation = {
+        "passed": False,
+        "visible": True,
+        "criteria_satisfied": True,
+        "subject_recognizable": False,
+        "confidence": 0.96,
+        "reference_match_score": 0.55,
+        "regression_detected": False,
+    }
+
+    assert _feature_evaluation_accepts(task, evaluation) is False
+
+
 def test_completed_local_shape_can_pass_before_other_components_are_built():
     task = _body_task()
     evaluation = {

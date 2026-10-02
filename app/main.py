@@ -6018,8 +6018,7 @@ def _feature_evaluation_accepts(
     minimum_match = 0.82 if primary_shape else 0.72
 
     return bool(
-        evaluation.get("passed") is True
-        and evaluation.get("visible") is True
+        evaluation.get("visible") is True
         and evaluation.get("criteria_satisfied") is True
         and evaluation.get("regression_detected") is False
         and confidence >= 0.75
@@ -6307,9 +6306,12 @@ async def _evaluate_feature_candidate(
         "NOT RELATIVE: a feature being better than the baseline is never enough by itself. Set passed=true and "
         "criteria_satisfied=true only when the candidate visibly satisfies ALL acceptance criteria that can be judged "
         "from the supplied pixels. Set visible=true only when the feature itself is clearly visible in the candidate. "
-        "subject_recognizable must indicate whether an unfamiliar viewer could recognize the requested overall subject "
-        "from the candidate renders. Assess the ACTIVE feature itself; do not fail its local shape because "
-        "separate planned components have not been built yet. Whole-object completion is checked separately. "
+        "subject_recognizable is DIAGNOSTIC ONLY and must indicate whether an unfamiliar viewer could recognize "
+        "the requested overall subject from the candidate renders. It MUST NOT influence passed or criteria_satisfied. "
+        "For an early or partial feature it is normal for subject_recognizable=false while later planned features are absent. "
+        "Assess only the ACTIVE feature: do not fail it, reduce its local acceptance, or list a problem merely because "
+        "separate planned components/features have not been built yet or the whole object is not yet recognizable. "
+        "Whole-object completion is checked separately after the required feature backlog is complete. "
         "reference_match_score is "
         "an absolute 0..1 score for how closely this feature matches the reference appearance, "
         "shape, placement, count and proportions. If a criterion demands precision that cannot actually be verified "
@@ -6384,13 +6386,20 @@ async def _evaluate_feature_candidate(
                 candidate_version=candidate_version,
             )
             response = _apply_preservation_audit(response, preservation)
+
+        # The vision model's top-level "passed" flag is advisory at feature scope:
+        # multimodal models sometimes reject a locally complete early feature only
+        # because the unfinished whole object is not recognizable yet. Recompute the
+        # authoritative feature verdict from explicit local gates instead.
+        response["passed"] = _feature_evaluation_accepts(feature_task, response)
+
         _write_llm_log(root, "feature-qa", response)
         append_history(
             root,
             "feature_subjob_qa",
             feature_id=feature_task.id,
             feature_name=feature_task.name,
-            passed=evaluation.passed,
+            passed=response["passed"],
             visible=evaluation.visible,
             confidence=evaluation.confidence,
             regression_detected=evaluation.regression_detected,

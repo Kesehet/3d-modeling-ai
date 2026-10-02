@@ -773,3 +773,104 @@ def test_parent_assembly_repair_includes_failed_assembled_views(tmp_path, monkey
 
 def test_repair_director_context_fix_gets_one_bounded_retry():
     assert main.ASSEMBLY_REPAIR_MAX_ATTEMPTS == 5
+
+
+def test_radial_component_contract_aligns_long_axis_and_equalizes_instances():
+    feature = FeatureTask(
+        id="repeated-part",
+        name="Repeated elongated part",
+        count=3,
+        symmetry="radial",
+        build_mode="component_job",
+    )
+    assembly = main.ComponentAssemblySpec(
+        rationale="Place three repeated parts radially.",
+        repeated_axis_alignment="radial",
+        instances=[
+            main.ComponentInstanceSpec(
+                location=[0.12, 0.0, -0.31],
+                rotation_deg=[0.0, 90.0, 0.0],
+                scale=[0.05, 0.05, 0.05],
+            ),
+            main.ComponentInstanceSpec(
+                location=[-0.06, 0.1039, -0.31],
+                rotation_deg=[0.0, 210.0, 0.0],
+                scale=[0.06, 0.06, 0.06],
+            ),
+            main.ComponentInstanceSpec(
+                location=[-0.06, -0.1039, -0.31],
+                rotation_deg=[0.0, 330.0, 0.0],
+                scale=[0.07, 0.07, 0.07],
+            ),
+        ],
+    )
+
+    result = main._normalize_component_assembly_symmetry(
+        assembly,
+        feature,
+        {
+            "dimensions_xyz": [0.5958, 2.1998, 0.0911],
+            "largest_extent_axis": "Y",
+            "smallest_extent_axis": "Z",
+        },
+    )
+
+    assert all(instance.scale == [0.05, 0.05, 0.05] for instance in result.instances)
+    assert result.instances[0].rotation_deg == pytest.approx([0.0, 0.0, -90.0])
+    assert result.instances[1].rotation_deg == pytest.approx([0.0, 0.0, 30.0], abs=0.1)
+    assert result.instances[2].rotation_deg == pytest.approx([0.0, 0.0, 150.0], abs=0.1)
+    assert result.instances[0].location == pytest.approx([0.12, 0.0, -0.31], abs=1e-4)
+    assert result.instances[1].location == pytest.approx([-0.06, 0.103923, -0.31], abs=1e-4)
+    assert result.instances[2].location == pytest.approx([-0.06, -0.103923, -0.31], abs=1e-4)
+
+
+def test_tangential_radial_component_contract_uses_quarter_turn_offset():
+    feature = FeatureTask(
+        id="repeated-part",
+        name="Repeated elongated part",
+        count=2,
+        symmetry="radial",
+        build_mode="component_job",
+    )
+    assembly = main.ComponentAssemblySpec(
+        repeated_axis_alignment="tangential",
+        instances=[
+            main.ComponentInstanceSpec(location=[2.0, 0.0, 1.0]),
+            main.ComponentInstanceSpec(location=[-2.0, 0.0, 1.0]),
+        ],
+    )
+
+    result = main._normalize_component_assembly_symmetry(
+        assembly,
+        feature,
+        {"dimensions_xyz": [0.4, 3.0, 0.1]},
+    )
+
+    assert result.instances[0].rotation_deg == pytest.approx([0.0, 0.0, 0.0])
+    assert abs(abs(result.instances[1].rotation_deg[2]) - 180.0) < 1e-6
+
+
+def test_free_component_alignment_preserves_ai_transforms():
+    feature = FeatureTask(
+        id="free-part",
+        name="Free repeated part",
+        count=3,
+        symmetry="radial",
+        build_mode="component_job",
+    )
+    assembly = main.ComponentAssemblySpec(
+        repeated_axis_alignment="free",
+        instances=[
+            main.ComponentInstanceSpec(location=[1, 0, 0], rotation_deg=[1, 2, 3]),
+            main.ComponentInstanceSpec(location=[0, 1, 0], rotation_deg=[4, 5, 6]),
+            main.ComponentInstanceSpec(location=[-1, 0, 0], rotation_deg=[7, 8, 9]),
+        ],
+    )
+
+    result = main._normalize_component_assembly_symmetry(
+        assembly,
+        feature,
+        {"dimensions_xyz": [0.4, 3.0, 0.1]},
+    )
+
+    assert result.model_dump() == assembly.model_dump()

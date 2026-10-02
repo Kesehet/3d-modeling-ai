@@ -1142,6 +1142,11 @@ def test_post_assembly_refinement_reviews_active_model_not_stale_scene_spec(
     )
 
     reviewed = []
+    monkeypatch.setattr(
+        main,
+        "_usable_reference_index",
+        lambda _root: [{"stored_name": "verified-reference.png"}],
+    )
 
     async def evaluate(_job_id, feature, *, baseline_version, candidate_version):
         reviewed.append(candidate_version)
@@ -1230,6 +1235,12 @@ def test_post_assembly_refinement_never_edits_stale_scene_spec_when_active_fails
             "renders": [],
             "qa": "",
         },
+    )
+
+    monkeypatch.setattr(
+        main,
+        "_usable_reference_index",
+        lambda _root: [{"stored_name": "verified-reference.png"}],
     )
 
     async def evaluate(_job_id, feature, *, baseline_version, candidate_version):

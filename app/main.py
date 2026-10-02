@@ -1856,6 +1856,41 @@ def _component_assembly_chain(
     return version, chain
 
 
+def _sequence_assembly_repair_parent_features(
+    plan: FeaturePlan,
+    selected_feature_ids: list[str],
+) -> tuple[list[str], list[str]]:
+    """Repair ancestor/descendant parent features in separate bounded passes.
+
+    If QA selects both a broad accepted parent and one of its accepted dependent
+    interfaces, editing them together removes the dependent feature from protected
+    geometry. Repair the ancestor first while the narrower descendant remains
+    protected. A later whole-object verdict may reopen the descendant if it still
+    needs work.
+    """
+
+    selected = list(dict.fromkeys(str(item) for item in selected_feature_ids))
+    selected_set = set(selected)
+    by_id = {feature.id: feature for feature in plan.features}
+    deferred: list[str] = []
+
+    for feature_id in selected:
+        feature = by_id.get(feature_id)
+        seen: set[str] = set()
+        parent_id = str(feature.parent or "") if feature is not None else ""
+        while parent_id and parent_id not in seen:
+            seen.add(parent_id)
+            if parent_id in selected_set:
+                deferred.append(feature_id)
+                break
+            parent = by_id.get(parent_id)
+            parent_id = str(parent.parent or "") if parent is not None else ""
+
+    deferred_set = set(deferred)
+    active = [feature_id for feature_id in selected if feature_id not in deferred_set]
+    return active, deferred
+
+
 async def _plan_assembled_parent_repair(
     job_id: str,
     *,
@@ -1960,6 +1995,11 @@ async def _plan_assembled_parent_repair(
                     + ", ".join(sorted(unknown))
                 )
             decision.parent_feature_ids = list(dict.fromkeys(decision.parent_feature_ids))
+            active_parent_ids, deferred_parent_ids = _sequence_assembly_repair_parent_features(
+                plan,
+                decision.parent_feature_ids,
+            )
+            decision.parent_feature_ids = active_parent_ids
         except (OllamaProxyError, httpx.HTTPError, ValidationError, ValueError, TypeError) as exc:
             errors.append(f"{candidate_model}: {exc}")
             continue
@@ -1970,6 +2010,7 @@ async def _plan_assembled_parent_repair(
             "source_parent_version": source_parent_version,
             "component_feature_ids": component_feature_ids,
             "decision": decision.model_dump(),
+            "deferred_parent_feature_ids": deferred_parent_ids,
             "model": candidate_model,
             "images": labels,
             "created_at": datetime.now(UTC).isoformat(),
@@ -1981,6 +2022,7 @@ async def _plan_assembled_parent_repair(
             failed_version=current_version,
             source_parent_version=source_parent_version,
             parent_feature_ids=decision.parent_feature_ids,
+            deferred_parent_feature_ids=deferred_parent_ids,
             component_feature_ids=component_feature_ids,
             rationale=decision.rationale,
         )
@@ -2166,6 +2208,23 @@ async def _prepare_assembled_parent_repair(job_id: str, status: dict) -> dict:
         "failed_version": current_version,
         "source_parent_version": source_parent_version,
         "parent_feature_ids": decision.parent_feature_ids,
+        "deferred_parent_feature_ids": [
+            feature_id
+            for feature_id in (
+                _sequence_assembly_repair_parent_features(
+                    plan,
+                    [
+                        *decision.parent_feature_ids,
+                        *[
+                            str(item)
+                            for item in (
+                                (previous_repair or {}).get("deferred_parent_feature_ids") or []
+                            )
+                        ],
+                    ],
+                )[1]
+            )
+        ],
         "component_feature_ids": component_feature_ids,
         "previous_assemblies": previous_assemblies,
         "blocking_defects": list(dict.fromkeys(

@@ -286,6 +286,62 @@ def test_component_assembly_chain_unwinds_consecutive_installs(tmp_path, monkeyp
     ]
 
 
+def test_assembly_repair_sequences_selected_ancestor_and_dependent_interface():
+    plan = FeaturePlan(
+        subject="Generic assembly",
+        features=[
+            FeatureTask(
+                id="body",
+                name="Primary body",
+                build_mode="in_place",
+                status="accepted",
+                accepted_version=3,
+                acceptance_verified=True,
+            ),
+            FeatureTask(
+                id="mount",
+                name="Mounting interface",
+                build_mode="in_place",
+                parent="body",
+                status="accepted",
+                accepted_version=4,
+                acceptance_verified=True,
+            ),
+            FeatureTask(
+                id="detail",
+                name="Independent detail",
+                build_mode="in_place",
+                status="accepted",
+                accepted_version=4,
+                acceptance_verified=True,
+            ),
+        ],
+    )
+
+    active, deferred = main._sequence_assembly_repair_parent_features(
+        plan,
+        ["body", "mount", "detail"],
+    )
+
+    assert active == ["body", "detail"]
+    assert deferred == ["mount"]
+
+
+def test_assembly_repair_keeps_descendant_active_when_ancestor_not_selected():
+    plan = FeaturePlan(
+        subject="Generic assembly",
+        features=[
+            FeatureTask(id="body", name="Body", build_mode="in_place"),
+            FeatureTask(id="mount", name="Mount", build_mode="in_place", parent="body"),
+        ],
+    )
+
+    active, deferred = main._sequence_assembly_repair_parent_features(plan, ["mount"])
+
+    assert active == ["mount"]
+    assert deferred == []
+
+
 def test_coordinated_assembly_repair_reopens_parent_before_frozen_component(
     tmp_path, monkeypatch
 ):

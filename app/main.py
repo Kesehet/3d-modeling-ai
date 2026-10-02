@@ -996,6 +996,14 @@ class ComponentInstanceSpec(BaseModel):
 
 class ComponentAssemblySpec(BaseModel):
     rationale: str = Field(default="", max_length=1600)
+    repeated_axis_alignment: Literal["free", "radial", "tangential"] = Field(
+        default="free",
+        description=(
+            "For repeated radial components, describe how the frozen child's longest local axis "
+            "should align relative to the radius from the parent symmetry center. Use free when "
+            "the part is not a planar radial/tangential repeated component."
+        ),
+    )
     instances: list[ComponentInstanceSpec] = Field(min_length=1, max_length=COMPONENT_MAX_INSTANCES)
 
 
@@ -2381,6 +2389,105 @@ def _component_local_axis_context(child_qa: dict) -> dict:
     }
 
 
+def _normalize_component_assembly_symmetry(
+    assembly: ComponentAssemblySpec,
+    feature_task: FeatureTask,
+    child_axis_context: dict,
+) -> ComponentAssemblySpec:
+    """Make an AI-authored repeated radial layout geometrically exact.
+
+    The AI still chooses scale, radial distance, symmetry center/height and whether
+    the component's long axis is radial or tangential. The runtime only removes
+    transform drift: equal angular spacing, identical instance scale and, when the
+    frozen child is a flat part whose thin axis matches the inferred radial axis,
+    a mathematically correct single-axis rotation.
+    """
+
+    if (
+        str(feature_task.symmetry or "").lower() != "radial"
+        or int(feature_task.count or 1) <= 1
+        or len(assembly.instances) != int(feature_task.count)
+        or assembly.repeated_axis_alignment == "free"
+    ):
+        return assembly
+
+    try:
+        dimensions = [float(v) for v in child_axis_context.get("dimensions_xyz") or []]
+    except (TypeError, ValueError):
+        dimensions = []
+    if len(dimensions) != 3 or any(not math.isfinite(v) or v <= 0 for v in dimensions):
+        return assembly
+
+    instances = [item.model_copy(deep=True) for item in assembly.instances]
+    locations = [[float(v) for v in item.location[:3]] for item in instances]
+    spreads = [
+        max(point[axis] for point in locations) - min(point[axis] for point in locations)
+        for axis in range(3)
+    ]
+    shortest_axis = min(range(3), key=lambda axis: dimensions[axis])
+    minimum_spread = min(spreads)
+    spread_tolerance = max(1e-6, max(spreads) * 1e-6)
+    tied_axes = [
+        axis
+        for axis, spread in enumerate(spreads)
+        if abs(spread - minimum_spread) <= spread_tolerance
+    ]
+    symmetry_axis = (
+        shortest_axis
+        if shortest_axis in tied_axes
+        else min(range(3), key=lambda axis: spreads[axis])
+    )
+    plane_axes = [axis for axis in range(3) if axis != symmetry_axis]
+    center = [
+        sum(point[axis] for point in locations) / len(locations)
+        for axis in range(3)
+    ]
+
+    def planar_angle(point: list[float]) -> float:
+        a, b = plane_axes
+        return math.atan2(point[b] - center[b], point[a] - center[a])
+
+    radii = [
+        math.hypot(point[plane_axes[0]] - center[plane_axes[0]],
+                   point[plane_axes[1]] - center[plane_axes[1]])
+        for point in locations
+    ]
+    radius = sum(radii) / len(radii)
+    if not math.isfinite(radius) or radius <= 1e-6:
+        return assembly
+
+    phase = planar_angle(locations[0])
+    shared_scale = list(instances[0].scale)
+    longest_axis = max(range(3), key=lambda axis: dimensions[axis])
+    can_lock_orientation = shortest_axis == symmetry_axis and longest_axis in plane_axes
+
+    for index, instance in enumerate(instances):
+        theta = phase + (2.0 * math.pi * index / len(instances))
+        location = list(center)
+        location[plane_axes[0]] += radius * math.cos(theta)
+        location[plane_axes[1]] += radius * math.sin(theta)
+        instance.location = location
+        instance.scale = list(shared_scale)
+
+        if not can_lock_orientation:
+            continue
+
+        target = theta
+        if assembly.repeated_axis_alignment == "tangential":
+            target += math.pi / 2.0
+
+        rotation = [0.0, 0.0, 0.0]
+        if symmetry_axis == 2:  # XY plane, rotate about Z.
+            rotation[2] = target if longest_axis == 0 else target - math.pi / 2.0
+        elif symmetry_axis == 1:  # XZ plane, rotate about Y.
+            rotation[1] = -target if longest_axis == 0 else math.pi / 2.0 - target
+        else:  # YZ plane, rotate about X.
+            rotation[0] = target if longest_axis == 1 else target - math.pi / 2.0
+        instance.rotation_deg = [math.degrees(value) for value in rotation]
+
+    return assembly.model_copy(update={"instances": instances})
+
+
 async def _plan_component_assembly(
     parent_job_id: str,
     feature_task: FeatureTask,
@@ -2462,6 +2569,11 @@ async def _plan_component_assembly(
         "Use the failed renders, blocking defects and repair instructions to make a deliberate correction; do not "
         "blindly repeat the old transforms. Location, rotation and instance scale are all available repair controls. "
         "IMPORTANT SCALE CONTRACT: scale=[sx,sy,sz] multiplies the frozen child's LOCAL X,Y,Z axes BEFORE rotation. "
+        "For a repeated radial feature, set repeated_axis_alignment explicitly: radial when the frozen child's LONGEST "
+        "local axis should point away from/toward the symmetry center, tangential when that long axis should run around "
+        "the circumference, or free when neither contract applies. Do not fake radial orientation with X/Y tilts when "
+        "the child's thinnest local axis should remain aligned with the parent's radial symmetry axis; the runtime will "
+        "make the declared repeated alignment mathematically exact. "
         "Use the supplied child local-axis envelope to reason about length/width/thickness. If the visible defect is "
         "axis-specific (too short/long, narrow/wide, thin/thick), prefer ANISOTROPIC scale and change the relevant local "
         "axis or axes instead of uniformly inflating the whole component. Preserve local axes whose proportions are already "
@@ -2488,6 +2600,10 @@ async def _plan_component_assembly(
 
     client = OllamaProxyClient()
     errors: list[str] = []
+    assembly_schema = ComponentAssemblySpec.model_json_schema()
+    assembly_schema["required"] = list(
+        dict.fromkeys([*assembly_schema.get("required", []), "repeated_axis_alignment"])
+    )
     for candidate_model in (VISION_MODELS if images else (REASONING_MODEL, *VISION_MODELS)):
         try:
             result = await client.chat_json(
@@ -2495,7 +2611,7 @@ async def _plan_component_assembly(
                 system=system,
                 prompt=prompt,
                 images=images or None,
-                schema=ComponentAssemblySpec.model_json_schema(),
+                schema=assembly_schema,
                 temperature=0.0,
                 num_predict=4096,
             )
@@ -2508,6 +2624,11 @@ async def _plan_component_assembly(
                 instance.location = [max(-50.0, min(50.0, float(v))) for v in instance.location]
                 instance.rotation_deg = [max(-360.0, min(360.0, float(v))) for v in instance.rotation_deg]
                 instance.scale = [max(0.02, min(20.0, float(v))) for v in instance.scale]
+            assembly = _normalize_component_assembly_symmetry(
+                assembly,
+                feature_task,
+                child_axis_context,
+            )
         except (OllamaProxyError, httpx.HTTPError, ValidationError, ValueError, TypeError) as exc:
             errors.append(f"{candidate_model}: {exc}")
             continue

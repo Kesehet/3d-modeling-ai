@@ -6016,13 +6016,17 @@ def _feature_evaluation_accepts(
         or any(token in feature_text for token in ("silhouette", "body shell", "main body", "primary body"))
     )
     minimum_match = 0.82 if primary_shape else 0.72
+    reference_match_required = evaluation.get("reference_match_required") is not False
 
     return bool(
         evaluation.get("visible") is True
         and evaluation.get("criteria_satisfied") is True
         and evaluation.get("regression_detected") is False
         and confidence >= 0.75
-        and match_score >= minimum_match
+        and (
+            not reference_match_required
+            or match_score >= minimum_match
+        )
     )
 
 
@@ -6243,6 +6247,7 @@ async def _evaluate_feature_candidate(
     job_request = json.loads((root / "request.json").read_text(encoding="utf-8"))
     views = _feature_diagnostic_views(feature_task)
     reference_paths: list[Path] = []
+    reference_records_by_path: dict[Path, dict] = {}
     for record in _usable_reference_index(root):
         stored_name = str(record.get("stored_name") or "")
         if not stored_name:
@@ -6250,10 +6255,19 @@ async def _evaluate_feature_candidate(
         path = root / "references" / Path(stored_name).name
         if path.is_file() and path.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp"}:
             reference_paths.append(path)
+            reference_records_by_path[path] = record
     reference_paths = sorted(
         reference_paths,
         key=lambda path: path.stat().st_mtime,
     )[-3:]
+    reference_records = [reference_records_by_path[path] for path in reference_paths]
+    # Automatically researched references for a generic subject are useful geometry
+    # context, but they are not an exact design contract. User-supplied references
+    # and exact/named-identity references remain strict.
+    reference_match_required = any(
+        not bool(record.get("generic_geometry_reference"))
+        for record in reference_records
+    )
     if not reference_paths:
         return {
             "feature_id": feature_task.id,
@@ -6312,9 +6326,14 @@ async def _evaluate_feature_candidate(
         "Assess only the ACTIVE feature: do not fail it, reduce its local acceptance, or list a problem merely because "
         "separate planned components/features have not been built yet or the whole object is not yet recognizable. "
         "Whole-object completion is checked separately after the required feature backlog is complete. "
-        "reference_match_score is "
-        "an absolute 0..1 score for how closely this feature matches the reference appearance, "
-        "shape, placement, count and proportions. If a criterion demands precision that cannot actually be verified "
+        "The prompt states whether the supplied references are AUTHORITATIVE or GENERIC GEOMETRY CONTEXT. "
+        "When references are GENERIC GEOMETRY CONTEXT, they are examples of the subject category, not an exact design "
+        "contract. Do not fail criteria_satisfied or local feature acceptance merely because the candidate differs from "
+        "those references in attributes governed by the user request or ACTIVE feature criteria. In that mode the "
+        "explicit user request and ACTIVE feature acceptance criteria are authoritative, while reference_match_score is "
+        "diagnostic only. When references are AUTHORITATIVE, reference_match_score is an absolute 0..1 score for how "
+        "closely this feature matches the reference appearance, shape, placement, count and proportions. "
+        "If a criterion demands precision that cannot actually be verified "
         "from these images (for example exact millimetres or a 1% tolerance), do NOT pretend it was measured: set "
         "criteria_satisfied=false and explain the unverifiable criterion. If the candidate merely improved but remains "
         "wrong, passed MUST be false. If unrelated protected geometry regressed, regression_detected must be true. "
@@ -6334,6 +6353,14 @@ async def _evaluate_feature_candidate(
         f"Other planned features (owned by later passes): "
         f"{json.dumps(other_features)}\n"
         f"Images in order: {labels}\n"
+        + (
+            "REFERENCE ROLE: AUTHORITATIVE exact/user reference. Enforce local visual match.\n"
+            if reference_match_required
+            else (
+                "REFERENCE ROLE: GENERIC GEOMETRY CONTEXT from automatic research. "
+                "Use it for category/geometry guidance, but do not override explicit user or ACTIVE feature criteria.\n"
+            )
+        )
         + comparison_context
         + f"Then CANDIDATE v{candidate_version} views {list(views)}.\n"
         + "Check every acceptance criterion explicitly. Passing means DONE, not just improved. "
@@ -6376,6 +6403,7 @@ async def _evaluate_feature_candidate(
             "baseline_version": baseline_version,
             "candidate_version": candidate_version,
             "images": labels,
+            "reference_match_required": reference_match_required,
             "created_at": datetime.now(UTC).isoformat(),
         }
         if baseline_version is not None:

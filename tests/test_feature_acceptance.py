@@ -104,6 +104,38 @@ def test_feature_completion_still_rejects_bad_local_reference_match():
     assert _feature_evaluation_accepts(task, evaluation) is False
 
 
+def test_generic_geometry_reference_does_not_veto_completed_local_feature():
+    task = _body_task()
+    evaluation = {
+        "passed": False,
+        "visible": True,
+        "criteria_satisfied": True,
+        "subject_recognizable": False,
+        "confidence": 0.96,
+        "reference_match_score": 0.10,
+        "reference_match_required": False,
+        "regression_detected": False,
+    }
+
+    assert _feature_evaluation_accepts(task, evaluation) is True
+
+
+def test_generic_reference_never_bypasses_unmet_feature_criteria():
+    task = _body_task()
+    evaluation = {
+        "passed": False,
+        "visible": True,
+        "criteria_satisfied": False,
+        "subject_recognizable": False,
+        "confidence": 0.96,
+        "reference_match_score": 0.95,
+        "reference_match_required": False,
+        "regression_detected": False,
+    }
+
+    assert _feature_evaluation_accepts(task, evaluation) is False
+
+
 def test_completed_local_shape_can_pass_before_other_components_are_built():
     task = _body_task()
     evaluation = {

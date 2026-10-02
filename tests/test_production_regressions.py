@@ -1003,3 +1003,75 @@ def test_recognizable_model_passes_only_when_integrity_is_clean(tmp_path, monkey
     assert quality["recognition_passed"] is True
     assert quality["assembly_integrity_pass"] is True
     assert quality["recognizable"] is True
+
+
+def test_surface_cutout_feature_requires_a_boolean_cutter():
+    current = main.GenericSceneSpec.model_validate({
+        "title": "accepted body",
+        "presentation_base": False,
+        "objects": [{
+            "name": "body",
+            "shape": "cylinder",
+            "location": [0, 0, 0],
+            "dimensions": [4, 4, 1],
+        }],
+    })
+    proposed = current.model_copy(deep=True)
+    feature = FeatureTask(
+        id="openings",
+        name="Repeated openings",
+        strategy="surface_cutout",
+        symmetry="radial",
+        count=3,
+    )
+
+    with pytest.raises(ValueError, match="surface_cutout requires at least one"):
+        main._enforce_procedural_feature_contract(current, proposed, feature)
+
+
+def test_surface_cutout_freezes_parent_geometry_and_promotes_radial_seed():
+    current = main.GenericSceneSpec.model_validate({
+        "title": "accepted body",
+        "presentation_base": False,
+        "objects": [{
+            "name": "body",
+            "shape": "cylinder",
+            "location": [0, 0, 0],
+            "dimensions": [4, 4, 1],
+        }],
+    })
+    proposed = main.GenericSceneSpec.model_validate({
+        "title": "localized cut",
+        "presentation_base": True,
+        "objects": [{
+            "name": "body",
+            "shape": "cylinder",
+            "location": [0, 0, 0],
+            "dimensions": [40, 40, 10],
+        }],
+        "cutters": [{
+            "name": "socket-seed",
+            "target": "body",
+            "shape": "cube",
+            "location": [2, 0, 0],
+            "dimensions": [1, 1, 0.5],
+            "radial_repeat_count": 1,
+            "radial_repeat_axis": "z",
+            "radial_repeat_center": [0, 0, 0],
+        }],
+    })
+    feature = FeatureTask(
+        id="openings",
+        name="Repeated openings",
+        strategy="surface_cutout",
+        symmetry="radial",
+        count=3,
+    )
+
+    result = main._enforce_procedural_feature_contract(current, proposed, feature)
+
+    assert result.objects == current.objects
+    assert result.presentation_base is False
+    assert len(result.cutters) == 1
+    assert result.cutters[0].radial_repeat_count == 3
+    assert result.cutters[0].target == "body"

@@ -8,7 +8,13 @@ from pydantic import ValidationError
 
 from app import main
 from app.artifacts import require_unused_version, reserve_model_version
-from app.feature_tasks import (\n    FeatureEvaluation,\n    FeaturePlan,\n    FeatureTask,\n    load_feature_plan,\n    save_feature_plan,\n)
+from app.feature_tasks import (
+    FeatureEvaluation,
+    FeaturePlan,
+    FeatureTask,
+    load_feature_plan,
+    save_feature_plan,
+)
 from app.ollama import OllamaJSONResult, OllamaProxyClient
 
 

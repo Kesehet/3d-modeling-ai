@@ -289,7 +289,7 @@ def test_component_assembly_chain_unwinds_consecutive_installs(tmp_path, monkeyp
 def test_coordinated_assembly_repair_reopens_parent_before_frozen_component(
     tmp_path, monkeypatch
 ):
-    parent_id, root, _ = _parent_job(tmp_path, monkeypatch)
+    _, root, _ = _parent_job(tmp_path, monkeypatch)
     plan = load_feature_plan(root)
     assert plan is not None
     component = plan.features[-1]

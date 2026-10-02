@@ -1897,7 +1897,7 @@ async def _plan_assembled_parent_repair(
     status: dict,
     source_parent_version: int,
     component_feature_ids: list[str],
-) -> AssemblyRepairDecision:
+) -> tuple[AssemblyRepairDecision, list[str]]:
     """Map final integrity defects to accepted parent features that need local repair."""
 
     root = _require_job(job_id)
@@ -2026,7 +2026,7 @@ async def _plan_assembled_parent_repair(
             component_feature_ids=component_feature_ids,
             rationale=decision.rationale,
         )
-        return decision
+        return decision, deferred_parent_ids
 
     raise HTTPException(
         status_code=502,
@@ -2048,7 +2048,7 @@ def _assembly_repair_forces_feature_edit(status: dict, feature_task: FeatureTask
 
 
 def _advance_assembly_repair_if_ready(root: Path, status: dict) -> dict:
-    """After parent repairs pass strict QA, requeue frozen component installs."""
+    """Advance a coordinated repair wave without spending another global attempt."""
 
     repair = status.get("assembly_repair")
     if not isinstance(repair, dict) or repair.get("phase") != "repair_parent":
@@ -2067,6 +2067,58 @@ def _advance_assembly_repair_if_ready(root: Path, status: dict) -> dict:
     ):
         return status
 
+    deferred_ids = [
+        str(item)
+        for item in repair.get("deferred_parent_feature_ids") or []
+        if str(item) in by_id
+    ]
+    if deferred_ids:
+        next_parent_ids, remaining_deferred_ids = _sequence_assembly_repair_parent_features(
+            plan,
+            deferred_ids,
+        )
+        if next_parent_ids:
+            for feature_id in next_parent_ids:
+                retry_feature(root, feature_id, reset_attempts=True)
+
+            updated_repair = {
+                **repair,
+                "phase": "repair_parent",
+                "parent_feature_ids": next_parent_ids,
+                "deferred_parent_feature_ids": remaining_deferred_ids,
+                "repair_wave": int(repair.get("repair_wave") or 1) + 1,
+                "wave_started_at": datetime.now(UTC).isoformat(),
+            }
+            quality = {
+                "scope": "feature",
+                "active_feature_id": next_parent_ids[0],
+                "active_feature_passed": False,
+                "recognizable": False,
+                "summary": (
+                    "Continuing the same coordinated assembly-repair attempt with the next "
+                    "deferred parent/interface wave before frozen components are reinstalled."
+                ),
+            }
+            updated = _write_status(
+                root,
+                state="ready",
+                stage="assembly_repair_parent_ready",
+                quality_gate=quality,
+                assembly_repair=updated_repair,
+                error="",
+            )
+            append_history(
+                root,
+                "assembly_repair_deferred_parent_wave_started",
+                attempt=repair.get("attempt"),
+                repair_wave=updated_repair["repair_wave"],
+                parent_feature_ids=next_parent_ids,
+                deferred_parent_feature_ids=remaining_deferred_ids,
+                source_parent_version=repair.get("source_parent_version"),
+                failed_version=repair.get("failed_version"),
+            )
+            return updated
+
     component_ids = [str(item) for item in repair.get("component_feature_ids") or []]
     for feature_id in component_ids:
         if feature_id in by_id:
@@ -2075,6 +2127,8 @@ def _advance_assembly_repair_if_ready(root: Path, status: dict) -> dict:
     updated_repair = {
         **repair,
         "phase": "reinstall_components",
+        "parent_feature_ids": [],
+        "deferred_parent_feature_ids": [],
         "reinstall_started_at": datetime.now(UTC).isoformat(),
     }
     quality = {
@@ -2101,7 +2155,6 @@ def _advance_assembly_repair_if_ready(root: Path, status: dict) -> dict:
         failed_version=repair.get("failed_version"),
     )
     return updated
-
 
 async def _prepare_assembled_parent_repair(job_id: str, status: dict) -> dict:
     """Unwind a failed assembly to a preserved parent and schedule targeted repair."""
@@ -2182,7 +2235,7 @@ async def _prepare_assembled_parent_repair(job_id: str, status: dict) -> dict:
         if isinstance(assembly, dict):
             previous_assemblies[feature_id] = assembly
 
-    decision = await _plan_assembled_parent_repair(
+    decision, deferred_parent_feature_ids = await _plan_assembled_parent_repair(
         job_id,
         status=status,
         source_parent_version=source_parent_version,
@@ -2208,6 +2261,8 @@ async def _prepare_assembled_parent_repair(job_id: str, status: dict) -> dict:
         "failed_version": current_version,
         "source_parent_version": source_parent_version,
         "parent_feature_ids": decision.parent_feature_ids,
+        "deferred_parent_feature_ids": deferred_parent_feature_ids,
+        "repair_wave": 1,
         "component_feature_ids": component_feature_ids,
         "previous_assemblies": previous_assemblies,
         "blocking_defects": list(dict.fromkeys(
@@ -2256,6 +2311,7 @@ async def _prepare_assembled_parent_repair(job_id: str, status: dict) -> dict:
         failed_version=current_version,
         source_parent_version=source_parent_version,
         parent_feature_ids=decision.parent_feature_ids,
+        deferred_parent_feature_ids=deferred_parent_feature_ids,
         component_feature_ids=component_feature_ids,
     )
     return {
@@ -2263,6 +2319,7 @@ async def _prepare_assembled_parent_repair(job_id: str, status: dict) -> dict:
         "attempt": attempt,
         "source_parent_version": source_parent_version,
         "parent_feature_ids": decision.parent_feature_ids,
+        "deferred_parent_feature_ids": deferred_parent_feature_ids,
         "component_feature_ids": component_feature_ids,
         "status": updated,
     }

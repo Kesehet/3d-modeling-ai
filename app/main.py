@@ -1119,6 +1119,35 @@ def _apply_feature_radial_pattern(
     return spec.model_copy(update={"cutters": [repeated]})
 
 
+def _enforce_procedural_feature_contract(
+    current_spec: GenericSceneSpec,
+    proposed_spec: GenericSceneSpec,
+    feature_task: FeatureTask | None,
+) -> GenericSceneSpec:
+    """Enforce representation semantics for localized procedural feature edits.
+
+    A surface_cutout feature is, by definition, subtractive work on already
+    accepted parent geometry. The model may choose cutter shape/placement, but
+    it must not silently turn that pass into a wholesale object rebuild.
+    """
+
+    proposed_spec = _apply_feature_radial_pattern(proposed_spec, feature_task)
+    if feature_task is None or feature_task.strategy != "surface_cutout":
+        return proposed_spec
+    if not proposed_spec.cutters:
+        raise ValueError(
+            "Active feature strategy=surface_cutout requires at least one "
+            "SceneSpec boolean cutter."
+        )
+
+    payload = proposed_spec.model_dump()
+    payload["objects"] = [item.model_dump() for item in current_spec.objects]
+    payload["presentation_base"] = current_spec.presentation_base
+    # Revalidate after restoring the accepted objects so cutter targets must
+    # resolve against the geometry that will actually be edited.
+    return GenericSceneSpec.model_validate(payload)
+
+
 def _generic_scene_llm_schema() -> dict:
     """Compact transport schema; full geometry validation stays in GenericSceneSpec."""
     return {
@@ -10737,7 +10766,11 @@ async def refine_generic_scene(job_id: str, request: GenericRefineRequest) -> di
             f"Coordinate contract: {_generic_spatial_guidance('')}\n"
             f"Reference/current image order: {labels}\n"
             "Fix the active feature and protect other geometry. Never create parts owned by component_job entries; "
-            "the assembler installs those separately. Check local dimensions and resulting world extents for every changed part."
+            "the assembler installs those separately. If ACTIVE FEATURE strategy=surface_cutout, this is a LOCAL "
+            "SUBTRACTIVE PASS: preserve the existing objects and their dimensions/names, emit at least one boolean "
+            "cutter targeting the existing parent object, and let radial_repeat_count express repeated symmetry. "
+            "Do not rebuild or rescale the accepted parent geometry in that pass. "
+            "Check local dimensions and resulting world extents for every changed part."
         )
         revised, selected_model, errors = None, None, []
         client = OllamaProxyClient()
@@ -10748,8 +10781,14 @@ async def refine_generic_scene(job_id: str, request: GenericRefineRequest) -> di
                     images=(images or None) if candidate_model in VISION_MODELS else None,
                     schema=_generic_scene_llm_schema(), temperature=0.0, num_predict=8192,
                 )
-                revised = GenericSceneSpec.model_validate(_normalize_scene_spec_payload(result.data, current_spec.title))
-                revised = _apply_feature_radial_pattern(revised, feature_task)
+                revised = GenericSceneSpec.model_validate(
+                    _normalize_scene_spec_payload(result.data, current_spec.title)
+                )
+                revised = _enforce_procedural_feature_contract(
+                    current_spec,
+                    revised,
+                    feature_task,
+                )
                 if job_request.get("component_job") is True:
                     revised.presentation_base = False
             except (OllamaProxyError, httpx.HTTPError, ValidationError, ValueError, TypeError) as exc:

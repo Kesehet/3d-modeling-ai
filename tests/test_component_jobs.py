@@ -289,7 +289,7 @@ def test_component_assembly_chain_unwinds_consecutive_installs(tmp_path, monkeyp
 def test_coordinated_assembly_repair_reopens_parent_before_frozen_component(
     tmp_path, monkeypatch
 ):
-    _, root, _ = _parent_job(tmp_path, monkeypatch)
+    parent_id, root, _ = _parent_job(tmp_path, monkeypatch)
     plan = load_feature_plan(root)
     assert plan is not None
     component = plan.features[-1]
@@ -588,12 +588,12 @@ def test_component_local_axis_context_rejects_missing_or_degenerate_bounds():
 
 
 def test_coordinated_repair_remains_bounded_after_axis_aware_retry_extension():
-    assert main.ASSEMBLY_REPAIR_MAX_ATTEMPTS == 4
+    assert main.ASSEMBLY_REPAIR_MAX_ATTEMPTS == 5
 
 
 
 def test_parent_assembly_repair_includes_failed_assembled_views(tmp_path, monkeypatch):
-    parent_id, root, _ = _parent_job(tmp_path, monkeypatch)
+    _, root, _ = _parent_job(tmp_path, monkeypatch)
     for view in ("front", "front-left", "left", "front-right", "top"):
         (root / "renders" / f"model-v16-{view}.png").write_bytes(b"render")
 

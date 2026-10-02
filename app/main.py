@@ -2208,7 +2208,6 @@ async def _prepare_assembled_parent_repair(job_id: str, status: dict) -> dict:
         "failed_version": current_version,
         "source_parent_version": source_parent_version,
         "parent_feature_ids": decision.parent_feature_ids,
-        "deferred_parent_feature_ids": deferred_parent_ids,
         "component_feature_ids": component_feature_ids,
         "previous_assemblies": previous_assemblies,
         "blocking_defects": list(dict.fromkeys(

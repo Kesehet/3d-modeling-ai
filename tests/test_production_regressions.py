@@ -1075,3 +1075,187 @@ def test_surface_cutout_freezes_parent_geometry_and_promotes_radial_seed():
     assert len(result.cutters) == 1
     assert result.cutters[0].radial_repeat_count == 3
     assert result.cutters[0].target == "body"
+
+
+def test_post_assembly_refinement_reviews_active_model_not_stale_scene_spec(
+    tmp_path, monkeypatch
+):
+    root = job(tmp_path, monkeypatch)
+    (root / "scene" / "model-v4.blend").write_bytes(b"parent")
+    (root / "scene" / "model-v6.blend").write_bytes(b"assembled")
+    (root / "scene-spec-v4.json").write_text(
+        json.dumps({
+            "version": 4,
+            "spec": {
+                "title": "parent",
+                "presentation_base": False,
+                "objects": [{
+                    "name": "body",
+                    "shape": "cylinder",
+                    "location": [0, 0, 0],
+                    "dimensions": [2, 2, 1],
+                }],
+            },
+        }),
+        encoding="utf-8",
+    )
+    for view in (
+        "front", "front-left", "left", "back-left", "back",
+        "back-right", "right", "front-right", "top",
+    ):
+        Image.new("RGB", (32, 32), "white").save(
+            root / "renders" / f"model-v6-{view}.png"
+        )
+
+    plan = FeaturePlan(
+        subject="Generic assembled object",
+        features=[
+            FeatureTask(
+                id="finish",
+                name="Final surface continuity",
+                strategy="surface_detail",
+                status="pending",
+                acceptance_criteria=["No visible gaps at component joints"],
+            )
+        ],
+    )
+    save_feature_plan(root, plan)
+    main._write_status(
+        root,
+        state="ready",
+        stage="component_assembly_accepted",
+        modeling_strategy="procedural",
+        generic_model={
+            "version": 6,
+            "title": "assembled",
+            "blend": "model-v6.blend",
+            "renders": [],
+            "qa": "",
+            "assembled_components": [{"feature_id": "part"}],
+        },
+    )
+
+    reviewed = []
+
+    async def evaluate(_job_id, feature, *, baseline_version, candidate_version):
+        reviewed.append(candidate_version)
+        return {
+            "feature_id": feature.id,
+            "passed": True,
+            "visible": True,
+            "criteria_satisfied": True,
+            "subject_recognizable": True,
+            "confidence": 1.0,
+            "reference_match_score": 1.0,
+            "reference_match_required": False,
+            "regression_detected": False,
+            "summary": "The assembled model already satisfies the finish criterion.",
+            "problems": [],
+        }
+
+    async def final_quality(_job_id, status):
+        return status
+
+    monkeypatch.setattr(main, "_evaluate_feature_candidate", evaluate)
+    monkeypatch.setattr(main, "_ensure_final_model_quality", final_quality)
+
+    result = asyncio.run(
+        main.refine_generic_scene("abc123", main.GenericRefineRequest(iterations=1))
+    )
+
+    assert reviewed == [6]
+    persisted = load_feature_plan(root)
+    assert persisted is not None
+    assert persisted.features[0].status == "accepted"
+    assert persisted.features[0].accepted_version == 6
+    assert result["status"]["generic_model"]["version"] == 6
+
+
+def test_post_assembly_refinement_never_edits_stale_scene_spec_when_active_fails_qa(
+    tmp_path, monkeypatch
+):
+    root = job(tmp_path, monkeypatch)
+    (root / "scene" / "model-v4.blend").write_bytes(b"parent")
+    (root / "scene" / "model-v6.blend").write_bytes(b"assembled")
+    (root / "scene-spec-v4.json").write_text(
+        json.dumps({
+            "version": 4,
+            "spec": {
+                "title": "parent",
+                "presentation_base": False,
+                "objects": [{
+                    "name": "body",
+                    "shape": "cylinder",
+                    "location": [0, 0, 0],
+                    "dimensions": [2, 2, 1],
+                }],
+            },
+        }),
+        encoding="utf-8",
+    )
+    for view in ("front-left", "left", "back-right"):
+        Image.new("RGB", (32, 32), "white").save(
+            root / "renders" / f"model-v6-{view}.png"
+        )
+    save_feature_plan(
+        root,
+        FeaturePlan(
+            subject="Generic assembled object",
+            features=[
+                FeatureTask(
+                    id="finish",
+                    name="Final surface continuity",
+                    strategy="surface_detail",
+                    status="pending",
+                    acceptance_criteria=["No visible gaps at component joints"],
+                )
+            ],
+        ),
+    )
+    main._write_status(
+        root,
+        state="ready",
+        stage="component_assembly_accepted",
+        modeling_strategy="procedural",
+        generic_model={
+            "version": 6,
+            "title": "assembled",
+            "blend": "model-v6.blend",
+            "renders": [],
+            "qa": "",
+        },
+    )
+
+    async def evaluate(_job_id, feature, *, baseline_version, candidate_version):
+        assert candidate_version == 6
+        return {
+            "feature_id": feature.id,
+            "passed": False,
+            "visible": True,
+            "criteria_satisfied": False,
+            "subject_recognizable": True,
+            "confidence": 1.0,
+            "reference_match_score": 0.5,
+            "reference_match_required": False,
+            "regression_detected": False,
+            "summary": "Joint still needs work.",
+            "problems": ["Visible gap"],
+        }
+
+    async def director(*args, **kwargs):
+        raise AssertionError("stale procedural director must not run")
+
+    async def final_quality(_job_id, status):
+        return status
+
+    monkeypatch.setattr(main, "_evaluate_feature_candidate", evaluate)
+    monkeypatch.setattr(main, "_ask_modeling_director", director)
+    monkeypatch.setattr(main, "_ensure_final_model_quality", final_quality)
+
+    result = asyncio.run(
+        main.refine_generic_scene("abc123", main.GenericRefineRequest(iterations=1))
+    )
+
+    assert result["status"]["generic_model"]["version"] == 6
+    assert result["status"]["stage"] == "assembled_model_needs_safe_refinement"
+    assert not (root / "scene" / "model-v7.blend").exists()

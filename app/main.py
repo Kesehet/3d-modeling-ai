@@ -10821,7 +10821,18 @@ async def refine_generic_scene(job_id: str, request: GenericRefineRequest) -> di
     )
     current_payload = json.loads(current_spec_path.read_text(encoding="utf-8"))
     current_spec = GenericSceneSpec.model_validate(current_payload["spec"])
-    current_version = int(current_payload.get("version") or active_version or 1)
+    current_version = int(current_payload.get("version") or 1)
+    # An accepted component installation creates a new active .blend version without
+    # a replacement SceneSpec. Visual feature QA must always inspect that active
+    # assembled artifact; silently falling back to an older procedural spec makes
+    # later features judge/edit a pre-assembly model and can destroy accepted work.
+    active_artifact = _active_model_artifact(root, status_payload)
+    review_version = (
+        int(active_artifact[0])
+        if active_artifact is not None
+        else current_version
+    )
+    active_spec_is_current = review_version == current_version
     job_request = json.loads((root / "request.json").read_text(encoding="utf-8"))
     inventory = _load_subject_inventory(root)
     completed: list[dict] = []
@@ -10834,7 +10845,10 @@ async def refine_generic_scene(job_id: str, request: GenericRefineRequest) -> di
             # Existing assemblies may already contain a finished feature. Review
             # its actual pixels before spending tokens rebuilding good geometry.
             current_evaluation = await _evaluate_feature_candidate(
-                job_id, feature_task, baseline_version=None, candidate_version=current_version,
+                job_id,
+                feature_task,
+                baseline_version=None,
+                candidate_version=review_version,
             )
             current_status = _read_status(root)
             if (
@@ -10842,11 +10856,58 @@ async def refine_generic_scene(job_id: str, request: GenericRefineRequest) -> di
                 and not _assembly_repair_forces_feature_edit(current_status, feature_task)
             ):
                 result = await _review_procedural_candidate(
-                    job_id, {"candidate_model": current_status["generic_model"], "spec": current_spec.model_dump()},
-                    current_status, feature_task, evaluation=current_evaluation,
+                    job_id,
+                    {
+                        "candidate_model": current_status["generic_model"],
+                        "spec": current_spec.model_dump(),
+                    },
+                    current_status,
+                    feature_task,
+                    evaluation=current_evaluation,
                 )
                 completed.append(result)
+                # The active assembled blend is authoritative but cannot be
+                # represented by this older SceneSpec. Stop this refine call
+                # after accepting the feature instead of falling through to a
+                # stale-spec edit on a second iteration.
+                if not active_spec_is_current:
+                    break
                 continue
+
+            if not active_spec_is_current:
+                quality = {
+                    "scope": "feature",
+                    "active_feature_id": feature_task.id,
+                    "active_feature_passed": False,
+                    "representation": "assembled_blend",
+                    "candidate_version": review_version,
+                    "baseline_version": None,
+                    "candidate_improved": False,
+                    "recognizable": current_evaluation.get("subject_recognizable"),
+                    "subject_match_score": current_evaluation.get("reference_match_score"),
+                    "summary": current_evaluation.get("summary"),
+                    "problems": current_evaluation.get("problems") or [],
+                }
+                _write_status(
+                    root,
+                    state="ready",
+                    stage="assembled_model_needs_safe_refinement",
+                    modeling_strategy=status_payload.get("modeling_strategy") or "procedural",
+                    generic_model=current_status.get("generic_model"),
+                    quality_gate=quality,
+                )
+                append_history(
+                    root,
+                    "stale_procedural_spec_edit_blocked",
+                    feature_id=feature_task.id,
+                    active_version=review_version,
+                    available_spec_version=current_version,
+                    summary=current_evaluation.get("summary"),
+                )
+                # Never rebuild an accepted assembled model from a stale parent
+                # SceneSpec. A later assembly-aware repair path may handle the
+                # unresolved feature, but preservation wins over blind editing.
+                break
         decision = await _ask_modeling_director(
             job_id, stage=f"agent_refinement_{offset + 1}", current_strategy="procedural",
             include_renders=True, render_version=current_version,

@@ -76,7 +76,7 @@ AUTO_IMPROVE_HARD_ROUND_CAP = 60
 COMPONENT_MAX_DEPTH = 2
 COMPONENT_AUTO_IMPROVE_ROUNDS = 6
 COMPONENT_MAX_INSTANCES = 16
-ASSEMBLY_REPAIR_MAX_ATTEMPTS = 4
+ASSEMBLY_REPAIR_MAX_ATTEMPTS = 5
 
 
 @app.on_event("startup")
@@ -9735,6 +9735,33 @@ def _constrain_director_action_for_feature(
     return action
 
 
+def _assembly_repair_failed_render_paths(
+    root: Path,
+    status_payload: dict,
+    *,
+    render_version: int | None = None,
+) -> list[Path]:
+    """Return failed assembled views that parent-only repair must keep in sight."""
+
+    repair = (
+        status_payload.get("assembly_repair")
+        if isinstance(status_payload.get("assembly_repair"), dict)
+        else {}
+    )
+    if repair.get("phase") != "repair_parent":
+        return []
+    failed_version = repair.get("failed_version")
+    if not isinstance(failed_version, int) or failed_version == render_version:
+        return []
+
+    paths: list[Path] = []
+    for view in ("front", "front-left", "left", "front-right", "top"):
+        path = root / "renders" / f"model-v{failed_version}-{view}.png"
+        if path.is_file():
+            paths.append(path)
+    return paths
+
+
 async def _ask_modeling_director(
     job_id: str,
     *,
@@ -9791,6 +9818,24 @@ async def _ask_modeling_director(
             status_payload = json.loads(status_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             status_payload = {}
+
+    repair_failed_paths = (
+        _assembly_repair_failed_render_paths(
+            root,
+            status_payload,
+            render_version=render_version,
+        )
+        if include_renders
+        else []
+    )
+    if repair_failed_paths:
+        repair_images = _encode_vision_images(repair_failed_paths)
+        images.extend(repair_images)
+        labels.extend(
+            f"failed-assembly/{path.name}"
+            for path in repair_failed_paths[:len(repair_images)]
+        )
+
     recent_director_history = [
         event
         for event in load_history(root)[-40:]
@@ -9814,7 +9859,12 @@ async def _ask_modeling_director(
         "Give concrete instructions for the next modeling pass. When a feature sub-job is supplied, prioritize its "
         "acceptance criteria while protecting already-accepted features and the best-so-far silhouette. "
         "During an active feature pass, missing geometry owned by later features is expected; do not switch representation "
-        "or rebuild the primary shape simply because those later components are absent. If the active feature uses "
+        "or rebuild the primary shape simply because those later components are absent. During assembly_repair phase=repair_parent, "
+        "frozen component_job geometry is INTENTIONALLY absent from the current parent renders. The images labeled "
+        "failed-assembly/* show the complete failed installation and are the evidence for the contact/proportion defect. "
+        "Do NOT treat the temporarily missing frozen components as a defect, do NOT recreate them in parent geometry, and "
+        "judge/edit only the active QA-selected parent feature/interface using current-parent plus failed-assembly evidence. "
+        "If the active feature uses "
         "strategy=surface_cutout while the current strategy is procedural, stay procedural and use SceneSpec boolean "
         "cutters; loft/cage rebuilding cannot substitute for the required subtractive operation. Preserve geometry "
         "that is already moving toward the reference instead of repeatedly restarting. Spend the available reasoning "

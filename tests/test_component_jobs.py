@@ -588,4 +588,39 @@ def test_component_local_axis_context_rejects_missing_or_degenerate_bounds():
 
 
 def test_coordinated_repair_remains_bounded_after_axis_aware_retry_extension():
-    assert main.ASSEMBLY_REPAIR_MAX_ATTEMPTS == 4
+    assert main.ASSEMBLY_REPAIR_MAX_ATTEMPTS == 5
+
+
+
+def test_parent_assembly_repair_includes_failed_assembled_views(tmp_path, monkeypatch):
+    _, root, _ = _parent_job(tmp_path, monkeypatch)
+    for view in ("front", "front-left", "left", "front-right", "top"):
+        (root / "renders" / f"model-v16-{view}.png").write_bytes(b"render")
+
+    paths = main._assembly_repair_failed_render_paths(
+        root,
+        {
+            "assembly_repair": {
+                "phase": "repair_parent",
+                "failed_version": 16,
+            }
+        },
+        render_version=15,
+    )
+
+    assert [path.name for path in paths] == [
+        "model-v16-front.png",
+        "model-v16-front-left.png",
+        "model-v16-left.png",
+        "model-v16-front-right.png",
+        "model-v16-top.png",
+    ]
+    assert main._assembly_repair_failed_render_paths(
+        root,
+        {"assembly_repair": {"phase": "reinstall_components", "failed_version": 16}},
+        render_version=15,
+    ) == []
+
+
+def test_repair_director_context_fix_gets_one_bounded_retry():
+    assert main.ASSEMBLY_REPAIR_MAX_ATTEMPTS == 5

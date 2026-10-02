@@ -2424,7 +2424,19 @@ def _normalize_component_assembly_symmetry(
         max(point[axis] for point in locations) - min(point[axis] for point in locations)
         for axis in range(3)
     ]
-    symmetry_axis = min(range(3), key=lambda axis: spreads[axis])
+    shortest_axis = min(range(3), key=lambda axis: dimensions[axis])
+    minimum_spread = min(spreads)
+    spread_tolerance = max(1e-6, max(spreads) * 1e-6)
+    tied_axes = [
+        axis
+        for axis, spread in enumerate(spreads)
+        if abs(spread - minimum_spread) <= spread_tolerance
+    ]
+    symmetry_axis = (
+        shortest_axis
+        if shortest_axis in tied_axes
+        else min(range(3), key=lambda axis: spreads[axis])
+    )
     plane_axes = [axis for axis in range(3) if axis != symmetry_axis]
     center = [
         sum(point[axis] for point in locations) / len(locations)
@@ -2447,7 +2459,6 @@ def _normalize_component_assembly_symmetry(
     phase = planar_angle(locations[0])
     shared_scale = list(instances[0].scale)
     longest_axis = max(range(3), key=lambda axis: dimensions[axis])
-    shortest_axis = min(range(3), key=lambda axis: dimensions[axis])
     can_lock_orientation = shortest_axis == symmetry_axis and longest_axis in plane_axes
 
     for index, instance in enumerate(instances):

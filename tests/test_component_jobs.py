@@ -415,9 +415,12 @@ def test_coordinated_assembly_repair_reopens_parent_before_frozen_component(
     )
 
     async def plan_repair(*args, **kwargs):
-        return main.AssemblyRepairDecision(
-            rationale="The parent mounting interface also needs correction.",
-            parent_feature_ids=["mount"],
+        return (
+            main.AssemblyRepairDecision(
+                rationale="The parent mounting interface also needs correction.",
+                parent_feature_ids=["mount"],
+            ),
+            [],
         )
 
     monkeypatch.setattr(main, "_plan_assembled_parent_repair", plan_repair)
@@ -449,6 +452,90 @@ def test_coordinated_assembly_repair_reopens_parent_before_frozen_component(
     assert by_id[component.id].status == "retry"
     assert by_id[component.id].component_job_id == component.component_job_id
 
+
+
+def test_deferred_parent_repair_wave_continues_without_spending_global_attempt(
+    tmp_path, monkeypatch
+):
+    _, root, _ = _parent_job(tmp_path, monkeypatch)
+    plan = load_feature_plan(root)
+    assert plan is not None
+    component = plan.features[-1]
+    body = FeatureTask(
+        id="body",
+        name="Primary body",
+        build_mode="in_place",
+        status="accepted",
+        accepted_version=6,
+        acceptance_verified=True,
+        acceptance_score=0.95,
+    )
+    mount = FeatureTask(
+        id="mount",
+        name="Dependent mounting interface",
+        build_mode="in_place",
+        parent="body",
+        status="accepted",
+        accepted_version=6,
+        acceptance_verified=True,
+        acceptance_score=0.95,
+    )
+    plan.features.insert(0, body)
+    plan.features.insert(1, mount)
+    component.status = "accepted"
+    component.accepted_version = 7
+    component.acceptance_verified = True
+    component.acceptance_score = 0.95
+    component.component_job_id = "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee"
+    save_feature_plan(root, plan)
+
+    child_root = main.JOBS_ROOT / component.component_job_id
+    child_root.mkdir(parents=True)
+    for category in main.ARTIFACT_CATEGORIES:
+        (child_root / category).mkdir(exist_ok=True)
+
+    status = main._write_status(
+        root,
+        state="ready",
+        assembly_repair={
+            "attempt": main.ASSEMBLY_REPAIR_MAX_ATTEMPTS,
+            "phase": "repair_parent",
+            "repair_wave": 1,
+            "failed_version": 7,
+            "source_parent_version": 4,
+            "parent_feature_ids": ["body"],
+            "deferred_parent_feature_ids": ["mount"],
+            "component_feature_ids": [component.id],
+        },
+    )
+
+    advanced = main._advance_assembly_repair_if_ready(root, status)
+
+    assert advanced["assembly_repair"]["attempt"] == main.ASSEMBLY_REPAIR_MAX_ATTEMPTS
+    assert advanced["assembly_repair"]["phase"] == "repair_parent"
+    assert advanced["assembly_repair"]["repair_wave"] == 2
+    assert advanced["assembly_repair"]["parent_feature_ids"] == ["mount"]
+    assert advanced["assembly_repair"]["deferred_parent_feature_ids"] == []
+
+    reloaded = load_feature_plan(root)
+    assert reloaded is not None
+    by_id = {feature.id: feature for feature in reloaded.features}
+    assert by_id["mount"].status == "retry"
+    assert by_id[component.id].status == "accepted"
+
+    by_id["mount"].status = "accepted"
+    by_id["mount"].accepted_version = 8
+    by_id["mount"].acceptance_verified = True
+    save_feature_plan(root, reloaded)
+
+    finished = main._advance_assembly_repair_if_ready(root, main._read_status(root))
+
+    assert finished["assembly_repair"]["attempt"] == main.ASSEMBLY_REPAIR_MAX_ATTEMPTS
+    assert finished["assembly_repair"]["phase"] == "reinstall_components"
+    final_plan = load_feature_plan(root)
+    assert final_plan is not None
+    final_by_id = {feature.id: feature for feature in final_plan.features}
+    assert final_by_id[component.id].status == "retry"
 
 def test_coordinated_assembly_repair_can_reinstall_without_parent_rebuild(
     tmp_path, monkeypatch
@@ -504,9 +591,12 @@ def test_coordinated_assembly_repair_can_reinstall_without_parent_rebuild(
     )
 
     async def plan_repair(*args, **kwargs):
-        return main.AssemblyRepairDecision(
-            rationale="Parent geometry is sound; only reinstall the frozen component.",
-            parent_feature_ids=[],
+        return (
+            main.AssemblyRepairDecision(
+                rationale="Parent geometry is sound; only reinstall the frozen component.",
+                parent_feature_ids=[],
+            ),
+            [],
         )
 
     monkeypatch.setattr(main, "_plan_assembled_parent_repair", plan_repair)
@@ -601,9 +691,12 @@ def test_unrecognizable_assembled_model_can_retry_frozen_component_transforms(
     )
 
     async def plan_repair(*args, **kwargs):
-        return main.AssemblyRepairDecision(
-            rationale="Parent is acceptable; revise only frozen-component installation.",
-            parent_feature_ids=[],
+        return (
+            main.AssemblyRepairDecision(
+                rationale="Parent is acceptable; revise only frozen-component installation.",
+                parent_feature_ids=[],
+            ),
+            [],
         )
 
     monkeypatch.setattr(main, "_plan_assembled_parent_repair", plan_repair)

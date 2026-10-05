@@ -2202,10 +2202,7 @@ async def _prepare_assembled_parent_repair(job_id: str, status: dict) -> dict:
     repairable_quality = bool(
         isinstance(quality, dict)
         and (
-            (
-                quality.get("recognition_passed") is True
-                and quality.get("assembly_integrity_pass") is False
-            )
+            quality.get("assembly_integrity_pass") is False
             or (
                 quality.get("scope") == "whole_object"
                 and quality.get("recognizable") is False
@@ -10884,18 +10881,32 @@ async def refine_generic_scene(job_id: str, request: GenericRefineRequest) -> di
                 retry_feature(root, feature_task.id, reset_attempts=False)
                 current_status = _read_status(root)
                 try:
-                    whole_quality = await _generic_recognizability_check(
+                    integrity = await _final_assembly_integrity_check(
                         job_id,
-                        stage="post_assembly_feature_quality",
+                        stage="post_assembly_feature_integrity",
                         render_version=review_version,
                     )
+                    whole_quality = {
+                        "scope": "whole_object",
+                        "evaluated_version": review_version,
+                        "recognizable": bool(current_evaluation.get("subject_recognizable")),
+                        "recognition_passed": bool(current_evaluation.get("subject_recognizable")),
+                        "assembly_integrity_pass": integrity.get("pass_integrity"),
+                        "blocking_geometry_defects": list(
+                            integrity.get("blocking_defects") or []
+                        ),
+                        "instructions": list(integrity.get("repair_instructions") or []),
+                        "summary": integrity.get("summary") or current_evaluation.get("summary"),
+                        "assembly_integrity": integrity,
+                    }
                 except Exception as exc:  # noqa: BLE001 - preservation still wins if QA is unavailable
                     detail = str(exc.detail) if isinstance(exc, HTTPException) else str(exc)
                     whole_quality = {
                         "scope": "whole_object",
                         "evaluated_version": review_version,
                         "recognizable": False,
-                        "summary": "Post-assembly quality evaluation unavailable: " + detail,
+                        "assembly_integrity_pass": None,
+                        "summary": "Post-assembly integrity evaluation unavailable: " + detail,
                     }
 
                 repair_input = {

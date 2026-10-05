@@ -10881,15 +10881,7 @@ async def refine_generic_scene(job_id: str, request: GenericRefineRequest) -> di
                 # object integrity gate whether the failure is actually an assembly
                 # contact/fit problem. If so, hand it to the existing coordinated
                 # repair engine rather than stopping at a preservation dead-end.
-                finish_feature(
-                    root,
-                    feature_task.id,
-                    accepted=False,
-                    version=None,
-                    summary=str(current_evaluation.get("summary") or ""),
-                    error="Active assembled model needs safe assembly-aware refinement.",
-                    max_attempts=FEATURE_MAX_ATTEMPTS,
-                )
+                retry_feature(root, feature_task.id, reset_attempts=False)
                 current_status = _read_status(root)
                 try:
                     whole_quality = await _generic_recognizability_check(

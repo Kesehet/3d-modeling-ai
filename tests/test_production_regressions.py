@@ -1259,18 +1259,21 @@ def test_post_assembly_feature_failure_routes_into_coordinated_repair(
             "problems": ["Visible component joint gap"],
         }
 
-    async def whole_quality(_job_id, *, stage, render_version):
-        assert stage == "post_assembly_feature_quality"
+    async def integrity(_job_id, *, stage, render_version):
+        assert stage == "post_assembly_feature_integrity"
         assert render_version == 6
         return {
-            "scope": "whole_object",
-            "evaluated_version": 6,
-            "recognizable": False,
-            "recognition_passed": True,
-            "assembly_integrity_pass": False,
-            "blocking_geometry_defects": ["Visible component joint gap"],
-            "instructions": ["Repair the installed contact without rebuilding the frozen component."],
-            "summary": "The subject is recognizable but the installed contact is visibly broken.",
+            "pass_integrity": False,
+            "geometry_coherent": True,
+            "attachment_contacts_sound": False,
+            "unintended_open_seams": True,
+            "floating_or_detached_parts": False,
+            "implausible_intersections": False,
+            "blocking_defects": ["Visible component joint gap"],
+            "repair_instructions": [
+                "Repair the installed contact without rebuilding the frozen component."
+            ],
+            "summary": "The installed contact is visibly broken.",
         }
 
     prepared_status = {
@@ -1296,7 +1299,7 @@ def test_post_assembly_feature_failure_routes_into_coordinated_repair(
         return status
 
     monkeypatch.setattr(main, "_evaluate_feature_candidate", evaluate)
-    monkeypatch.setattr(main, "_generic_recognizability_check", whole_quality)
+    monkeypatch.setattr(main, "_final_assembly_integrity_check", integrity)
     monkeypatch.setattr(main, "_prepare_assembled_parent_repair", prepare)
     monkeypatch.setattr(main, "_ensure_final_model_quality", final_quality)
 
@@ -1388,14 +1391,16 @@ def test_post_assembly_refinement_never_edits_stale_scene_spec_when_active_fails
             "problems": ["Visible gap"],
         }
 
-    async def whole_quality(*args, **kwargs):
+    async def integrity(*args, **kwargs):
         return {
-            "scope": "whole_object",
-            "evaluated_version": 6,
-            "recognizable": True,
-            "recognition_passed": True,
-            "assembly_integrity_pass": True,
-            "blocking_geometry_defects": [],
+            "pass_integrity": True,
+            "geometry_coherent": True,
+            "attachment_contacts_sound": True,
+            "unintended_open_seams": False,
+            "floating_or_detached_parts": False,
+            "implausible_intersections": False,
+            "blocking_defects": [],
+            "repair_instructions": [],
             "summary": "Assembly contact itself is sound.",
         }
 
@@ -1406,7 +1411,7 @@ def test_post_assembly_refinement_never_edits_stale_scene_spec_when_active_fails
         return status
 
     monkeypatch.setattr(main, "_evaluate_feature_candidate", evaluate)
-    monkeypatch.setattr(main, "_generic_recognizability_check", whole_quality)
+    monkeypatch.setattr(main, "_final_assembly_integrity_check", integrity)
     monkeypatch.setattr(main, "_prepare_assembled_parent_repair", no_repair)
     monkeypatch.setattr(main, "_ensure_final_model_quality", final_quality)
 

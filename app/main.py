@@ -10875,6 +10875,59 @@ async def refine_generic_scene(job_id: str, request: GenericRefineRequest) -> di
                 continue
 
             if not active_spec_is_current:
+                # The active assembled blend is authoritative, so an older parent
+                # SceneSpec cannot safely express this edit. Release the failed
+                # post-assembly feature from the running slot, then ask the whole-
+                # object integrity gate whether the failure is actually an assembly
+                # contact/fit problem. If so, hand it to the existing coordinated
+                # repair engine rather than stopping at a preservation dead-end.
+                finish_feature(
+                    root,
+                    feature_task.id,
+                    accepted=False,
+                    version=None,
+                    summary=str(current_evaluation.get("summary") or ""),
+                    error="Active assembled model needs safe assembly-aware refinement.",
+                    max_attempts=FEATURE_MAX_ATTEMPTS,
+                )
+                current_status = _read_status(root)
+                try:
+                    whole_quality = await _generic_recognizability_check(
+                        job_id,
+                        stage="post_assembly_feature_quality",
+                        render_version=review_version,
+                    )
+                except Exception as exc:  # noqa: BLE001 - preservation still wins if QA is unavailable
+                    detail = str(exc.detail) if isinstance(exc, HTTPException) else str(exc)
+                    whole_quality = {
+                        "scope": "whole_object",
+                        "evaluated_version": review_version,
+                        "recognizable": False,
+                        "summary": "Post-assembly quality evaluation unavailable: " + detail,
+                    }
+
+                repair_input = {
+                    **current_status,
+                    "quality_gate": whole_quality,
+                }
+                repair = await _prepare_assembled_parent_repair(job_id, repair_input)
+                if repair.get("prepared") is True:
+                    append_history(
+                        root,
+                        "post_assembly_feature_routed_to_repair",
+                        feature_id=feature_task.id,
+                        active_version=review_version,
+                        available_spec_version=current_version,
+                        repair_attempt=repair.get("attempt"),
+                        summary=current_evaluation.get("summary"),
+                    )
+                    return {
+                        "job_id": job_id,
+                        "iterations": completed,
+                        "assembly_repair": repair,
+                        "status": repair.get("status") or _read_status(root),
+                    }
+
                 quality = {
                     "scope": "feature",
                     "active_feature_id": feature_task.id,
@@ -10887,6 +10940,7 @@ async def refine_generic_scene(job_id: str, request: GenericRefineRequest) -> di
                     "subject_match_score": current_evaluation.get("reference_match_score"),
                     "summary": current_evaluation.get("summary"),
                     "problems": current_evaluation.get("problems") or [],
+                    "safe_refinement_reason": repair.get("reason"),
                 }
                 _write_status(
                     root,
@@ -10903,10 +10957,8 @@ async def refine_generic_scene(job_id: str, request: GenericRefineRequest) -> di
                     active_version=review_version,
                     available_spec_version=current_version,
                     summary=current_evaluation.get("summary"),
+                    safe_refinement_reason=repair.get("reason"),
                 )
-                # Never rebuild an accepted assembled model from a stale parent
-                # SceneSpec. A later assembly-aware repair path may handle the
-                # unresolved feature, but preservation wins over blind editing.
                 break
         decision = await _ask_modeling_director(
             job_id, stage=f"agent_refinement_{offset + 1}", current_strategy="procedural",

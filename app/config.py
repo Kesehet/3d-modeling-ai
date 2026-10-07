@@ -35,6 +35,7 @@ def secret_env(name: str) -> str:
 
 JOBS_ROOT = Path(env("JOBS_ROOT", "/var/lib/3d-modeling-ai/jobs")).resolve()
 WORKER_URL = env("WORKER_URL", "http://worker:8090").rstrip("/")
+SOURCE_REVISION = env("THREED_SOURCE_REVISION", "unknown")
 API_TOKEN = secret_env("THREED_API_TOKEN")
 
 # This is intentionally fixed to our existing MediaPitch Ollama proxy.

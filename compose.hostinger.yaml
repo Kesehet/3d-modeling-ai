@@ -3,6 +3,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        SOURCE_REVISION: ${SOURCE_REVISION:-unknown}
     image: 3d-modeling-ai:local
     restart: unless-stopped
     init: true
@@ -59,6 +61,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        SOURCE_REVISION: ${SOURCE_REVISION:-unknown}
     image: 3d-modeling-ai:local
     restart: unless-stopped
     init: true

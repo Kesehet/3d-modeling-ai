@@ -29,6 +29,7 @@ from .config import (
     JOBS_ROOT,
     OLLAMA_PROXY_BASE_URL,
     REASONING_MODEL,
+    SOURCE_REVISION,
     VISION_MODEL,
     VISION_MODELS,
     WORKER_URL,
@@ -4382,6 +4383,7 @@ async def health() -> dict:
     return {
         "ok": bool(worker.get("ok")),
         "service": "3d-modeling-ai",
+        "source_revision": SOURCE_REVISION,
         "worker": worker,
         "ollama_proxy": OLLAMA_PROXY_BASE_URL,
     }

@@ -30,6 +30,8 @@ COPY vendor/blender-mcp-server /opt/blender-mcp
 RUN /opt/venv/bin/pip install /opt/blender-mcp
 
 WORKDIR /app
+ARG SOURCE_REVISION=unknown
+ENV THREED_SOURCE_REVISION=$SOURCE_REVISION
 COPY pyproject.toml ./
 COPY app ./app
 RUN /opt/venv/bin/pip install .

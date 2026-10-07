@@ -167,6 +167,17 @@ assert abs(actual[2] - 2.0) < 0.002, actual
     }})
     run(root, "procedural_boolean_cutout", generic_scene_script() + r"""
 body = objects[0]
+# A subtractive rim must split shading normals; smooth shading may not warp
+# the flat outer surface toward the cavity wall. This tests evaluated normals,
+# not merely the presence of a modifier or a particular implementation.
+assert any(edge.use_edge_sharp for edge in body.data.edges)
+body.data.update()
+top_faces = [face for face in body.data.polygons if face.normal.z > 0.999]
+assert top_faces
+for face in top_faces:
+    for loop_index in face.loop_indices:
+        normal = body.data.corner_normals[loop_index].vector
+        assert normal.z > 0.999, (face.index, loop_index, tuple(normal))
 center_hit, center_location, center_normal, center_index = body.ray_cast(
     Vector((0, 0, 2)), Vector((0, 0, -1))
 )

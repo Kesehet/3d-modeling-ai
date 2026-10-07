@@ -1,5 +1,21 @@
 # Vision: Iterative Visual 3D Agent
 
+## Recovery and Boolean shading — October 7, 2026
+
+- PR #124 merged as `aa6cc2474a67dbd381decbdb1d0f55dc9dca17aa`; all CI and
+  deployment checks passed, and production health confirmed the revision.
+- Recovery of fresh job `b04739bb-5c08-45c2-9e16-3d812b278bae` from preserved v6
+  passed the interface at v10 and created motor child `8f8943bb-df48-4b1c-9e75-2d2016ec9c88`.
+  Child features passed but whole-object integrity rejected socket seams/intersections.
+  Repeated procedural candidates did not improve; the parent safely stopped before
+  installation with housing failed and blades blocked. This remains NOT a finished fan.
+- Render inspection shows strong socket shading streaks. The generic builder smooths
+  all polygons without splitting normals at Boolean rims. A generic correction marks
+  sharp joins after subtraction while retaining smoothing on curved bands. Geometry,
+  QA thresholds and AI-selected dimensions are unchanged. Real Blender regression checks
+  the resulting corner normals on a flat surface surrounding a cavity, plus watertight
+  geometry and exports. Production impact still requires deployment and a new live test.
+
 ## Fresh production test and next generic fix — October 7, 2026
 
 - PR #123 merged as `bc644f5479cdd413fe94dd2814f7f0fc8f13eb86`. CI included real

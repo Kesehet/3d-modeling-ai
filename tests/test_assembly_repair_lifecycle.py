@@ -105,17 +105,15 @@ def test_post_assembly_repair_reinstalls_then_reviews_original_feature(tmp_path,
         assert plan.active_feature_id is None
         assert not main._auto_improve_goal_reached(root, repair["status"])
 
-        installed = await main.refine_generic_scene("abc123", main.GenericRefineRequest(iterations=1))
-        assert installed["status"]["generic_model"]["version"] == 7
-        plan = load_feature_plan(root)
-        assert [feature.status for feature in plan.features] == ["accepted", "ready"]
-        assert not main._auto_improve_goal_reached(root, installed["status"])
-
-        finished = await main.refine_generic_scene("abc123", main.GenericRefineRequest(iterations=1))
-        assert finished["status"]["generic_model"]["version"] == 7
+        # The production autonomous loop must drive reinstallation and the original
+        # finish retry itself, without a manual retry between these stages.
+        await main._run_auto_improve("abc123", 6)
+        finished = main._read_status(root)
+        assert finished["generic_model"]["version"] == 7
+        assert finished["auto_improve"]["state"] == "completed"
         plan = load_feature_plan(root)
         assert all(feature.status == "accepted" and feature.accepted_version == 7 for feature in plan.features)
-        assert main._auto_improve_goal_reached(root, finished["status"])
+        assert main._auto_improve_goal_reached(root, finished)
 
     asyncio.run(lifecycle())
     assert reviewed == [("finish", 6), ("part", 7), ("finish", 7)]

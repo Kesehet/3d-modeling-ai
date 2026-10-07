@@ -1,5 +1,26 @@
 # Vision: Iterative Visual 3D Agent
 
+## Fresh production test and next generic fix — October 7, 2026
+
+- PR #123 merged as `bc644f5479cdd413fe94dd2814f7f0fc8f13eb86`. CI included real
+  Blender geometry/exports and passed. Deploy run `37656916573` passed the live
+  API -> worker -> MCP -> Blender smoke test. `/health` confirmed that exact revision.
+- Fresh autonomous fan job `b04739bb-5c08-45c2-9e16-3d812b278bae` started through
+  normal research/generation with 30 auto rounds; no supplied design or geometry.
+  One reference passed verification. The primary feature passed at v6 after the
+  director switched to adaptive loft. This is NOT a finished fan.
+- It stopped at round 8: mounting-interface task failed three strict QA attempts;
+  the two component tasks remained blocked. Failed v7-v9 were rejected and v6 retained.
+- Verified handoff defect: adaptive_representation_review diagnosed a distinct
+  attachment/interface, but refine_generic_scene replaced its decision with generic
+  queued-feature text. adaptive_mesh_revision_planned therefore lacked the diagnosis,
+  and the editor repeatedly tapered the accepted body instead of adding the interface.
+- Next generic fix preserves refine_mesh director decisions through the editor handoff.
+  A regression verifies that exact diagnosis reaches the editor. Preserve QA thresholds.
+- After deploying this fix, retry the failed feature from preserved v6 and resume auto.
+  A recovery pass is diagnostic progress; a later fresh no-intervention success remains
+  the release gate. Do not count command completion or a model export as full success.
+
 ## Engineering handoff — October 7, 2026
 
 - Reviewed main `9879f60` (#122), with #120 radial normalization/tests and #121

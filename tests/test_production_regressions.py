@@ -27,6 +27,34 @@ def job(tmp_path, monkeypatch):
     return root
 
 
+def test_adaptive_feature_retry_preserves_director_diagnosis(tmp_path, monkeypatch):
+    root = job(tmp_path, monkeypatch)
+    save_feature_plan(root, FeaturePlan(subject="Generic object", features=[
+        FeatureTask(id="interface", name="Attachment interface", strategy="surface_detail",
+                    status="retry", attempts=1, acceptance_criteria=["A distinct attachment interface"]),
+    ]))
+    main._write_status(root, state="ready", stage="adaptive_mesh_needs_refinement",
+                       modeling_strategy="adaptive_loft", generic_model={"version": 4})
+    monkeypatch.setattr(main, "_usable_reference_index", lambda _root: [{"stored_name": "reference.png"}])
+    diagnosis = {"action": "refine_mesh", "summary": "Add a separate attachment; preserve the accepted body.",
+                 "instructions": ["Use an attachment at the diagnosed contact rather than tapering the body."],
+                 "major_problems": ["No attachment interface is visible"], "subject_match_score": 0.4}
+
+    async def director(*args, **kwargs):
+        assert kwargs["stage"] == "adaptive_representation_review"
+        return diagnosis
+
+    async def refine(_job_id, *, decision, feature_task):
+        assert decision is diagnosis
+        assert feature_task.id == "interface"
+        return {"diagnosis_preserved": True}
+
+    monkeypatch.setattr(main, "_ask_modeling_director", director)
+    monkeypatch.setattr(main, "_refine_adaptive_mesh", refine)
+    result = asyncio.run(main.refine_generic_scene("abc123", main.GenericRefineRequest(iterations=1)))
+    assert result["diagnosis_preserved"] is True
+
+
 def test_initial_base_mesh_blockout_defers_cutters_and_attachments():
     spec = main.HardSurfaceCageSpec(
         title="Primary blockout",

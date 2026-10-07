@@ -10747,6 +10747,7 @@ async def refine_generic_scene(job_id: str, request: GenericRefineRequest) -> di
             )
             quality_gate = status_payload.get("quality_gate") or {}
             severe_failure, _ = _catastrophic_visual_failure(quality_gate)
+            feature_director_decision = None
             if severe_failure or feature_task.attempts >= 2:
                 decision = await _ask_modeling_director(
                     job_id, stage="adaptive_representation_review", current_strategy="adaptive_loft",
@@ -10756,6 +10757,8 @@ async def refine_generic_scene(job_id: str, request: GenericRefineRequest) -> di
                     return await _generate_procedural_candidate(job_id, feature_task=feature_task)
                 if decision["action"] in {"build_mesh", "rebuild_mesh"}:
                     return await _generate_directed_mesh(job_id, decision, feature_task=feature_task)
+                if decision["action"] == "refine_mesh":
+                    feature_director_decision = decision
             decision = {
                 "action": "refine_mesh",
                 "subject_match_score": (
@@ -10771,6 +10774,10 @@ async def refine_generic_scene(job_id: str, request: GenericRefineRequest) -> di
                 ],
                 "major_problems": [],
             }
+            if feature_director_decision is not None:
+                # The director saw the failed renders and chose a concrete edit.
+                # Do not erase that diagnosis before handing it to the loft editor.
+                decision = feature_director_decision
         else:
             decision = await _ask_modeling_director(
                 job_id,

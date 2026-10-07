@@ -1,5 +1,27 @@
 # Vision: Iterative Visual 3D Agent
 
+## Engineering handoff — October 7, 2026
+
+- Reviewed main `9879f60` (#122), with #120 radial normalization/tests and #121
+  active assembled-artifact QA. No complete fresh autonomous fan success is verified.
+- Main CI/deploy failed before steps ran because hosted runners were not acquired.
+  CI run `37364684464` was rerun; Python and compose jobs passed, Blender job pending
+  when this handoff was written. Do not assume deployment from these results.
+- Local baseline: 244 tests and Ruff passed. New generic lifecycle regression found
+  that retry tasks bypassed unmet dependencies and in-place finish work could run
+  before a reopened frozen component was reinstalled. Retry tasks now wait as pending
+  until dependency acceptance. The regression exercises real repair preparation,
+  scheduling, component promotion, and original-feature re-evaluation; external
+  Blender/LLM responses are simulated. With the fix, 245 local tests passed.
+- Production `/health` was healthy. Existing fan
+  `dd8b0c31-c6df-4e22-8cb1-76741a1d1beb` remained at `feature_retry_ready_v24`,
+  four accepted features and one unresolved finish. This is partial progress.
+- Deployment now bakes SOURCE_REVISION into the image and reports it via `/health`
+  so a fresh production test can be tied to the actual deployed code.
+- Next: pass CI/real Blender checks, deploy and verify revision, then start a NEW
+  autonomous fan job with no supplied design/manual geometry. Retain references,
+  version-bound renders, feature QA and final whole-object/integrity verdicts.
+
 ## Engineering handoff — September 30, 2026
 
 **No usable Prius has been verified. Production model quality is still blocked.** The owner is asking

@@ -452,7 +452,10 @@ def refresh_feature_states(plan: FeaturePlan) -> FeaturePlan:
                 feature.status = "ready"
                 if feature.last_error.startswith("Blocked because"):
                     feature.last_error = ""
-        elif feature.status in {"ready", "blocked"}:
+        elif feature.status in {"ready", "blocked", "retry"}:
+            # A retry retains its attempt budget, but does not bypass dependencies.
+            # Assembly repair can reopen an installed component after its dependent
+            # finish task was requeued. That finish must wait for reinstallation.
             feature.status = "pending"
 
     return plan

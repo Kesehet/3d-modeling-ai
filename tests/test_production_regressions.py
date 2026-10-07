@@ -1,5 +1,6 @@
 import asyncio
 import json
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -25,6 +26,34 @@ def job(tmp_path, monkeypatch):
         (root / name).mkdir(parents=True)
     (root / "request.json").write_text(json.dumps({"prompt": "A simple object"}))
     return root
+
+
+def test_adaptive_feature_retry_preserves_director_diagnosis(tmp_path, monkeypatch):
+    root = job(tmp_path, monkeypatch)
+    save_feature_plan(root, FeaturePlan(subject="Generic object", features=[
+        FeatureTask(id="interface", name="Attachment interface", strategy="surface_detail",
+                    status="retry", attempts=1, acceptance_criteria=["A distinct attachment interface"]),
+    ]))
+    main._write_status(root, state="ready", stage="adaptive_mesh_needs_refinement",
+                       modeling_strategy="adaptive_loft", generic_model={"version": 4})
+    monkeypatch.setattr(main, "_usable_reference_index", lambda _root: [{"stored_name": "reference.png"}])
+    diagnosis = {"action": "refine_mesh", "summary": "Add a separate attachment; preserve the accepted body.",
+                 "instructions": ["Use an attachment at the diagnosed contact rather than tapering the body."],
+                 "major_problems": ["No attachment interface is visible"], "subject_match_score": 0.4}
+
+    async def director(*args, **kwargs):
+        assert kwargs["stage"] == "adaptive_representation_review"
+        return diagnosis
+
+    async def refine(_job_id, *, decision, feature_task):
+        assert decision is diagnosis
+        assert feature_task.id == "interface"
+        return {"diagnosis_preserved": True}
+
+    monkeypatch.setattr(main, "_ask_modeling_director", director)
+    monkeypatch.setattr(main, "_refine_adaptive_mesh", refine)
+    result = asyncio.run(main.refine_generic_scene("abc123", main.GenericRefineRequest(iterations=1)))
+    assert result["diagnosis_preserved"] is True
 
 
 def test_initial_base_mesh_blockout_defers_cutters_and_attachments():
@@ -70,6 +99,50 @@ def test_initial_base_mesh_blockout_defers_cutters_and_attachments():
     assert cleaned.attachments == []
     assert len(spec.cutters) == 1
     assert len(spec.attachments) == 1
+
+
+@pytest.mark.parametrize("regression", [False, True])
+def test_adaptive_retry_retains_only_nonregressing_partial_progress(tmp_path, monkeypatch, regression):
+    root = job(tmp_path, monkeypatch)
+    (root / "scene/model-v4.blend").write_bytes(b"preserved baseline")
+    save_feature_plan(root, FeaturePlan(subject="Generic object", features=[
+        FeatureTask(id="interface", name="Attachment interface", strategy="surface_detail",
+                    acceptance_criteria=["A distinct attachment interface"]),
+    ]))
+    main._write_status(root, state="ready", modeling_strategy="adaptive_loft",
+                       generic_model={"version": 4}, quality_gate={"recognizable": False})
+    current = SimpleNamespace(model_dump=lambda: {"revision": 1})
+    revised = SimpleNamespace(model_dump=lambda: {"revision": 2})
+    monkeypatch.setattr(main, "_active_adaptive_loft_spec", lambda *_: (4, current))
+
+    async def revise(*args, **kwargs):
+        return revised
+
+    async def build(*args, version, **kwargs):
+        assert version == 5
+        return {"status": {"generic_model": {"version": version}}}
+
+    async def evaluate(*args, **kwargs):
+        return {"passed": False, "visible": True, "criteria_satisfied": False,
+                "confidence": 0.99, "reference_match_score": 0.6,
+                "regression_detected": regression, "summary": "Closer but unfinished."}
+
+    async def compare(*args, **kwargs):
+        return {"candidate_is_better": True, "summary": "Closer silhouette."}
+
+    monkeypatch.setattr(main, "_revise_adaptive_loft_spec", revise)
+    monkeypatch.setattr(main, "_execute_adaptive_loft", build)
+    monkeypatch.setattr(main, "_evaluate_feature_candidate", evaluate)
+    monkeypatch.setattr(main, "_compare_generic_versions", compare)
+    result = asyncio.run(main._refine_adaptive_mesh("abc123", decision={"summary": "Refine the interface"}))
+    feature = load_feature_plan(root).features[0]
+    assert result["status"]["generic_model"]["version"] == (4 if regression else 5)
+    assert feature.status == ("retry" if regression else "running")
+    assert feature.attempts == 1
+    assert feature.accepted_version is None
+    assert feature.acceptance_verified is False
+    assert main._auto_improve_goal_reached(root, result["status"]) is False
+    assert (root / "scene/model-v4.blend").read_bytes() == b"preserved baseline"
 
 
 def test_existing_cage_keeps_later_feature_geometry_during_replan():

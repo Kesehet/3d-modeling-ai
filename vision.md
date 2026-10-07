@@ -16,7 +16,11 @@
   queued-feature text. adaptive_mesh_revision_planned therefore lacked the diagnosis,
   and the editor repeatedly tapered the accepted body instead of adding the interface.
 - Next generic fix preserves refine_mesh director decisions through the editor handoff.
-  A regression verifies that exact diagnosis reaches the editor. Preserve QA thresholds.
+  A regression verifies that exact diagnosis reaches the editor. Adaptive retries now
+  also use the existing partial-progress policy: retain a relatively improving candidate
+  only when protected geometry has not regressed, while keeping the feature unfinished.
+  Two regressions verify retention/rejection and prevent false completion. 248 local
+  tests, Ruff and compile checks pass. Preserve strict QA thresholds.
 - After deploying this fix, retry the failed feature from preserved v6 and resume auto.
   A recovery pass is diagnostic progress; a later fresh no-intervention success remains
   the release gate. Do not count command completion or a model export as full success.

@@ -9511,6 +9511,12 @@ async def _refine_adaptive_mesh(
             "focused_feature_qa": True,
             "scope": "feature",
         }
+        if not feature_passed:
+            comparison = await _compare_generic_versions(
+                root,
+                baseline_version=baseline_version,
+                candidate_version=version,
+            )
         previous_quality = _quality_snapshot(previous_status.get("quality_gate"))
         quality = dict(previous_quality)
         quality.setdefault("recognizable", False)
@@ -9519,8 +9525,10 @@ async def _refine_adaptive_mesh(
         quality["active_feature_id"] = feature_task.id
         quality["active_feature_passed"] = feature_passed
         recognizable = quality.get("recognizable")
-        better = feature_passed
-        accept_candidate = feature_passed
+        better = feature_passed or bool(comparison.get("candidate_is_better"))
+        feature_passed, accept_candidate = _feature_candidate_review_decision(
+            feature_task, feature_evaluation, relative_improved=better,
+        )
     else:
         feature_evaluation = None
         comparison = await _compare_generic_versions(
@@ -9572,7 +9580,7 @@ async def _refine_adaptive_mesh(
             recognizable=recognizable,
             comparison_summary=comparison.get("summary"),
         )
-        if feature_task is not None:
+        if feature_task is not None and feature_passed:
             finish_feature(
                 root,
                 feature_task.id,
@@ -9630,6 +9638,13 @@ async def _refine_adaptive_mesh(
                         "feature_backlog_final_quality_unavailable",
                         error=str(exc.detail),
                     )
+        elif feature_task is not None:
+            record_feature_progress(
+                root,
+                feature_task.id,
+                version=version,
+                summary=str(feature_evaluation.get("summary") or comparison.get("summary") or ""),
+            )
     else:
         status = _write_status(
             root,

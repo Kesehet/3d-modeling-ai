@@ -941,9 +941,8 @@ def test_reversed_local_long_axis_keeps_radial_spacing_and_roll():
             repeated_axis_alignment="radial", long_axis_sign="negative", instances=placements
         ), feature, context,
     )
-    assert [x.location for x in inward.instances] == pytest.approx(
-        [x.location for x in outward.instances]
-    )
+    for forward, reverse in zip(outward.instances, inward.instances, strict=True):
+        assert reverse.location == pytest.approx(forward.location)
     assert [x.scale for x in inward.instances] == [x.scale for x in outward.instances]
     assert [x.rotation_deg[1] for x in inward.instances] == pytest.approx([18, 18, 18])
     # Reversal is a 180-degree yaw for this planar long-Y example; roll survives.

@@ -1043,7 +1043,7 @@ class SceneObjectSpec(ParametricGeometry):
         gt=0.01,
         le=5.0,
         description=(
-            "Explicit radial size for rods/sweeps and for cylinder/cone primitives "
+            "Explicit radial size for rods/sweeps and sphere/cylinder/cone primitives "
             "when full dimensions are not supplied. Legacy scale remains multiplicative."
         ),
     )
@@ -1082,6 +1082,21 @@ class SceneCutterSpec(SceneObjectSpec):
     bevel: bool = False
     smooth: bool = False
 
+    @model_validator(mode="after")
+    def require_explicit_primitive_size(self):
+        # An omitted cutter radius otherwise becomes a unit cylinder/sphere:
+        # for small targets that can subtract the entire intended feature.
+        if self.shape in {"sphere", "cube", "cylinder", "cone"}:
+            sized = self.dimensions is not None or self.scale != [1.0, 1.0, 1.0]
+            if self.shape != "cube":
+                sized = sized or self.radius is not None
+            if not sized:
+                raise ValueError(
+                    "Primitive boolean cutters require explicit dimensions, radius "
+                    "(non-cube), or non-unit scale; implicit unit-size cutters are unsafe."
+                )
+        return self
+
 
 class GenericSceneSpec(BaseModel):
     title: str = Field(min_length=1, max_length=120)
@@ -1093,6 +1108,8 @@ class GenericSceneSpec(BaseModel):
         max_length=24,
         description=(
             "Subtractive boolean volumes. Each cutter targets one object by exact name and is removed from exports. "
+            "Primitive cutters MUST specify explicit dimensions, radius (except cube), or non-unit scale; never "
+            "leave the cutter at an implicit unit size, which can erase the target. "
             "Use radial_repeat_count for evenly spaced repeated openings instead of hand-placing copies."
         ),
     )
@@ -6828,6 +6845,8 @@ async def _build_generic_scene_spec(
         "boolean cutters. A cutter targets one authored object by exact name and removes its closed volume; use cutters "
         "for visible holes, recesses, sockets and openings instead of modeling those as protrusions. For evenly spaced "
         "radial openings, author one cutter seed and set radial_repeat_count instead of calculating copies manually. "
+        "Cutters must always have explicitly sized geometry (dimensions, radius, or a non-unit scale); "
+        "an implicit unit-size cutter can erase its target. "
         "Lathe revolves a closed [radius,Z] material profile, preserving hollow interiors when the profile includes "
         "inner walls. Sweep makes smooth round-section curved parts from a short XYZ path and radius. "
         "Use these parametric tools instead of approximating curves with boxes. You own the "

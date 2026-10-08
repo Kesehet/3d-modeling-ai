@@ -775,12 +775,13 @@ def test_repair_director_context_fix_gets_one_bounded_retry():
     assert main.ASSEMBLY_REPAIR_MAX_ATTEMPTS == 5
 
 
-def test_radial_component_contract_aligns_long_axis_and_equalizes_instances():
+@pytest.mark.parametrize("declared_symmetry", ["radial", "none"])
+def test_radial_component_contract_aligns_long_axis_and_equalizes_instances(declared_symmetry):
     feature = FeatureTask(
         id="repeated-part",
         name="Repeated elongated part",
         count=3,
-        symmetry="radial",
+        symmetry=declared_symmetry,
         build_mode="component_job",
     )
     assembly = main.ComponentAssemblySpec(

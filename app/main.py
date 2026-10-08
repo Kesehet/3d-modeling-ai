@@ -2503,7 +2503,9 @@ def _last_rejected_component_assembly(
     latest: dict = {}
     for path in root.glob("component-assembly-v*.json"):
         payload = _read_json_if_present(path)
-        version = payload.get("candidate_version") if isinstance(payload, dict) else None
+        if not isinstance(payload, dict):
+            continue
+        version = payload.get("candidate_version")
         if (
             payload.get("feature_id") != feature_id
             or not isinstance(version, int)

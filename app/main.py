@@ -1005,6 +1005,14 @@ class ComponentAssemblySpec(BaseModel):
             "the part is not a planar radial/tangential repeated component."
         ),
     )
+    long_axis_sign: Literal["positive", "negative"] = Field(
+        default="positive",
+        description=(
+            "For radial/tangential alignment, positive makes the frozen child's positive longest "
+            "local axis point along the radial/tangent direction; negative reverses it without "
+            "affecting exact spacing. Choose using the actual child mesh and anchor."
+        ),
+    )
     instances: list[ComponentInstanceSpec] = Field(min_length=1, max_length=COMPONENT_MAX_INSTANCES)
 
 
@@ -2531,6 +2539,10 @@ def _normalize_component_assembly_symmetry(
         target = theta
         if assembly.repeated_axis_alignment == "tangential":
             target += math.pi / 2.0
+        # The local +long end need not be the outward end. Keep the AI's
+        # explicit direction choice; do not reverse a tapered frozen child.
+        if assembly.long_axis_sign == "negative":
+            target += math.pi
 
         if symmetry_axis == 2:  # XY plane, align about Z.
             alignment = target if longest_axis == 0 else target - math.pi / 2.0
@@ -2704,6 +2716,10 @@ async def _plan_component_assembly(
         "LONGEST local axis (X, Y or Z), NOT a rotation about some unrelated world axis. Declare the desired "
         "roll in rotation_deg[longest_local_axis] on the first instance; the runtime preserves that local roll "
         "identically for every instance while replacing the other Euler angles with exact radial alignment. "
+        "Set long_axis_sign=positive if the child's +long local axis should point along the outward radius "
+        "(or positive tangent), or negative when the child's -long local axis should point outward. "
+        "This controls which end points away from the center, without changing the frozen child geometry. "
+        "Inspect the child's taper and assembly anchor to choose; do not rely on rotation_deg to flip the part. "
         "The child may also contain real geometric twist, which is kept unchanged. "
         "For a repeated radial feature, set repeated_axis_alignment explicitly: radial when the frozen child's LONGEST "
         "local axis should point away from/toward the symmetry center, tangential when that long axis should run around "
@@ -2741,7 +2757,10 @@ async def _plan_component_assembly(
     errors: list[str] = []
     assembly_schema = ComponentAssemblySpec.model_json_schema()
     assembly_schema["required"] = list(
-        dict.fromkeys([*assembly_schema.get("required", []), "repeated_axis_alignment"])
+        dict.fromkeys([
+            *assembly_schema.get("required", []),
+            "repeated_axis_alignment", "long_axis_sign",
+        ])
     )
     for candidate_model in (VISION_MODELS if images else (REASONING_MODEL, *VISION_MODELS)):
         try:

@@ -775,6 +775,32 @@ def test_repair_director_context_fix_gets_one_bounded_retry():
     assert main.ASSEMBLY_REPAIR_MAX_ATTEMPTS == 5
 
 
+def test_rejected_component_assembly_feedback_is_feature_scoped(tmp_path):
+    def write_attempt(version, feature_id, scale):
+        (tmp_path / f"component-assembly-v{version}.json").write_text(
+            json.dumps({
+                "candidate_version": version,
+                "feature_id": feature_id,
+                "assembly": {
+                    "repeated_axis_alignment": "radial",
+                    "instances": [{"location": [0, 0, 0], "scale": scale}],
+                },
+            }),
+            encoding="utf-8",
+        )
+
+    write_attempt(5, "part-a", [1, 1, 1])
+    write_attempt(6, "part-b", [2, 2, 2])
+    write_attempt(7, "part-a", [0.1, 0.2, 0.3])
+
+    failed = main._last_rejected_component_assembly(tmp_path, "part-a", 4)
+    assert failed["candidate_version"] == 7
+    assert failed["assembly"]["instances"][0]["scale"] == [0.1, 0.2, 0.3]
+    # The active accepted parent is not eligible as a rejected example.
+    assert main._last_rejected_component_assembly(tmp_path, "part-a", 7)["candidate_version"] == 5
+    assert main._last_rejected_component_assembly(tmp_path, "nonexistent", 4) == {}
+
+
 @pytest.mark.parametrize("declared_symmetry", ["radial", "none"])
 def test_radial_component_contract_aligns_long_axis_and_equalizes_instances(declared_symmetry):
     feature = FeatureTask(

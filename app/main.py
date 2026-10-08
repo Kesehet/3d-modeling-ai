@@ -1005,6 +1005,14 @@ class ComponentAssemblySpec(BaseModel):
             "the part is not a planar radial/tangential repeated component."
         ),
     )
+    long_axis_sign: Literal["positive", "negative"] = Field(
+        default="positive",
+        description=(
+            "For radial/tangential alignment, positive makes the frozen child's positive longest "
+            "local axis point along the radial/tangent direction; negative reverses it without "
+            "affecting exact spacing. Choose using the actual child mesh and anchor."
+        ),
+    )
     instances: list[ComponentInstanceSpec] = Field(min_length=1, max_length=COMPONENT_MAX_INSTANCES)
 
 
@@ -2404,6 +2412,40 @@ def _component_local_axis_context(child_qa: dict) -> dict:
     }
 
 
+def _compose_radial_alignment_with_local_roll(
+    symmetry_axis: int, alignment_radians: float, local_long_axis: int, roll_radians: float
+) -> list[float]:
+    """Euler XYZ degrees for exact radial alignment followed by local-axis roll.
+
+    Matrices are composed in world-to-local order as R_alignment @ R_local_roll;
+    rotating around the component's own long axis must not disturb its radial
+    direction. This is generic across all three symmetry planes.
+    """
+    def axis_rotation(axis: int, angle: float) -> list[list[float]]:
+        c, sn = math.cos(angle), math.sin(angle)
+        if axis == 0:
+            return [[1.0, 0.0, 0.0], [0.0, c, -sn], [0.0, sn, c]]
+        if axis == 1:
+            return [[c, 0.0, sn], [0.0, 1.0, 0.0], [-sn, 0.0, c]]
+        return [[c, -sn, 0.0], [sn, c, 0.0], [0.0, 0.0, 1.0]]
+
+    alignment = axis_rotation(symmetry_axis, alignment_radians)
+    local_roll = axis_rotation(local_long_axis, roll_radians)
+    mat = [
+        [sum(alignment[i][k] * local_roll[k][j] for k in range(3)) for j in range(3)]
+        for i in range(3)
+    ]
+    # Blender's default XYZ Euler convention: R = Rz @ Ry @ Rx.
+    pitch = math.asin(max(-1.0, min(1.0, -mat[2][0])))
+    if abs(math.cos(pitch)) > 1e-7:
+        bank = math.atan2(mat[2][1], mat[2][2])
+        yaw = math.atan2(mat[1][0], mat[0][0])
+    else:
+        bank = math.atan2(-mat[1][2], mat[1][1])
+        yaw = 0.0
+    return [math.degrees(angle) for angle in (bank, pitch, yaw)]
+
+
 def _normalize_component_assembly_symmetry(
     assembly: ComponentAssemblySpec,
     feature_task: FeatureTask,
@@ -2479,6 +2521,9 @@ def _normalize_component_assembly_symmetry(
     shared_scale = list(instances[0].scale)
     longest_axis = max(range(3), key=lambda axis: dimensions[axis])
     can_lock_orientation = shortest_axis == symmetry_axis and longest_axis in plane_axes
+    # The AI decides the component's physical pitch around its OWN long axis.
+    # Keep the same local roll for every identical repeated instance.
+    local_roll_radians = math.radians(instances[0].rotation_deg[longest_axis])
 
     for index, instance in enumerate(instances):
         theta = phase + (2.0 * math.pi * index / len(instances))
@@ -2494,15 +2539,20 @@ def _normalize_component_assembly_symmetry(
         target = theta
         if assembly.repeated_axis_alignment == "tangential":
             target += math.pi / 2.0
+        # The local +long end need not be the outward end. Keep the AI's
+        # explicit direction choice; do not reverse a tapered frozen child.
+        if assembly.long_axis_sign == "negative":
+            target += math.pi
 
-        rotation = [0.0, 0.0, 0.0]
-        if symmetry_axis == 2:  # XY plane, rotate about Z.
-            rotation[2] = target if longest_axis == 0 else target - math.pi / 2.0
-        elif symmetry_axis == 1:  # XZ plane, rotate about Y.
-            rotation[1] = -target if longest_axis == 0 else math.pi / 2.0 - target
-        else:  # YZ plane, rotate about X.
-            rotation[0] = target if longest_axis == 1 else target - math.pi / 2.0
-        instance.rotation_deg = [math.degrees(value) for value in rotation]
+        if symmetry_axis == 2:  # XY plane, align about Z.
+            alignment = target if longest_axis == 0 else target - math.pi / 2.0
+        elif symmetry_axis == 1:  # XZ plane, align about Y.
+            alignment = -target if longest_axis == 0 else math.pi / 2.0 - target
+        else:  # YZ plane, align about X.
+            alignment = target if longest_axis == 1 else target - math.pi / 2.0
+        instance.rotation_deg = _compose_radial_alignment_with_local_roll(
+            symmetry_axis, alignment, longest_axis, local_roll_radians
+        )
 
     return assembly.model_copy(update={"instances": instances})
 
@@ -2662,6 +2712,15 @@ async def _plan_component_assembly(
         "Do not use fixed object-specific proportions or a universal aspect-ratio cutoff; reason from the reference "
         "and target feature. "
         "IMPORTANT SCALE CONTRACT: scale=[sx,sy,sz] multiplies the frozen child's LOCAL X,Y,Z axes BEFORE rotation. "
+        "For repeated instances, pitch or aerodynamic twist from placement is a ROLL around the frozen child's "
+        "LONGEST local axis (X, Y or Z), NOT a rotation about some unrelated world axis. Declare the desired "
+        "roll in rotation_deg[longest_local_axis] on the first instance; the runtime preserves that local roll "
+        "identically for every instance while replacing the other Euler angles with exact radial alignment. "
+        "Set long_axis_sign=positive if the child's +long local axis should point along the outward radius "
+        "(or positive tangent), or negative when the child's -long local axis should point outward. "
+        "This controls which end points away from the center, without changing the frozen child geometry. "
+        "Inspect the child's taper and assembly anchor to choose; do not rely on rotation_deg to flip the part. "
+        "The child may also contain real geometric twist, which is kept unchanged. "
         "For a repeated radial feature, set repeated_axis_alignment explicitly: radial when the frozen child's LONGEST "
         "local axis should point away from/toward the symmetry center, tangential when that long axis should run around "
         "the circumference, or free when neither contract applies. Do not fake radial orientation with X/Y tilts when "
@@ -2698,7 +2757,10 @@ async def _plan_component_assembly(
     errors: list[str] = []
     assembly_schema = ComponentAssemblySpec.model_json_schema()
     assembly_schema["required"] = list(
-        dict.fromkeys([*assembly_schema.get("required", []), "repeated_axis_alignment"])
+        dict.fromkeys([
+            *assembly_schema.get("required", []),
+            "repeated_axis_alignment", "long_axis_sign",
+        ])
     )
     for candidate_model in (VISION_MODELS if images else (REASONING_MODEL, *VISION_MODELS)):
         try:

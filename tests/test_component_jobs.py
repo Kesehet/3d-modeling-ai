@@ -828,7 +828,7 @@ def test_radial_component_contract_aligns_long_axis_and_equalizes_instances(decl
         instances=[
             main.ComponentInstanceSpec(
                 location=[0.12, 0.0, -0.31],
-                rotation_deg=[0.0, 90.0, 0.0],
+                rotation_deg=[90.0, 0.0, 0.0],
                 scale=[0.05, 0.05, 0.05],
             ),
             main.ComponentInstanceSpec(
@@ -861,6 +861,94 @@ def test_radial_component_contract_aligns_long_axis_and_equalizes_instances(decl
     assert result.instances[0].location == pytest.approx([0.12, 0.0, -0.31], abs=1e-4)
     assert result.instances[1].location == pytest.approx([-0.06, 0.103923, -0.31], abs=1e-4)
     assert result.instances[2].location == pytest.approx([-0.06, -0.103923, -0.31], abs=1e-4)
+
+
+
+def test_radial_component_preserves_shared_local_long_axis_roll():
+    feature = FeatureTask(
+        id="repeated-panel", name="Repeated pitched panel", count=3,
+        symmetry="radial", build_mode="component_job",
+    )
+    assembly = main.ComponentAssemblySpec(
+        repeated_axis_alignment="radial",
+        instances=[
+            main.ComponentInstanceSpec(location=[1, 0, 0], rotation_deg=[25, 17, 5]),
+            main.ComponentInstanceSpec(location=[-0.5, 0.8660254, 0], rotation_deg=[5, 4, 4]),
+            main.ComponentInstanceSpec(location=[-0.5, -0.8660254, 0], rotation_deg=[0, -4, -60]),
+        ],
+    )
+    result = main._normalize_component_assembly_symmetry(
+        assembly, feature, {"dimensions_xyz": [0.4, 2.0, 0.08]}
+    )
+    # The long axis is local Y, so preserve that roll (17 degrees) while
+    # locking equal angular orientation and rejecting nonradial X/Z tilts.
+    assert [part.rotation_deg[1] for part in result.instances] == pytest.approx([17, 17, 17])
+    assert result.instances[0].rotation_deg[0] == pytest.approx(0.0)
+    assert result.instances[0].rotation_deg[2] == pytest.approx(-90.0)
+    assert result.instances[1].rotation_deg[2] == pytest.approx(30.0)
+    assert result.instances[2].rotation_deg[2] == pytest.approx(150.0)
+    assert result.instances[0].location[2] == pytest.approx(0.0)
+
+
+@pytest.mark.parametrize("symmetry_axis,local_axis", [
+    (2, 0), (2, 1), (1, 0), (1, 2), (0, 1), (0, 2),
+])
+def test_radial_alignment_roll_preserves_long_axis_in_every_plane(
+    symmetry_axis, local_axis
+):
+    # Validate the generated Euler XYZ angles by reapplying Blender's rotation
+    # order, rather than relying on one equivalent Euler representation.
+    import math
+
+    def rotated(angles, vector):
+        x, y, z = [math.radians(a) for a in angles]
+        vx, vy, vz = vector
+        vy, vz = math.cos(x) * vy - math.sin(x) * vz, math.sin(x) * vy + math.cos(x) * vz
+        vx, vz = math.cos(y) * vx + math.sin(y) * vz, -math.sin(y) * vx + math.cos(y) * vz
+        vx, vy = math.cos(z) * vx - math.sin(z) * vy, math.sin(z) * vx + math.cos(z) * vy
+        return (vx, vy, vz)
+
+    original_axis = tuple(float(i == local_axis) for i in range(3))
+    for angle in (-1.2, 0.0, 0.8):
+        plain = main._compose_radial_alignment_with_local_roll(symmetry_axis, angle, local_axis, 0)
+        pitched = main._compose_radial_alignment_with_local_roll(
+            symmetry_axis, angle, local_axis, math.radians(22)
+        )
+        assert rotated(pitched, original_axis) == pytest.approx(
+            rotated(plain, original_axis), abs=1e-6
+        )
+        assert pitched != pytest.approx(plain)
+
+
+def test_reversed_local_long_axis_keeps_radial_spacing_and_roll():
+    feature = FeatureTask(
+        id="repeated-taper", name="Repeated tapered part", count=3,
+        symmetry="radial", build_mode="component_job",
+    )
+    placements = [
+        main.ComponentInstanceSpec(location=[1.0, 0, 0], rotation_deg=[4, 18, 15]),
+        main.ComponentInstanceSpec(location=[-0.5, 0.8660254, 0]),
+        main.ComponentInstanceSpec(location=[-0.5, -0.8660254, 0]),
+    ]
+    context = {"dimensions_xyz": [0.4, 2, 0.08]}
+    outward = main._normalize_component_assembly_symmetry(
+        main.ComponentAssemblySpec(
+            repeated_axis_alignment="radial", long_axis_sign="positive", instances=placements
+        ), feature, context,
+    )
+    inward = main._normalize_component_assembly_symmetry(
+        main.ComponentAssemblySpec(
+            repeated_axis_alignment="radial", long_axis_sign="negative", instances=placements
+        ), feature, context,
+    )
+    for forward, reverse in zip(outward.instances, inward.instances, strict=True):
+        assert reverse.location == pytest.approx(forward.location)
+    assert [x.scale for x in inward.instances] == [x.scale for x in outward.instances]
+    assert [x.rotation_deg[1] for x in inward.instances] == pytest.approx([18, 18, 18])
+    # Reversal is a 180-degree yaw for this planar long-Y example; roll survives.
+    for forward, reverse in zip(outward.instances, inward.instances, strict=True):
+        z_delta = (reverse.rotation_deg[2] - forward.rotation_deg[2]) % 360
+        assert z_delta == pytest.approx(180.0)
 
 
 def test_tangential_radial_component_contract_uses_quarter_turn_offset():

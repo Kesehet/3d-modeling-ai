@@ -2554,10 +2554,10 @@ async def _plan_component_assembly(
     # Feature QA feedback should inform ordinary retries too, not only full
     # assembly-integrity repair. Never let a rejected candidate replace the
     # accepted parent model.
-    rejected_installation = (
-        _last_rejected_component_assembly(parent_root, feature_task.id, parent_version)
-        if feature_task.last_summary
-        else {}
+    # Manual feature retry clears last_summary, not the failed installation evidence.
+    # Preserve negative examples across reset so the *first* retry is informed.
+    rejected_installation = _last_rejected_component_assembly(
+        parent_root, feature_task.id, parent_version
     )
     rejected_version = rejected_installation.get("candidate_version")
 

@@ -130,7 +130,16 @@ def add_object(item, *, decorate=True):
         bpy.context.view_layer.objects.active = obj
         obj.select_set(True)
     elif shape == "sphere":
-        bpy.ops.mesh.primitive_uv_sphere_add(segments=40, ring_count=20, location=location)
+        # Radius is an authored physical dimension. Ignoring it while cutters
+        # honor their own size can destroy the target or distort proportions.
+        primitive_radius = (
+            1.0
+            if item.get("dimensions")
+            else max(0.02, min(5.0, float(item.get("radius") or 1.0)))
+        )
+        bpy.ops.mesh.primitive_uv_sphere_add(
+            segments=40, ring_count=20, radius=primitive_radius, location=location
+        )
     elif shape == "cylinder":
         primitive_radius = (
             1.0

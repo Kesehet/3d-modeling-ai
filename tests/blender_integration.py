@@ -165,6 +165,17 @@ assert abs(actual[2] - 2.0) < 0.002, actual
             "bevel": False,
         }],
     }})
+    run(root, "sphere_explicit_radius", generic_scene_script() + r"""
+body = objects[0]
+points = [body.matrix_world @ Vector(corner) for corner in body.bound_box]
+actual = [max(p[i] for p in points) - min(p[i] for p in points) for i in range(3)]
+assert all(abs(value - 0.6) < 0.004 for value in actual), actual
+""", {"spec": {
+        "title": "Explicitly sized round primitive",
+        "presentation_base": False,
+        "objects": [{"name": "round_part", "shape": "sphere", "location": [0, 0, 0],
+                     "radius": 0.3, "bevel": False}],
+    }})
     run(root, "procedural_boolean_cutout", generic_scene_script() + r"""
 body = objects[0]
 # A subtractive rim must split shading normals; smooth shading may not warp

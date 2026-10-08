@@ -2519,6 +2519,17 @@ def _last_rejected_component_assembly(
                 "candidate_version": version,
                 "assembly": payload["assembly"],
             }
+    if latest:
+        # Retry resets can clear the feature's summary. The rejection history is
+        # authoritative negative QA evidence and survives those resets.
+        for event in reversed(load_history(root)):
+            if (
+                event.get("event") == "component_assembly_rejected"
+                and event.get("feature_id") == feature_id
+                and event.get("candidate_version") == latest_version
+            ):
+                latest["rejection_reason"] = str(event.get("reason") or "")[:2400]
+                break
     return latest
 
 
@@ -2650,6 +2661,7 @@ async def _plan_component_assembly(
         f"Frozen child LOCAL AXIS CONTEXT: {json.dumps(child_axis_context, ensure_ascii=False)}\n"
         f"ASSEMBLY REPAIR CONTEXT: {json.dumps(repair_context, ensure_ascii=False)[:10000]}\n"
         f"FEATURE RETRY QA (previous rejected installation): {feature_task.last_summary[:2400]}\n"
+        f"PERSISTED REJECTION QA (survives manual reset): {rejected_installation.get('rejection_reason', '')}\n"
         f"PREVIOUS REJECTED INSTALLATION (do not repeat): {json.dumps(rejected_installation, ensure_ascii=False)[:6000]}\n"
         f"Previous transform for this feature: "
         f"{json.dumps((repair_context.get('previous_assemblies') or {}).get(feature_task.id) or {}, ensure_ascii=False)}\n"

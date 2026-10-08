@@ -920,6 +920,38 @@ def test_radial_alignment_roll_preserves_long_axis_in_every_plane(
         assert pitched != pytest.approx(plain)
 
 
+def test_reversed_local_long_axis_keeps_radial_spacing_and_roll():
+    feature = FeatureTask(
+        id="repeated-taper", name="Repeated tapered part", count=3,
+        symmetry="radial", build_mode="component_job",
+    )
+    placements = [
+        main.ComponentInstanceSpec(location=[1.0, 0, 0], rotation_deg=[4, 18, 15]),
+        main.ComponentInstanceSpec(location=[-0.5, 0.8660254, 0]),
+        main.ComponentInstanceSpec(location=[-0.5, -0.8660254, 0]),
+    ]
+    context = {"dimensions_xyz": [0.4, 2, 0.08]}
+    outward = main._normalize_component_assembly_symmetry(
+        main.ComponentAssemblySpec(
+            repeated_axis_alignment="radial", long_axis_sign="positive", instances=placements
+        ), feature, context,
+    )
+    inward = main._normalize_component_assembly_symmetry(
+        main.ComponentAssemblySpec(
+            repeated_axis_alignment="radial", long_axis_sign="negative", instances=placements
+        ), feature, context,
+    )
+    assert [x.location for x in inward.instances] == pytest.approx(
+        [x.location for x in outward.instances]
+    )
+    assert [x.scale for x in inward.instances] == [x.scale for x in outward.instances]
+    assert [x.rotation_deg[1] for x in inward.instances] == pytest.approx([18, 18, 18])
+    # Reversal is a 180-degree yaw for this planar long-Y example; roll survives.
+    for forward, reverse in zip(outward.instances, inward.instances, strict=True):
+        z_delta = (reverse.rotation_deg[2] - forward.rotation_deg[2]) % 360
+        assert z_delta == pytest.approx(180.0)
+
+
 def test_tangential_radial_component_contract_uses_quarter_turn_offset():
     feature = FeatureTask(
         id="repeated-part",

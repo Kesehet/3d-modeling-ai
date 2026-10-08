@@ -873,8 +873,8 @@ def test_radial_component_preserves_shared_local_long_axis_roll():
         repeated_axis_alignment="radial",
         instances=[
             main.ComponentInstanceSpec(location=[1, 0, 0], rotation_deg=[25, 17, 5]),
-            main.ComponentInstanceSpec(location=[0, 1, 0], rotation_deg=[5, 4, 4]),
-            main.ComponentInstanceSpec(location=[-1, 0, 0], rotation_deg=[0, -4, -60]),
+            main.ComponentInstanceSpec(location=[-0.5, 0.8660254, 0], rotation_deg=[5, 4, 4]),
+            main.ComponentInstanceSpec(location=[-0.5, -0.8660254, 0], rotation_deg=[0, -4, -60]),
         ],
     )
     result = main._normalize_component_assembly_symmetry(

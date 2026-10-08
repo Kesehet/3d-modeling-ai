@@ -2401,8 +2401,12 @@ def _normalize_component_assembly_symmetry(
     a mathematically correct single-axis rotation.
     """
 
+    # Feature planning may leave symmetry unspecified while the later assembly
+    # planner explicitly chooses radial/tangential alignment. Respect that
+    # concrete repeated-axis contract unless the feature requires a different
+    # symmetry (paired or bilateral). An explicit "free" remains untouched.
     if (
-        str(feature_task.symmetry or "").lower() != "radial"
+        str(feature_task.symmetry or "none").lower() not in {"none", "radial"}
         or int(feature_task.count or 1) <= 1
         or len(assembly.instances) != int(feature_task.count)
         or assembly.repeated_axis_alignment == "free"

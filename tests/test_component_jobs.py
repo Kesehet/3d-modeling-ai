@@ -775,8 +775,6 @@ def test_repair_director_context_fix_gets_one_bounded_retry():
     assert main.ASSEMBLY_REPAIR_MAX_ATTEMPTS == 5
 
 
-@pytest.mark.parametrize("declared_symmetry", ["radial", "none"])
-
 def test_rejected_component_assembly_feedback_is_feature_scoped(tmp_path):
     def write_attempt(version, feature_id, scale):
         (tmp_path / f"component-assembly-v{version}.json").write_text(
@@ -803,6 +801,7 @@ def test_rejected_component_assembly_feedback_is_feature_scoped(tmp_path):
     assert main._last_rejected_component_assembly(tmp_path, "nonexistent", 4) == {}
 
 
+@pytest.mark.parametrize("declared_symmetry", ["radial", "none"])
 def test_radial_component_contract_aligns_long_axis_and_equalizes_instances(declared_symmetry):
     feature = FeatureTask(
         id="repeated-part",

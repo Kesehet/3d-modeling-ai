@@ -250,6 +250,13 @@ def apply_boolean_cutter(item):
     bm = bmesh.new()
     bm.from_mesh(target.data)
     bmesh.ops.recalc_face_normals(bm, faces=list(bm.faces))
+    # Boolean rims are real surface discontinuities. Averaging their normals
+    # into the surrounding body creates long shading streaks that visual QA
+    # mistakes for broken/intersecting geometry. Preserve smooth curved bands,
+    # but split normals at sharp joins in the resulting subtractive mesh.
+    for edge in bm.edges:
+        if edge.is_manifold and edge.calc_face_angle() > math.radians(30.0):
+            edge.smooth = False
     bm.to_mesh(target.data)
     target.data.update()
     bm.free()

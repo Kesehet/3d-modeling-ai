@@ -792,8 +792,20 @@ def test_rejected_component_assembly_feedback_is_feature_scoped(tmp_path):
     write_attempt(5, "part-a", [1, 1, 1])
     write_attempt(6, "part-b", [2, 2, 2])
     write_attempt(7, "part-a", [0.1, 0.2, 0.3])
+    main.append_history(
+        tmp_path,
+        "component_assembly_rejected",
+        feature_id="part-a",
+        candidate_version=7,
+        reason="Installed part is too narrow along local X.",
+    )
+    # A manual feature retry clears last_summary, but must not clear the
+    # last rejected installation or its explicit dimensional QA diagnosis.
+    retried_feature = FeatureTask(id="part-a", name="Part A", last_summary="")
+    assert retried_feature.last_summary == ""
 
     failed = main._last_rejected_component_assembly(tmp_path, "part-a", 4)
+    assert failed["rejection_reason"] == "Installed part is too narrow along local X."
     assert failed["candidate_version"] == 7
     assert failed["assembly"]["instances"][0]["scale"] == [0.1, 0.2, 0.3]
     # The active accepted parent is not eligible as a rejected example.

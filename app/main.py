@@ -2519,6 +2519,17 @@ def _last_rejected_component_assembly(
                 "candidate_version": version,
                 "assembly": payload["assembly"],
             }
+    if latest:
+        # Retry resets can clear the feature's summary. The rejection history is
+        # authoritative negative QA evidence and survives those resets.
+        for event in reversed(load_history(root)):
+            if (
+                event.get("event") == "component_assembly_rejected"
+                and event.get("feature_id") == feature_id
+                and event.get("candidate_version") == latest_version
+            ):
+                latest["rejection_reason"] = str(event.get("reason") or "")[:2400]
+                break
     return latest
 
 
@@ -2554,10 +2565,10 @@ async def _plan_component_assembly(
     # Feature QA feedback should inform ordinary retries too, not only full
     # assembly-integrity repair. Never let a rejected candidate replace the
     # accepted parent model.
-    rejected_installation = (
-        _last_rejected_component_assembly(parent_root, feature_task.id, parent_version)
-        if feature_task.last_summary
-        else {}
+    # Manual feature retry clears last_summary, not the failed installation evidence.
+    # Preserve negative examples across reset so the *first* retry is informed.
+    rejected_installation = _last_rejected_component_assembly(
+        parent_root, feature_task.id, parent_version
     )
     rejected_version = rejected_installation.get("candidate_version")
 
@@ -2626,6 +2637,13 @@ async def _plan_component_assembly(
         "When the failure names width, length, thickness, or proportions, change the relevant LOCAL AXIS scale "
         "and explain the calculated new dimensions rather than shrinking every axis or repeating failed placement. "
         "A visible component must have plausible volume/surface area in the assembled object, not just correct symmetry. "
+        "A QA complaint that a component looks like a needle, wire, thin line, spike, sliver, or lacks surface "
+        "area is a CROSS-SECTION/SILHOUETTE failure. Correct width (and, if appropriate, thickness) along the "
+        "child's NON-LONGEST local axis or axes rather than only increasing its longest-axis length. Increasing "
+        "length while keeping width nearly unchanged makes such a rejection worse. Calculate resulting local XYZ "
+        "dimensions and compare cross-section against length and reference images before proposing the next scales. "
+        "Do not use fixed object-specific proportions or a universal aspect-ratio cutoff; reason from the reference "
+        "and target feature. "
         "IMPORTANT SCALE CONTRACT: scale=[sx,sy,sz] multiplies the frozen child's LOCAL X,Y,Z axes BEFORE rotation. "
         "For a repeated radial feature, set repeated_axis_alignment explicitly: radial when the frozen child's LONGEST "
         "local axis should point away from/toward the symmetry center, tangential when that long axis should run around "
@@ -2650,6 +2668,7 @@ async def _plan_component_assembly(
         f"Frozen child LOCAL AXIS CONTEXT: {json.dumps(child_axis_context, ensure_ascii=False)}\n"
         f"ASSEMBLY REPAIR CONTEXT: {json.dumps(repair_context, ensure_ascii=False)[:10000]}\n"
         f"FEATURE RETRY QA (previous rejected installation): {feature_task.last_summary[:2400]}\n"
+        f"PERSISTED REJECTION QA (survives manual reset): {rejected_installation.get('rejection_reason', '')}\n"
         f"PREVIOUS REJECTED INSTALLATION (do not repeat): {json.dumps(rejected_installation, ensure_ascii=False)[:6000]}\n"
         f"Previous transform for this feature: "
         f"{json.dumps((repair_context.get('previous_assemblies') or {}).get(feature_task.id) or {}, ensure_ascii=False)}\n"

@@ -2490,6 +2490,36 @@ def _normalize_component_assembly_symmetry(
     return assembly.model_copy(update={"instances": instances})
 
 
+
+def _last_rejected_component_assembly(
+    root: Path, feature_id: str, accepted_parent_version: int
+) -> dict:
+    """Retrieve a rejected placement for the same feature, never another part.
+
+    The accepted parent remains authoritative. Rejected placements are supplied
+    only as negative examples to the next AI assembly proposal.
+    """
+    latest_version = -1
+    latest: dict = {}
+    for path in root.glob("component-assembly-v*.json"):
+        payload = _read_json_if_present(path)
+        version = payload.get("candidate_version") if isinstance(payload, dict) else None
+        if (
+            payload.get("feature_id") != feature_id
+            or not isinstance(version, int)
+            or version == accepted_parent_version
+            or not isinstance(payload.get("assembly"), dict)
+        ):
+            continue
+        if version > latest_version:
+            latest_version = version
+            latest = {
+                "candidate_version": version,
+                "assembly": payload["assembly"],
+            }
+    return latest
+
+
 async def _plan_component_assembly(
     parent_job_id: str,
     feature_task: FeatureTask,
@@ -2519,6 +2549,15 @@ async def _plan_component_assembly(
     parent_qa = _read_json_if_present(parent_root / "exports" / str(parent_model.get("qa") or ""))
     child_qa = _read_json_if_present(child_root / "exports" / str(child_model.get("qa") or ""))
     child_axis_context = _component_local_axis_context(child_qa)
+    # Feature QA feedback should inform ordinary retries too, not only full
+    # assembly-integrity repair. Never let a rejected candidate replace the
+    # accepted parent model.
+    rejected_installation = (
+        _last_rejected_component_assembly(parent_root, feature_task.id, parent_version)
+        if feature_task.last_summary
+        else {}
+    )
+    rejected_version = rejected_installation.get("candidate_version")
 
     image_paths: list[Path] = []
     for record in _usable_reference_index(parent_root)[-2:]:
@@ -2537,6 +2576,11 @@ async def _plan_component_assembly(
             path = parent_root / "renders" / f"model-v{failed_version}-{view}.png"
             if path.is_file():
                 image_paths.append(path)
+    if isinstance(rejected_version, int):
+        for view in ("front-left", "top"):
+            path = parent_root / "renders" / f"model-v{rejected_version}-{view}.png"
+            if path.is_file():
+                image_paths.append(path)
     for view in ("front", "left", "front-right", "top"):
         path = child_root / "renders" / f"model-v{child_version}-{view}.png"
         if path.is_file():
@@ -2549,7 +2593,12 @@ async def _plan_component_assembly(
                 f"failed-assembly/{path.name}"
                 if isinstance(failed_version, int)
                 and path.name.startswith(f"model-v{failed_version}-")
-                else f"parent/{path.name}"
+                else (
+                    f"rejected-installation/{path.name}"
+                    if isinstance(rejected_version, int)
+                    and path.name.startswith(f"model-v{rejected_version}-")
+                    else f"parent/{path.name}"
+                )
             )
             if path.parent == parent_root / "renders"
             else f"child/{path.name}"
@@ -2570,6 +2619,11 @@ async def _plan_component_assembly(
         "When an ASSEMBLY REPAIR CONTEXT is supplied, the previous transform(s) produced a visible integrity failure. "
         "Use the failed renders, blocking defects and repair instructions to make a deliberate correction; do not "
         "blindly repeat the old transforms. Location, rotation and instance scale are all available repair controls. "
+        "The ordinary FEATURE RETRY QA and last rejected installation are also authoritative NEGATIVE evidence. "
+        "Explicitly compare the previous rejected component dimensions and instance scales against the visible defect. "
+        "When the failure names width, length, thickness, or proportions, change the relevant LOCAL AXIS scale "
+        "and explain the calculated new dimensions rather than shrinking every axis or repeating failed placement. "
+        "A visible component must have plausible volume/surface area in the assembled object, not just correct symmetry. "
         "IMPORTANT SCALE CONTRACT: scale=[sx,sy,sz] multiplies the frozen child's LOCAL X,Y,Z axes BEFORE rotation. "
         "For a repeated radial feature, set repeated_axis_alignment explicitly: radial when the frozen child's LONGEST "
         "local axis should point away from/toward the symmetry center, tangential when that long axis should run around "
@@ -2593,6 +2647,8 @@ async def _plan_component_assembly(
         f"Frozen child QA/bounds: {json.dumps(child_qa, ensure_ascii=False)}\n"
         f"Frozen child LOCAL AXIS CONTEXT: {json.dumps(child_axis_context, ensure_ascii=False)}\n"
         f"ASSEMBLY REPAIR CONTEXT: {json.dumps(repair_context, ensure_ascii=False)[:10000]}\n"
+        f"FEATURE RETRY QA (previous rejected installation): {feature_task.last_summary[:2400]}\n"
+        f"PREVIOUS REJECTED INSTALLATION (do not repeat): {json.dumps(rejected_installation, ensure_ascii=False)[:6000]}\n"
         f"Previous transform for this feature: "
         f"{json.dumps((repair_context.get('previous_assemblies') or {}).get(feature_task.id) or {}, ensure_ascii=False)}\n"
         f"Image labels: {labels}\n"

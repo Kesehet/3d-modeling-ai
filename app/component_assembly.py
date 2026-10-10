@@ -101,6 +101,116 @@ source_world_matrices = {
     source.name: source.matrix_world.copy()
     for source in source_objects
 }
+def cross_section_profile(vertices, edges, *, longitudinal_axis, width_axis, outward_sign):
+    """Calculate two true mesh edge/plane intersection widths along an oriented axis.
+
+    Operates only on mesh vertices/edges in the frozen child's local frame;
+    unlike a bounding box, this distinguishes taper from uniform maximum width.
+    The caller must establish that the signed axis really points OUTWARD.
+    """
+    if not vertices or not edges or longitudinal_axis == width_axis:
+        return {"measured": False, "reason": "No suitable mesh cross-section"}
+    if outward_sign not in (-1, 1):
+        return {"measured": False, "reason": "Outward long-axis sign unavailable"}
+    coords = [float(v[longitudinal_axis]) * outward_sign for v in vertices]
+    lower = min(coords)
+    upper = max(coords)
+    span = upper - lower
+    if span <= 1e-7:
+        return {"measured": False, "reason": "Near-zero longitudinal extent"}
+
+    def width_at(fraction):
+        plane = lower + fraction * span
+        transverse = []
+        for i, j in edges:
+            start, end = coords[i], coords[j]
+            if min(start, end) > plane + 1e-8 or max(start, end) < plane - 1e-8:
+                continue
+            if abs(start - end) < 1e-10:
+                if abs(start - plane) < 1e-8:
+                    transverse.extend((float(vertices[i][width_axis]), float(vertices[j][width_axis])))
+                continue
+            alpha = (plane - start) / (end - start)
+            if -1e-8 <= alpha <= 1.0 + 1e-8:
+                transverse.append(
+                    float(vertices[i][width_axis]) +
+                    alpha * (float(vertices[j][width_axis]) - float(vertices[i][width_axis]))
+                )
+        if len(transverse) < 2:
+            return None
+        width = max(transverse) - min(transverse)
+        return width if width > 1e-7 else None
+
+    root_width = width_at(0.20)
+    distal_width = width_at(0.80)
+    if root_width is None or distal_width is None:
+        return {"measured": False, "reason": "Not enough mesh edges cross both slice planes"}
+    ratio = distal_width / root_width
+    direction = (
+        "widens_outward" if ratio >= 1.10 else
+        "narrows_outward" if ratio <= (1.0 / 1.10) else
+        "approximately_uniform"
+    )
+    return {
+        "measured": True,
+        "method": "mesh_edge_intersections_at_20_and_80_percent_of_signed_longitudinal_extent",
+        "root_width": round(root_width, 5),
+        "distal_width": round(distal_width, 5),
+        "distal_to_root_ratio": round(ratio, 4),
+        "direction": direction,
+        "long_axis": "XYZ"[longitudinal_axis],
+        "width_axis": "XYZ"[width_axis],
+        "outward_long_axis_sign": "positive" if outward_sign > 0 else "negative",
+    }
+
+
+# Extract the accepted frozen child in its native scene-global local-assembly
+# frame, BEFORE rotations and translations of each installed instance. These
+# widths remain valid under independent axis scaling and exact rotations.
+source_vertices = []
+source_edges = []
+for source in source_objects:
+    if source.type != "MESH":
+        continue
+    offset = len(source_vertices)
+    source_matrix = source_world_matrices[source.name]
+    source_vertices.extend(
+        tuple(source_matrix @ vertex.co)
+        for vertex in source.data.vertices
+    )
+    source_edges.extend(
+        (offset + edge.vertices[0], offset + edge.vertices[1])
+        for edge in source.data.edges
+    )
+if source_vertices:
+    child_bounds = [
+        max(point[axis] for point in source_vertices) -
+        min(point[axis] for point in source_vertices)
+        for axis in range(3)
+    ]
+    sorted_axes = sorted(range(3), key=lambda axis: child_bounds[axis], reverse=True)
+else:
+    child_bounds = []
+    sorted_axes = []
+
+repeated_profiles = []
+alignment_contract = str(args.get("repeated_axis_alignment") or "free")
+long_axis_sign = str(args.get("long_axis_sign") or "")
+outward_sign = {"positive": 1, "negative": -1}.get(long_axis_sign)
+instance_locations = [
+    Vector(tuple(float(x) for x in item.get("location", [0, 0, 0])[:3]))
+    for item in INSTANCES
+]
+placement_center = sum(instance_locations, Vector()) / len(instance_locations)
+if len(INSTANCES) > 1:
+    spreads = [
+        max(v[a] for v in instance_locations) - min(v[a] for v in instance_locations)
+        for a in range(3)
+    ]
+    symmetry_axis = min(range(3), key=lambda a: spreads[a])
+else:
+    symmetry_axis = None
+
 installed_objects = []
 for instance_index, instance in enumerate(INSTANCES, start=1):
     location = instance.get("location", [0.0, 0.0, 0.0])
@@ -114,6 +224,54 @@ for instance_index, instance in enumerate(INSTANCES, start=1):
     sx, sy, sz = (max(0.02, min(50.0, float(v))) for v in scale[:3])
     scale_matrix = Matrix.Diagonal((sx, sy, sz, 1.0))
     instance_matrix = location_matrix @ rotation_matrix @ scale_matrix
+
+    # Measure before rotation, retaining the child's independently scaled local
+    # axes. Require the declared signed long axis to point radially away from the
+    # placement centroid; ambiguous placement MUST NOT be labeled root vs tip.
+    if (
+        alignment_contract == "radial"
+        and len(INSTANCES) > 1
+        and len(sorted_axes) == 3
+        and child_bounds[sorted_axes[0]] > child_bounds[sorted_axes[1]] * 1.10
+        and outward_sign in (-1, 1)
+        and symmetry_axis is not None
+    ):
+        long_axis, transverse_axis = sorted_axes[:2]
+        radial = location_matrix.translation - placement_center
+        radial[symmetry_axis] = 0.0
+        axis_direction = rotation_matrix.to_3x3() @ Vector(
+            tuple(outward_sign if axis == long_axis else 0.0 for axis in range(3))
+        )
+        axis_direction[symmetry_axis] = 0.0
+        directional_cosine = (
+            axis_direction.normalized().dot(radial.normalized())
+            if radial.length > 1e-7 and axis_direction.length > 1e-7 else 0.0
+        )
+        if directional_cosine >= 0.85:
+            scaled_vertices = [
+                (point[0] * sx, point[1] * sy, point[2] * sz)
+                for point in source_vertices
+            ]
+            profile = cross_section_profile(
+                scaled_vertices, source_edges,
+                longitudinal_axis=long_axis,
+                width_axis=transverse_axis,
+                outward_sign=outward_sign,
+            )
+            profile["radial_alignment_cosine"] = round(directional_cosine, 5)
+        else:
+            profile = {
+                "measured": False,
+                "reason": "Declared outward axis does not align radially with assembly placement",
+                "radial_alignment_cosine": round(directional_cosine, 5),
+            }
+    else:
+        profile = {
+            "measured": False,
+            "reason": "No unambiguous, elongated, repeated radial mesh with signed outward axis",
+        }
+    profile["instance_index"] = instance_index
+    repeated_profiles.append(profile)
 
     for source in source_objects:
         clone = source.copy()
@@ -243,6 +401,13 @@ qa = {
     "installed_component": COMPONENT_NAME,
     "installed_instances": len(INSTANCES),
     "installed_mesh_objects": len(installed_objects),
+    "component_width_profiles": repeated_profiles,
+    "component_axis_alignment": alignment_contract,
+    "component_long_axis_sign": long_axis_sign,
+    "measurement_description": (
+        "True frozen-child mesh edge intersections at 20% and 80% of the declared outward "
+        "local long axis, with per-instance radial direction verified; NOT a visual QA pass."
+    ),
     "parent_geometry_preserved": True,
     "parent_mesh_count": len(parent_objects),
     "parent_mesh_signature_sha256": hashlib.sha256(

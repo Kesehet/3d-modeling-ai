@@ -1,5 +1,29 @@
 # Vision: Iterative Visual 3D Agent
 
+## Verified live recovery and remaining release gate — October 11, 2026
+
+- #139 merged as `2238b841c2b5e0d8269a407f4b2b1d0799931a7c`.
+  PR CI `38089890302`, main CI `38090156741`, and deployment
+  `38090156878` passed. Public health confirmed the exact deployed revision.
+  Python: 276 tests; Ruff/compile and real Blender render/export integration pass.
+- Parent `eabc4e96-60e0-469e-8582-8a64e2d1cf22` resumed from v21.
+  Downrod/canopy v41 passed on the first attempt. Exact pre-export evaluated
+  geometry proof verified motor_housing and bottom_hub_cap against v21.
+  Frozen blade installation v42 passed taper/feature/preservation QA, but final
+  integrity rejected blade-to-housing gaps/intersections. Coordinated repair
+  reopened blade-mount-sockets; v44 strict QA rejected misplaced bottom notches.
+  No whole-model success is verified. Keep accepted geometry and strict gates.
+- New ordinary-prompt autonomous jobs on this revision, with no supplied geometry:
+  fan `796ca348-f29e-4d55-8f10-c4f95a3fa607` ("Create a modern ceiling fan with three blades.")
+  and table `df9abf62-6c9c-4a14-baa1-27f51dea65c4` ("Create a simple wooden dining table with four legs.").
+  Both use automatic research and 30 bounded improvement rounds. Tabletop v1
+  passed; both full jobs still require final whole-object/physical QA verification.
+- Local executor connection failed during live monitoring; production generation
+  continues independently. GitHub live-control inspection remains available.
+  Recovery snapshot workflow `38090664591` captured v44/current round 6.
+  Inspect the fresh runs and final active-artifact verdicts before claiming release.
+  The recovered rendering baseline is not print-ready (existing non-manifold edges).
+
 ## Freeze evaluated protected parts during repair — October 11, 2026
 
 - #138 merged/deployed as `e10a62af67def7893e91acd75563447e73edf2e2`;

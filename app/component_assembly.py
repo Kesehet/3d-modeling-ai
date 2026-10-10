@@ -15,8 +15,10 @@ def component_assembly_script() -> str:
     return r'''
 import bmesh
 import bpy
+import hashlib
 import json
 import math
+import struct
 from mathutils import Euler, Matrix, Vector
 from pathlib import Path
 
@@ -50,6 +52,27 @@ def is_model_object(obj):
 parent_objects = [obj for obj in scene.objects if is_model_object(obj)]
 if not parent_objects:
     raise RuntimeError("Parent model contains no mesh geometry to assemble onto.")
+
+def mesh_signature(obj):
+    """Exact world-transform, vertex-coordinate and topology digest for source meshes."""
+    digest = hashlib.sha256()
+    digest.update(obj.name.encode("utf-8"))
+    for row in obj.matrix_world:
+        for value in row:
+            digest.update(struct.pack("<d", float(value)))
+    for vertex in obj.data.vertices:
+        digest.update(struct.pack("<3d", *(float(value) for value in vertex.co)))
+    for polygon in obj.data.polygons:
+        digest.update(struct.pack("<I", len(polygon.vertices)))
+        for index in polygon.vertices:
+            digest.update(struct.pack("<I", int(index)))
+    return digest.hexdigest()
+
+
+# Snapshot before installing any frozen child component. Structural preservation
+# is measured, not inferred from camera angles or a multimodal model verdict.
+parent_signatures = {obj.name: mesh_signature(obj) for obj in parent_objects}
+
 
 with bpy.data.libraries.load(COMPONENT_BLEND, link=False) as (data_from, data_to):
     data_to.objects = list(data_from.objects)
@@ -114,6 +137,9 @@ except Exception:
 
 all_model_objects = [*parent_objects, *installed_objects]
 bpy.context.view_layer.update()
+for obj in parent_objects:
+    if obj.name not in scene.objects or mesh_signature(obj) != parent_signatures[obj.name]:
+        raise RuntimeError("Frozen parent mesh geometry was mutated during component assembly.")
 points = []
 for obj in all_model_objects:
     points.extend(obj.matrix_world @ Vector(corner) for corner in obj.bound_box)
@@ -217,6 +243,11 @@ qa = {
     "installed_component": COMPONENT_NAME,
     "installed_instances": len(INSTANCES),
     "installed_mesh_objects": len(installed_objects),
+    "parent_geometry_preserved": True,
+    "parent_mesh_count": len(parent_objects),
+    "parent_mesh_signature_sha256": hashlib.sha256(
+        "|".join(sorted(parent_signatures.values())).encode("utf-8")
+    ).hexdigest(),
     "non_manifold_edges": non_manifold,
     "loose_vertices": loose_vertices,
     "scene_dimensions_blender_units": [round(float(value), 4) for value in size],

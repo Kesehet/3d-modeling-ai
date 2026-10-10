@@ -4,6 +4,7 @@ from app.main import (
     _feature_candidate_review_decision,
     _feature_diagnostic_views,
     _feature_evaluation_accepts,
+    _focused_feature_adjudication_accepts,
 )
 
 
@@ -349,3 +350,63 @@ def test_positive_preservation_audit_leaves_feature_verdict_unchanged():
     )
 
     assert merged == evaluation
+
+
+def _focused_review(
+    model: str,
+    *,
+    criteria_satisfied: bool = True,
+    reference_match_score: float = 0.9,
+    confidence: float = 0.93,
+    regression_detected: bool = False,
+) -> dict:
+    return {
+        "model": model,
+        "evaluation": {
+            "visible": True,
+            "criteria_satisfied": criteria_satisfied,
+            "reference_match_score": reference_match_score,
+            "confidence": confidence,
+            "regression_detected": regression_detected,
+        },
+    }
+
+
+def test_focused_adjudication_requires_two_distinct_passing_models():
+    feature = FeatureTask(
+        id="repeated-panel", name="Repeated elongated panel", count=3,
+        build_mode="component_job",
+    )
+    reviews = [_focused_review("vision-one"), _focused_review("vision-two")]
+    assert _focused_feature_adjudication_accepts(
+        feature, reviews, reference_match_required=True
+    )
+    assert not _focused_feature_adjudication_accepts(
+        feature, reviews[:1], reference_match_required=True
+    )
+    assert not _focused_feature_adjudication_accepts(
+        feature, [_focused_review("same"), _focused_review("same")],
+        reference_match_required=True,
+    )
+
+
+def test_focused_adjudication_never_relaxes_shape_contact_or_reference_gates():
+    feature = FeatureTask(id="repeated-panel", name="Panel", count=3)
+    good = _focused_review("first")
+    for disagree in (
+        _focused_review("second", criteria_satisfied=False),
+        _focused_review("second", confidence=0.72),
+        _focused_review("second", regression_detected=True),
+        {"model": "second", "error": "vision unavailable"},
+    ):
+        assert not _focused_feature_adjudication_accepts(
+            feature, [good, disagree], reference_match_required=False,
+        )
+    assert not _focused_feature_adjudication_accepts(
+        feature, [good, _focused_review("second", reference_match_score=0.1)],
+        reference_match_required=True,
+    )
+    assert _focused_feature_adjudication_accepts(
+        feature, [good, _focused_review("second", reference_match_score=0.1)],
+        reference_match_required=False,
+    )

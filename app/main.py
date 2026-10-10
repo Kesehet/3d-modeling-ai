@@ -2733,6 +2733,11 @@ async def _plan_component_assembly(
         "(or positive tangent), or negative when the child's -long local axis should point outward. "
         "This controls which end points away from the center, without changing the frozen child geometry. "
         "Inspect the child's taper and assembly anchor to choose; do not rely on rotation_deg to flip the part. "
+        "Use independently VERIFIED mesh-edge cross-sectional widths from a rejected installation as "
+        "negative planning evidence. If the prior signed long-axis placement was measured as narrowing "
+        "toward the free end when the criteria require widening (or vice versa), reverse the old "
+        "long_axis_sign instead of repeating the same failed direction. This changes placement only: "
+        "the frozen component geometry, contacts and all acceptance criteria remain authoritative. "
         "The child may also contain real geometric twist, which is kept unchanged. "
         "For a repeated radial feature, set repeated_axis_alignment explicitly: radial when the frozen child's LONGEST "
         "local axis should point away from/toward the symmetry center, tangential when that long axis should run around "
@@ -2759,6 +2764,7 @@ async def _plan_component_assembly(
         f"FEATURE RETRY QA (previous rejected installation): {feature_task.last_summary[:2400]}\n"
         f"PERSISTED REJECTION QA (survives manual reset): {rejected_installation.get('rejection_reason', '')}\n"
         f"PREVIOUS REJECTED INSTALLATION (do not repeat): {json.dumps(rejected_installation, ensure_ascii=False)[:6000]}\n"
+        f"VERIFIED BLENDER TAPER DIRECTION: {json.dumps({'required_direction': taper_requirement, 'measured_direction': proven_direction, 'previous_sign': rejected_assembly.get('long_axis_sign'), 'evidence': measured_taper})[:6000]}\n"
         f"Previous transform for this feature: "
         f"{json.dumps((repair_context.get('previous_assemblies') or {}).get(feature_task.id) or {}, ensure_ascii=False)}\n"
         f"Image labels: {labels}\n"
@@ -2795,6 +2801,23 @@ async def _plan_component_assembly(
                 instance.location = [max(-50.0, min(50.0, float(v))) for v in instance.location]
                 instance.rotation_deg = [max(-360.0, min(360.0, float(v))) for v in instance.rotation_deg]
                 instance.scale = [max(0.02, min(20.0, float(v))) for v in instance.scale]
+            flipped_sign = reverse_failed_axis_contract(
+                requirement=taper_requirement,
+                proven_direction=proven_direction,
+                previous_sign=rejected_assembly.get("long_axis_sign"),
+                previous_alignment=rejected_assembly.get("repeated_axis_alignment"),
+                proposed_sign=assembly.long_axis_sign,
+                proposed_alignment=assembly.repeated_axis_alignment,
+            )
+            if flipped_sign:
+                previous = assembly.long_axis_sign
+                assembly.long_axis_sign = flipped_sign
+                assembly.rationale = (
+                    assembly.rationale[:1120]
+                    + f" Blender measured the previous {previous} long-axis contract as "
+                    + f"{proven_direction}, conflicting with {taper_requirement}; "
+                    + f"corrected sign to {flipped_sign} before radial transforms."
+                )[:1600]
             assembly = _normalize_component_assembly_symmetry(
                 assembly,
                 feature_task,
@@ -2811,6 +2834,9 @@ async def _plan_component_assembly(
             "model": candidate_model,
             "images": labels,
             "child_axis_context": child_axis_context,
+            "measured_taper_feedback": measured_taper,
+            "expected_taper_direction": taper_requirement,
+            "long_axis_sign_corrected_from_blender": bool(flipped_sign),
             "assembly": assembly.model_dump(),
             "created_at": datetime.now(UTC).isoformat(),
         }

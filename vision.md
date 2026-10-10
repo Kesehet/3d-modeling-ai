@@ -18,6 +18,10 @@
   and table `df9abf62-6c9c-4a14-baa1-27f51dea65c4` ("Create a simple wooden dining table with four legs.").
   Both use automatic research and 30 bounded improvement rounds. Tabletop v1
   passed; both full jobs still require final whole-object/physical QA verification.
+- Fresh fan diagnostic `38090843381` captured round 7: canopy/downrod accepted,
+  motor housing rejected after three procedural attempts; adaptive planning began.
+  This fresh job has not passed the release gate. Table diagnostic `38090993623`
+  was requested; its final verdict is not yet verified.
 - Local executor connection failed during live monitoring; production generation
   continues independently. GitHub live-control inspection remains available.
   Recovery snapshot workflow `38090664591` captured v44/current round 6.

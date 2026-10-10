@@ -169,19 +169,18 @@ def cross_section_profile(vertices, edges, *, longitudinal_axis, width_axis, out
 # widths remain valid under independent axis scaling and exact rotations.
 source_vertices = []
 source_edges = []
+depsgraph = bpy.context.evaluated_depsgraph_get()
 for source in source_objects:
-    if source.type != "MESH":
-        continue
-    offset = len(source_vertices)
-    source_matrix = source_world_matrices[source.name]
-    source_vertices.extend(
-        tuple(source_matrix @ vertex.co)
-        for vertex in source.data.vertices
-    )
-    source_edges.extend(
-        (offset + edge.vertices[0], offset + edge.vertices[1])
-        for edge in source.data.edges
-    )
+    # Measure the same evaluated geometry shown in renders/exports, including
+    # modifiers and convertible curves. Raw mesh coordinates can disagree.
+    evaluated = source.evaluated_get(depsgraph)
+    mesh = evaluated.to_mesh()
+    try:
+        offset = len(source_vertices)
+        source_vertices.extend(tuple(evaluated.matrix_world @ vertex.co) for vertex in mesh.vertices)
+        source_edges.extend(tuple(offset + i for i in edge.vertices) for edge in mesh.edges)
+    finally:
+        evaluated.to_mesh_clear()
 if source_vertices:
     child_bounds = [
         max(point[axis] for point in source_vertices) -

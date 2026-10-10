@@ -29,11 +29,16 @@ PREFIX = args.get("prefix", "model-v1")
 proof_context = args.get("preservation_context") or {}
 protected_names = list(proof_context.get("protected_object_names") or [])
 baseline_signatures = {}
+baseline_matrices = {}
 if proof_context.get("baseline_blend_path") and protected_names:
     bpy.ops.wm.open_mainfile(filepath=proof_context["baseline_blend_path"])
     bpy.context.view_layer.update()
     baseline_signatures = {
         name: geometry_signature(bpy.context.scene.objects[name])
+        for name in protected_names if name in bpy.context.scene.objects
+    }
+    baseline_matrices = {
+        name: [list(row) for row in bpy.context.scene.objects[name].matrix_world]
         for name in protected_names if name in bpy.context.scene.objects
     }
     bpy.ops.wm.read_factory_settings(use_empty=True)
@@ -315,6 +320,28 @@ if SPEC.get("presentation_base", True):
 
 # Compute model bounds (excluding presentation base).
 bpy.context.view_layer.update()
+# A protected evaluated mesh is authoritative. Rebuilding its declarative spec
+# can change bevel evaluation or Boolean edge normals despite identical base
+# vertices. Reuse the original data/material/modifier stack for scoped repairs.
+if proof_context.get("reuse_protected_geometry"):
+    if set(baseline_signatures) != set(protected_names):
+        raise RuntimeError("Protected baseline objects are missing; scoped repair cannot proceed.")
+    for obj in list(objects):
+        if obj.name in protected_names:
+            objects.remove(obj)
+            bpy.data.objects.remove(obj, do_unlink=True)
+    with bpy.data.libraries.load(proof_context["baseline_blend_path"], link=False) as (data_from, data_to):
+        data_to.objects = list(protected_names)
+    for name, obj in zip(protected_names, data_to.objects):
+        if obj is None or obj.type != "MESH":
+            raise RuntimeError("Protected baseline mesh could not be restored.")
+        bpy.context.scene.collection.objects.link(obj)
+        obj.name = name
+        obj.parent = None
+        obj.matrix_world = Matrix(baseline_matrices[name])
+        objects.append(obj)
+    bpy.context.view_layer.update()
+
 points = []
 for obj in objects:
     points.extend(obj.matrix_world @ Vector(corner) for corner in obj.bound_box)
@@ -373,6 +400,13 @@ for name, position in views.items():
     bpy.ops.render.render(write_still=True)
     rendered.append(path)
 
+# Attest the authoritative Blender artifact BEFORE exporters touch temporary
+# evaluated meshes/depsgraph caches. Export-side transient evaluations can differ
+# from the geometry actually saved in the candidate .blend.
+bpy.context.view_layer.update()
+candidate_signatures = {
+    obj.name: geometry_signature(obj) for obj in objects if obj.name in protected_names
+}
 bpy.ops.wm.save_as_mainfile(filepath=BLEND)
 
 # Export only authored model objects; exclude cameras and presentation base.
@@ -421,10 +455,6 @@ qa = {
     "note": "Generic blockout QA. Multi-object scenes require a deliberate union/repair pass before printing.",
 }
 if proof_context:
-    bpy.context.view_layer.update()
-    candidate_signatures = {
-        obj.name: geometry_signature(obj) for obj in objects if obj.name in protected_names
-    }
     matched = [name for name in protected_names if name in baseline_signatures
                and baseline_signatures[name] == candidate_signatures.get(name)]
     qa["protected_part_proof"] = {
@@ -433,7 +463,8 @@ if proof_context:
         "matched_object_names": matched,
         "baseline_signatures": baseline_signatures,
         "candidate_signatures": candidate_signatures,
-        "method": "Blender evaluated mesh vertices, topology, world matrices and material diffuse colors",
+        "method": "Blender evaluated mesh vertices, topology, world matrices and material diffuse colors "
+                  "at candidate blend save, before exports",
     }
 Path(QA_PATH).write_text(json.dumps(qa, indent=2), encoding="utf-8")
 

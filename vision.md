@@ -1,5 +1,26 @@
 # Vision: Iterative Visual 3D Agent
 
+## Freeze evaluated protected parts during repair — October 11, 2026
+
+- #138 merged/deployed as `e10a62af67def7893e91acd75563447e73edf2e2`;
+  CI and deployment `38089017979` passed; live health confirmed. Scoped proof
+  correctly refused v38 housing: base topology/transforms match but evaluated
+  runtime post-export hashes differed, while bottom cap matched. Reopening the
+  saved artifacts confirmed housing surfaces remained identical. No failed proof
+  was overridden; it was captured at the wrong lifecycle stage.
+- Exporters can alter temporary evaluated meshes/depsgraph caches. Proof now
+  snapshots the geometry being saved BEFORE export, rather than transient state.
+  Reconstructed SceneSpecs also cannot guarantee identical evaluated modifier output.
+  Scoped repair now imports the actual protected mesh objects/materials/modifiers
+  from the accepted baseline blend and restores their original world matrices.
+  Only AI-selected repair parts are rebuilt; independent signatures still verify
+  the result and visual/physical QA remain strict. No subject-specific geometry.
+- Python: 276 tests, Ruff/compile pass. Real Blender regression compares unchanged,
+  deliberately changed, and frozen-source restored parts with render/export QA.
+  The downloaded real v21 protected housing/cap also pass exact evaluated proof
+  when restored and measured before export; no coordinate tolerance was relaxed.
+  Resume downrod repair from v21 after deployment; inspect proof and final gate.
+
 ## Scoped repair mesh proof — October 11, 2026
 
 - #137 merged/deployed as `b16c2ec283b3ff1f51aa15f94e08fcb606062cb3` (deployment

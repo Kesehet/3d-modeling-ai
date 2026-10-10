@@ -90,6 +90,20 @@ def main():
         "objects": [{"name": "part", "shape": "cube", "location": [0, 0, 0],
                      "scale": [0.3, 0.3, 0.3], "color": "#567890"}],
     }})
+    for changed in (False, True):
+        run(root, "scoped_proof_changed" if changed else "scoped_proof_unchanged", generic_scene_script() + r"""
+proof = qa["protected_part_proof"]
+assert proof["verified"] is args["expected_preserved"], proof
+""", {
+            "spec": {"title": "Local repair proof", "presentation_base": False, "objects": [
+                {"name": "part", "shape": "cube", "location": [0,0,0],
+                 "scale": [.5,.3,.3] if changed else [.3,.3,.3], "color": "#567890"},
+                {"name": "new_contact", "shape": "cube", "location": [1,0,0], "scale": [.1,.1,.1]},
+            ]},
+            "preservation_context": {"baseline_blend_path": str(child / "model-v1.blend"),
+                                     "protected_object_names": ["part"]},
+            "expected_preserved": not changed,
+        })
     run(root, "assembly", component_assembly_script(), {
         "parent_blend_path": str(parent / "model-v1.blend"),
         "component_blend_path": str(child / "model-v1.blend"), "component_name": "part",

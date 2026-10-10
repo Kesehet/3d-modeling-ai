@@ -6,12 +6,13 @@ the supported operations; it does not execute model-generated Python.
 
 from __future__ import annotations
 
+from .geometry_proof import geometry_signature_script
 from .mesh_parts import mesh_part_script
 from .rendering import camera_framing_script
 
 
 def generic_scene_script() -> str:
-    return mesh_part_script() + r'''
+    return mesh_part_script() + geometry_signature_script() + r'''
 import bmesh
 import bpy
 import json
@@ -25,6 +26,17 @@ BLEND = args["blend_path"]
 EXPORTS = args["exports_dir"]
 QA_PATH = args["qa_path"]
 PREFIX = args.get("prefix", "model-v1")
+proof_context = args.get("preservation_context") or {}
+protected_names = list(proof_context.get("protected_object_names") or [])
+baseline_signatures = {}
+if proof_context.get("baseline_blend_path") and protected_names:
+    bpy.ops.wm.open_mainfile(filepath=proof_context["baseline_blend_path"])
+    bpy.context.view_layer.update()
+    baseline_signatures = {
+        name: geometry_signature(bpy.context.scene.objects[name])
+        for name in protected_names if name in bpy.context.scene.objects
+    }
+    bpy.ops.wm.read_factory_settings(use_empty=True)
 
 Path(OUT).mkdir(parents=True, exist_ok=True)
 Path(EXPORTS).mkdir(parents=True, exist_ok=True)
@@ -408,6 +420,21 @@ qa = {
     "print_ready": bool(len(objects) == 1 and non_manifold == 0 and loose_vertices == 0),
     "note": "Generic blockout QA. Multi-object scenes require a deliberate union/repair pass before printing.",
 }
+if proof_context:
+    bpy.context.view_layer.update()
+    candidate_signatures = {
+        obj.name: geometry_signature(obj) for obj in objects if obj.name in protected_names
+    }
+    matched = [name for name in protected_names if name in baseline_signatures
+               and baseline_signatures[name] == candidate_signatures.get(name)]
+    qa["protected_part_proof"] = {
+        **proof_context,
+        "verified": bool(protected_names) and len(matched) == len(protected_names),
+        "matched_object_names": matched,
+        "baseline_signatures": baseline_signatures,
+        "candidate_signatures": candidate_signatures,
+        "method": "Blender evaluated mesh vertices, topology, world matrices and material diffuse colors",
+    }
 Path(QA_PATH).write_text(json.dumps(qa, indent=2), encoding="utf-8")
 
 __result__ = {

@@ -24,6 +24,7 @@ from .artifacts import require_unused_version, reserve_model_version
 from .builders import pikachu_script
 from .cage_edits import CageEditAction, apply_cage_edit_action
 from .component_assembly import component_assembly_script
+from .component_direction import required_taper_direction, reverse_failed_axis_contract
 from .config import (
     AUTO_IMPROVE_ROUND_TIMEOUT_SECONDS,
     JOBS_ROOT,
@@ -2638,6 +2639,18 @@ async def _plan_component_assembly(
         parent_root, feature_task.id, parent_version
     )
     rejected_version = rejected_installation.get("candidate_version")
+    rejected_assembly = rejected_installation.get("assembly") or {}
+    measured_taper = (
+        _verified_repeated_component_profile(
+            parent_root, feature_task.id, parent_version, rejected_version
+        ) if isinstance(rejected_version, int) else {"verified": False}
+    )
+    taper_requirement = required_taper_direction(feature_task.acceptance_criteria)
+    proven_direction = (
+        measured_taper["measurements"][0]["direction"]
+        if measured_taper.get("verified") and measured_taper.get("all_same_direction")
+        else None
+    )
 
     image_paths: list[Path] = []
     for record in _usable_reference_index(parent_root)[-2:]:

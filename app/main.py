@@ -1183,6 +1183,31 @@ def _enforce_procedural_feature_contract(
     return GenericSceneSpec.model_validate(payload)
 
 
+def _scope_parent_scene_revision(
+    current: GenericSceneSpec, proposed: dict, editable_names: object,
+) -> GenericSceneSpec:
+    """An explicit repair scope cannot silently rewrite unrelated accepted parts."""
+    existing = {item.name: item for item in current.objects}
+    if (not isinstance(editable_names, list) or not editable_names
+            or any(not isinstance(name, str) or name not in existing for name in editable_names)):
+        raise ValueError("Parent repair requires explicit existing editable_object_names.")
+    editable = set(editable_names)
+    locked = set(existing) - editable
+    payload = dict(proposed)
+    payload["objects"] = (
+        [item.model_dump() for name, item in existing.items() if name in locked]
+        + [item for item in proposed.get("objects", []) if item.get("name") not in locked]
+    )
+    # Preserve subtractive details on locked objects too. A replacement scene
+    # that drops its cutters would silently fill previously accepted openings.
+    payload["cutters"] = (
+        [item.model_dump() for item in current.cutters if item.target in locked]
+        + [item for item in proposed.get("cutters", []) if item.get("target") not in locked]
+    )
+    payload["presentation_base"] = current.presentation_base
+    return GenericSceneSpec.model_validate(payload)
+
+
 def _generic_scene_llm_schema() -> dict:
     """Compact transport schema; full geometry validation stays in GenericSceneSpec."""
     return {
@@ -11522,15 +11547,32 @@ async def refine_generic_scene(job_id: str, request: GenericRefineRequest) -> di
         )
         revised, selected_model, errors = None, None, []
         client = OllamaProxyClient()
+        scoped_repair = _assembly_repair_forces_feature_edit(_read_status(root), feature_task)
+        revision_schema = _generic_scene_llm_schema()
+        if scoped_repair:
+            revision_schema["properties"]["editable_object_names"] = {
+                "type": "array", "minItems": 1,
+                "items": {"type": "string", "enum": [item.name for item in current_spec.objects]},
+            }
+            revision_schema["required"].append("editable_object_names")
+            prompt += (
+                "\nSCOPED PARENT REPAIR: return editable_object_names selecting ONLY existing objects owned "
+                "by the ACTIVE FEATURE that need this repair. Use their exact existing names for replacements. "
+                "Other existing objects and their cutters are frozen by code; do not select another accepted "
+                "feature's objects to simplify the scene. You may add new local contact geometry. "
+                "An editable object omitted from objects is explicitly removed; locked objects remain unchanged."
+            )
         for candidate_model in (REASONING_MODEL, *VISION_MODELS):
             try:
                 result = await client.chat_json(
                     model=candidate_model, system=system, prompt=prompt,
                     images=(images or None) if candidate_model in VISION_MODELS else None,
-                    schema=_generic_scene_llm_schema(), temperature=0.0, num_predict=8192,
+                    schema=revision_schema, temperature=0.0, num_predict=8192,
                 )
-                revised = GenericSceneSpec.model_validate(
-                    _normalize_scene_spec_payload(result.data, current_spec.title)
+                scene_payload = _normalize_scene_spec_payload(result.data, current_spec.title)
+                revised = (
+                    _scope_parent_scene_revision(current_spec, scene_payload, result.data.get("editable_object_names"))
+                    if scoped_repair else GenericSceneSpec.model_validate(scene_payload)
                 )
                 revised = _enforce_procedural_feature_contract(
                     current_spec,

@@ -109,3 +109,40 @@ def test_marginal_visual_failure_allows_one_same_strategy_retry():
     )
     assert severe is False
     assert score == 0.45
+
+
+def test_scoped_parent_repair_preserves_omitted_and_rewritten_locked_parts():
+    from app.main import GenericSceneSpec, _scope_parent_scene_revision
+
+    current = GenericSceneSpec.model_validate({
+        "title": "Parent", "presentation_base": False,
+        "objects": [
+            {"name": "body", "shape": "cube", "location": [0,0,0], "dimensions": [2,2,2]},
+            {"name": "support", "shape": "cylinder", "location": [0,0,2], "dimensions": [.2,.2,2]},
+            {"name": "trim", "shape": "cube", "location": [0,0,-1], "dimensions": [1,1,.1]},
+        ],
+        "cutters": [{"name": "opening", "target": "body", "shape": "cube",
+                     "location": [0,0,0], "dimensions": [.5,.5,3]}],
+    })
+    proposed = {
+        "title": "Repair", "presentation_base": True,
+        "objects": [
+            {"name": "body", "shape": "sphere", "location": [10,0,0], "dimensions": [10,10,10]},
+            {"name": "support", "shape": "cylinder", "location": [0,0,1.5], "dimensions": [.3,.3,1]},
+            {"name": "contact", "shape": "cube", "location": [0,0,1], "dimensions": [.4,.4,.2]},
+        ], "cutters": [],
+    }
+    result = _scope_parent_scene_revision(current, proposed, ["support"])
+    by_name = {obj.name: obj for obj in result.objects}
+    assert by_name["body"] == current.objects[0]  # Malicious/accidental rewrite discarded.
+    assert by_name["trim"] == current.objects[2]  # Omission never deletes accepted parts.
+    assert by_name["support"].dimensions == [.3,.3,1]
+    assert "contact" in by_name
+    assert result.cutters == current.cutters
+    assert result.presentation_base is False
+    removed = _scope_parent_scene_revision(current, {"title":"Removal", "objects":[]}, ["support"])
+    assert {obj.name for obj in removed.objects} == {"body", "trim"}
+    for invalid in (None, [], ["unknown"], [12]):
+        with pytest.raises(ValueError, match="editable_object_names"):
+            _scope_parent_scene_revision(current, proposed, invalid)
+    assert current.objects[0].dimensions == [2,2,2]

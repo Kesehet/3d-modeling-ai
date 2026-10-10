@@ -1,5 +1,24 @@
 # Vision: Iterative Visual 3D Agent
 
+## Scoped parent repair — October 11, 2026
+
+- #135 merged as `0a5c586fc89a96d0b8cb920cd1f091dddcf57569`; CI and VPS deploy
+  `38087382258` passed. Health confirmed that revision. Recovery v31 installed
+  all three blades successfully: strict QA confirms outward widening (~1.97x),
+  visible pitch and clean edges; protected parent audit passed.
+- Whole-model repair then targeted canopy/downrod contact. v32-v34 were rejected
+  because complete replacement SceneSpecs dropped/rewrote accepted housing and
+  sockets. Parent v21 was preserved. Downrod now failed after three attempts;
+  blade accepted, optional seams blocked. Model is NOT release-ready.
+- Scoped repair follow-up requires AI-authored exact editable_object_names from
+  current SceneSpec. Code freezes all other objects and their cutters, including
+  omitted ones; explicit selected-part removal and new contact geometry remain
+  supported. Strict feature/preservation/final QA remain mandatory.
+- Regression proves frozen omitted/rewritten parts and cutters survive, active
+  edits/removal work, invalid scopes fail, and input specs remain unchanged.
+  Python/Ruff/compile validation passes. Deploy and retry downrod from preserved
+  v21, then reinstall frozen blade and run final integrity. Do not invent success.
+
 ## Measured assembly retry feedback — October 11, 2026
 
 - Main `a42b1d5` (#134) is deployed; live health confirmed it. It grounds strict

@@ -6546,6 +6546,129 @@ async def _evaluate_protected_feature_preservation(
     return payload
 
 
+def _focused_feature_adjudication_accepts(
+    feature_task: FeatureTask,
+    reports: list[dict],
+    *,
+    reference_match_required: bool,
+) -> bool:
+    """Never overturn strict feature QA without two distinct passing vision models."""
+    if len(reports) != 2 or len({report.get("model") for report in reports}) != 2:
+        return False
+    for report in reports:
+        evaluation = report.get("evaluation")
+        if not isinstance(evaluation, dict):
+            return False
+        if not _feature_evaluation_accepts(
+            feature_task,
+            {**evaluation, "reference_match_required": reference_match_required},
+        ):
+            return False
+    return True
+
+
+async def _focused_repeated_feature_adjudication(
+    job_id: str,
+    feature_task: FeatureTask,
+    *,
+    reference_paths: list[Path],
+    candidate_paths: list[Path],
+    reference_match_required: bool,
+    candidate_version: int,
+    exact_prompt: str,
+) -> dict:
+    """Recheck disputed repeated geometry with clear, candidate-first plan views.
+
+    Deliberately cannot bypass any preservation audit. A lone second opinion
+    only supplies diagnosis; two *different* models must agree to accept.
+    """
+    root = _require_job(job_id)
+    selected = [
+        path for path in candidate_paths
+        if path.name.endswith(("-top.png", "-front-left.png", "-back-right.png"))
+    ]
+    model_names = tuple(dict.fromkeys(VISION_MODELS))[:2]
+    if not any(path.name.endswith("-top.png") for path in selected) or len(model_names) != 2:
+        return {"accepted": False, "reason": "Plan view or two distinct vision models unavailable.", "reviews": []}
+
+    image_paths = selected + reference_paths[-2:]
+    labels = [f"candidate/{path.name}" if path in selected else f"reference/{path.name}" for path in image_paths]
+    images = _encode_vision_images(image_paths)
+    system = (
+        "You are an independent strict geometry reviewer, adjudicating ONE previously disputed feature. "
+        "Evaluate only the stated acceptance criteria, never the general recognizability of an unfinished object. "
+        "The candidate's TOP orthographic image is FIRST. Before deciding a directional shape claim, identify "
+        "the physical attachment/root and the distal/free end using their contact to the supporting assembly. "
+        "Compare widths PERPENDICULAR to the actual part's long axis at both ends. Do not confuse image "
+        "left/right, rotation, or the end closest to a picture edge with physical root/end. Evaluate actual "
+        "candidate pixels, not labels or assumptions from previous QA. Use obliques to check pitch, contact and "
+        "depth; top view alone cannot demonstrate twist or attachment contact. If attachment or dimensions "
+        "cannot be established visually, reject with a concrete uncertainty. Do not hallucinate measured precision. "
+        "The user request and criteria govern; automatically researched category reference images are illustrative "
+        "rather than exact identity constraints. All criteria must be visibly supported; never approve an ambiguous "
+        "or regressed model. Return strict JSON matching the supplied FeatureEvaluation schema."
+    )
+    prompt = (
+        f"USER REQUEST: {exact_prompt}\n"
+        f"ACTIVE FEATURE: {json.dumps(feature_task.model_dump(), ensure_ascii=False)}\n"
+        f"IMAGE LABELS IN ORDER: {labels}\n"
+        f"REFERENCE ROLE: {'AUTHORITATIVE' if reference_match_required else 'GENERIC CONTEXT'}\n"
+        f"CANDIDATE VERSION: {candidate_version}\n"
+        "For every acceptance criterion, determine what is actually visible in the candidate, with root/distal "
+        "landmarks when relevant. Set criteria_satisfied=false for ANY unmet or unverifiable criterion. "
+        "Set regression_detected=true for visible damage to previously accepted geometry. "
+        "Give specific observations in summary/problems rather than a generic style preference."
+    )
+
+    client = OllamaProxyClient()
+    reviews: list[dict] = []
+    for candidate_model in model_names:
+        try:
+            result = await client.chat_json(
+                model=candidate_model, system=system, prompt=prompt,
+                images=images, schema=FeatureEvaluation.model_json_schema(),
+                temperature=0.0, num_predict=3072,
+            )
+            payload = dict(result.data) if isinstance(result.data, dict) else {}
+            for wrapper in ("evaluation", "feature_evaluation", "result"):
+                if isinstance(payload.get(wrapper), dict):
+                    payload = payload[wrapper]
+                    break
+            payload.setdefault("feature_id", feature_task.id)
+            review = FeatureEvaluation.model_validate(payload)
+            if review.feature_id != feature_task.id:
+                raise ValueError("Adjudicator evaluated a different feature.")
+            reviews.append({"model": candidate_model, "evaluation": review.model_dump()})
+        except (OllamaProxyError, httpx.HTTPError, ValidationError, ValueError, TypeError) as exc:
+            reviews.append({"model": candidate_model, "error": str(exc)[:500]})
+
+    accepted = _focused_feature_adjudication_accepts(
+        feature_task, reviews, reference_match_required=reference_match_required
+    )
+    output: dict = {
+        "accepted": accepted,
+        "models": list(model_names),
+        "candidate_version": candidate_version,
+        "images": labels,
+        "reviews": reviews,
+    }
+    _write_llm_log(root, "focused-feature-adjudication", output)
+    append_history(
+        root, "focused_feature_adjudication",
+        feature_id=feature_task.id, candidate_version=candidate_version,
+        accepted=accepted, models=list(model_names),
+    )
+    if accepted:
+        positive = [report["evaluation"] for report in reviews]
+        agreed = dict(positive[0])
+        agreed["confidence"] = min(float(item["confidence"]) for item in positive)
+        agreed["reference_match_score"] = min(float(item["reference_match_score"]) for item in positive)
+        agreed["summary"] = ("Two independent focused visual reviewers agreed: " + agreed["summary"])[:1600]
+        agreed["problems"] = []
+        output["evaluation"] = agreed
+    return output
+
+
 async def _evaluate_feature_candidate(
     job_id: str,
     feature_task: FeatureTask,
@@ -6716,6 +6839,32 @@ async def _evaluate_feature_candidate(
             "reference_match_required": reference_match_required,
             "created_at": datetime.now(UTC).isoformat(),
         }
+        # Orthographic repeated parts can be misjudged when eleven mixed
+        # reference/baseline/candidate images are downscaled together. A strict
+        # failure is only reconsidered with two independent model identities
+        # examining a short candidate-first image pack. Preservation still vetoes.
+        if (
+            feature_task.count > 1
+            and evaluation.regression_detected is False
+            and not _feature_evaluation_accepts(feature_task, response)
+        ):
+            adjudication = await _focused_repeated_feature_adjudication(
+                job_id,
+                feature_task,
+                reference_paths=reference_paths,
+                candidate_paths=candidate_paths,
+                reference_match_required=reference_match_required,
+                candidate_version=candidate_version,
+                exact_prompt=str(job_request.get("prompt") or ""),
+            )
+            response["focused_adjudication"] = {
+                key: value for key, value in adjudication.items() if key != "reviews"
+            }
+            if adjudication.get("accepted") is True:
+                response.update(adjudication["evaluation"])
+                response["model"] = "focused-consensus:" + ",".join(adjudication["models"])
+                response["initial_review_model"] = candidate_model
+
         if baseline_version is not None:
             preservation = await _evaluate_protected_feature_preservation(
                 job_id,

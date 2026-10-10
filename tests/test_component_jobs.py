@@ -1001,3 +1001,46 @@ def test_free_component_alignment_preserves_ai_transforms():
     )
 
     assert result.model_dump() == assembly.model_dump()
+
+
+
+def test_structural_parent_mesh_proof_requires_matching_blender_candidate(tmp_path):
+    root = tmp_path / "job"
+    (root / "scene").mkdir(parents=True)
+    (root / "exports").mkdir()
+    record = {"feature_id": "repeated-panel", "baseline_version": 7, "candidate_version": 8}
+    qa = {
+        "parent_source_blend": str(root / "scene" / "model-v7.blend"),
+        "parent_geometry_preserved": True,
+        "parent_mesh_count": 3,
+        "parent_mesh_signature_sha256": "a" * 64,
+    }
+    (root / "component-assembly-v8.json").write_text(json.dumps(record))
+    (root / "exports" / "model-v8-qa.json").write_text(json.dumps(qa))
+    assert main._verified_component_parent_mesh_proof(
+        root, "repeated-panel", 7, 8
+    )["verified"] is True
+
+    # A proof from the wrong feature, base version or model cannot excuse a
+    # preservation regression. Old Blender jobs without evidence fail closed.
+    for feature_id, baseline, candidate in (
+        ("other-feature", 7, 8),
+        ("repeated-panel", 6, 8),
+        ("repeated-panel", 7, 9),
+    ):
+        assert main._verified_component_parent_mesh_proof(
+            root, feature_id, baseline, candidate
+        ) == {"verified": False}
+    qa["parent_mesh_signature_sha256"] = "malformed"
+    (root / "exports" / "model-v8-qa.json").write_text(json.dumps(qa))
+    assert main._verified_component_parent_mesh_proof(
+        root, "repeated-panel", 7, 8
+    ) == {"verified": False}
+
+
+def test_component_assembler_checks_parent_mesh_invariance_before_export():
+    script = component_assembly_script()
+    assert "parent_signatures = {obj.name: mesh_signature(obj)" in script
+    assert "mesh_signature(obj) != parent_signatures[obj.name]" in script
+    assert '"parent_geometry_preserved": True' in script
+    assert '"parent_mesh_signature_sha256": hashlib.sha256(' in script

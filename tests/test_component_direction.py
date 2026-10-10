@@ -13,12 +13,14 @@ def test_explicit_generic_taper_requirement_not_object_name():
 
 
 def test_proven_bad_radial_direction_is_flipped_before_reassembly():
-    evidence = {\n        "requirement": "widens_outward",
+    evidence = {
+        "requirement": "widens_outward",
         "proven_direction": "narrows_outward",
         "previous_sign": "negative",
         "previous_alignment": "radial",
         "proposed_sign": "negative",
-        "proposed_alignment": "radial",\n    }
+        "proposed_alignment": "radial",
+    }
     assert reverse_failed_axis_contract(**evidence) == "positive"
 
     # Already-corrected AI plans survive, not flipped again.
@@ -35,9 +37,11 @@ def test_proven_bad_radial_direction_is_flipped_before_reassembly():
 
 
 def test_missing_or_ambiguous_evidence_never_changes_orientation():
-    previous = {\n        "requirement": "widens_outward", "proven_direction": "narrows_outward",
+    previous = {
+        "requirement": "widens_outward", "proven_direction": "narrows_outward",
         "previous_sign": "negative", "previous_alignment": "radial",
-        "proposed_sign": "negative", "proposed_alignment": "radial",\n    }
+        "proposed_sign": "negative", "proposed_alignment": "radial",
+    }
     for changes in (
         {"requirement": None},
         {"proven_direction": None},

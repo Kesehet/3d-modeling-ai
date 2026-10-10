@@ -6388,6 +6388,38 @@ def _apply_preservation_audit(evaluation: dict, audit: dict) -> dict:
     return result
 
 
+def _verified_component_parent_mesh_proof(
+    root: Path, feature_id: str, baseline_version: int, candidate_version: int
+) -> dict:
+    """Only trust an exact baseline-bound Blender mesh-preservation attestation."""
+    record = _read_json_if_present(root / f"component-assembly-v{candidate_version}.json")
+    qa = _read_json_if_present(root / "exports" / f"model-v{candidate_version}-qa.json")
+    baseline_blend = str(root / "scene" / f"model-v{baseline_version}.blend")
+    valid = bool(
+        isinstance(record, dict)
+        and isinstance(qa, dict)
+        and record.get("feature_id") == feature_id
+        and record.get("baseline_version") == baseline_version
+        and record.get("candidate_version") == candidate_version
+        and qa.get("parent_source_blend") == baseline_blend
+        and qa.get("parent_geometry_preserved") is True
+        and isinstance(qa.get("parent_mesh_count"), int)
+        and qa["parent_mesh_count"] > 0
+        and isinstance(qa.get("parent_mesh_signature_sha256"), str)
+        and re.fullmatch(r"[0-9a-f]{64}", qa["parent_mesh_signature_sha256"])
+    )
+    if not valid:
+        return {"verified": False}
+    return {
+        "verified": True,
+        "method": "Blender parent-object world matrices, vertex coordinates and polygon indices",
+        "parent_mesh_count": qa["parent_mesh_count"],
+        "parent_mesh_signature_sha256": qa["parent_mesh_signature_sha256"],
+        "baseline_version": baseline_version,
+        "candidate_version": candidate_version,
+    }
+
+
 async def _evaluate_protected_feature_preservation(
     job_id: str,
     active_feature: FeatureTask,
@@ -6458,6 +6490,9 @@ async def _evaluate_protected_feature_preservation(
         for feature in protected
     ]
 
+    parent_mesh_proof = _verified_component_parent_mesh_proof(
+        root, active_feature.id, baseline_version, candidate_version
+    )
     system = (
         "You are an independent regression auditor for an autonomous 3D modeler. "
         "Your ONLY job is to protect geometry that was already visually accepted. "
@@ -6465,11 +6500,18 @@ async def _evaluate_protected_feature_preservation(
         "Do not reward improvements to the active feature and do not judge whole-object completeness. "
         "Expected localized changes explicitly required by the active feature are allowed, but unrelated removal, opening, "
         "flattening, clipping, relocation, scale changes, silhouette damage, or loss of previously accepted surfaces is a regression. "
-        "When uncertain about substantial damage, set preserved=false. Return JSON only matching the schema."
+        "When uncertain about substantial damage, set preserved=false. "
+        "If Blender supplied a VERIFIED unchanged-parent-mesh proof, the old parent mesh objects, transforms "
+        "and topology were demonstrably not deleted or moved by the candidate assembly. Do NOT claim they "
+        "were removed merely because a changed camera view or newly installed part hides them. However, "
+        "new component geometry can still visibly OCCLUDE, intersect, disconnect or damage physical contacts; "
+        "fail for those defects with specific visual evidence. An unverified proof provides no assurance. "
+        "Return JSON only matching the schema."
     )
     prompt = (
         f"ACTIVE FEATURE: {json.dumps(active_feature.model_dump(), ensure_ascii=False)}\n"
         f"PROTECTED ACCEPTED FEATURES: {json.dumps(protected_context, ensure_ascii=False)}\n"
+        f"BLENDER PARENT MESH INVARIANCE EVIDENCE: {json.dumps(parent_mesh_proof)}\n"
         f"Images in order: BASELINE v{baseline_version} {list(views)}, then CANDIDATE v{candidate_version} {list(views)}.\n"
         f"Image labels: {labels}\n"
         "Judge preservation only. damaged_feature_ids must contain only IDs from PROTECTED ACCEPTED FEATURES."
@@ -6504,6 +6546,7 @@ async def _evaluate_protected_feature_preservation(
             "candidate_version": candidate_version,
             "active_feature_id": active_feature.id,
             "protected_feature_ids": sorted(protected_ids),
+            "parent_mesh_proof": parent_mesh_proof,
             "images": labels,
             "created_at": datetime.now(UTC).isoformat(),
         }
@@ -6531,6 +6574,7 @@ async def _evaluate_protected_feature_preservation(
         "candidate_version": candidate_version,
         "active_feature_id": active_feature.id,
         "protected_feature_ids": sorted(protected_ids),
+        "parent_mesh_proof": parent_mesh_proof,
     }
     _write_llm_log(root, "protected-geometry-audit", payload)
     append_history(

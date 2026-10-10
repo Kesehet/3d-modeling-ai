@@ -251,6 +251,39 @@ def test_relative_improvement_does_not_keep_regressing_feature_draft():
 
 
 
+def test_repeated_component_qa_includes_plan_view_without_declared_symmetry():
+    # A feature planner may leave symmetry as 'none' even when the later
+    # assembly uses exact radial placement; the QA must still see the outline.
+    for symmetry in ("none", "radial"):
+        task = FeatureTask(
+            id="repeated-panel",
+            name="Repeated tapered panel",
+            count=3,
+            build_mode="component_job",
+            strategy="mixed",
+            symmetry=symmetry,
+            acceptance_criteria=[
+                "Three identical panels spaced evenly",
+                "Each panel widens toward its free end",
+            ],
+        )
+        assert _feature_diagnostic_views(task) == (
+            "top", "front-left", "left", "back-right"
+        )
+
+
+def test_single_feature_without_planar_criteria_keeps_oblique_qa_views():
+    task = FeatureTask(
+        id="single-insert",
+        name="Small insert",
+        count=1,
+        strategy="attachment",
+        symmetry="none",
+    )
+    assert _feature_diagnostic_views(task) == ("front-left", "left", "back-right")
+
+
+
 def test_bilateral_shape_feature_qa_includes_top_view():
     task = FeatureTask(
         id="symmetric-panel",

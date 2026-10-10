@@ -1,5 +1,22 @@
 # Vision: Iterative Visual 3D Agent
 
+## Scoped repair mesh proof — October 11, 2026
+
+- #137 merged/deployed as `b16c2ec283b3ff1f51aa15f94e08fcb606062cb3` (deployment
+  `38088299728` passed; health confirmed). Scoped v35 retained motor_housing and
+  bottom_hub_cap, but visual preservation QA falsely claimed the housing vanished.
+- Real Blender inspection of downloaded v21/v35 proves matching world matrices,
+  vertex coordinates and polygon indices for both objects. Housing digest:
+  `2aac2e160b97fa73c55a2bb9d4993147d45cab6682f3236ccc815d73a71993b8`.
+  Frozen geometry is intact; rejection is not evidence of deletion.
+- Follow-up measures evaluated Blender geometry/topology/world matrices/diffuse
+  materials for selected protected names from the exact baseline and candidate.
+  Review receives provenance-bound scoped proof. Only named objects are proven;
+  occlusion/intersection/contact and unlisted parts still require independent QA.
+- Python: 276 tests, Ruff/compile pass. Real Blender cases verify unchanged versus
+  deliberately scaled protected geometry. Deploy, requeue downrod from v21 and
+  repeat final whole-object integrity. No full release success is claimed yet.
+
 ## Scoped parent repair — October 11, 2026
 
 - #135 merged as `0a5c586fc89a96d0b8cb920cd1f091dddcf57569`; CI and VPS deploy

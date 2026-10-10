@@ -146,3 +146,28 @@ def test_scoped_parent_repair_preserves_omitted_and_rewritten_locked_parts():
         with pytest.raises(ValueError, match="editable_object_names"):
             _scope_parent_scene_revision(current, proposed, invalid)
     assert current.objects[0].dimensions == [2,2,2]
+
+
+def test_scoped_part_proof_requires_exact_mesh_digests_and_version_binding(tmp_path):
+    import json
+
+    from app.main import _verified_scoped_part_proof
+
+    (tmp_path / "exports").mkdir()
+    path = tmp_path / "exports" / "model-v8-qa.json"
+    proof = {
+        "verified": True, "feature_id": "support", "baseline_version": 7, "candidate_version": 8,
+        "baseline_blend_path": str(tmp_path / "scene" / "model-v7.blend"),
+        "protected_object_names": ["body"],
+        "baseline_signatures": {"body": "a" * 64}, "candidate_signatures": {"body": "a" * 64},
+    }
+    path.write_text(json.dumps({"protected_part_proof": proof}))
+    assert _verified_scoped_part_proof(tmp_path, "support", 7, 8)["verified"] is True
+    assert _verified_scoped_part_proof(tmp_path, "other", 7, 8) == {"verified": False}
+    assert _verified_scoped_part_proof(tmp_path, "support", 6, 8) == {"verified": False}
+    assert _verified_scoped_part_proof(tmp_path, "support", 7, 9) == {"verified": False}
+    for field, value in (("candidate_signatures", {"body": "b" * 64}),
+                         ("protected_object_names", ["missing"]), ("baseline_blend_path", "wrong"),
+                         ("baseline_signatures", {"body": "malformed"}), ("candidate_signatures", [])):
+        path.write_text(json.dumps({"protected_part_proof": {**proof, field: value}}))
+        assert _verified_scoped_part_proof(tmp_path, "support", 7, 8) == {"verified": False}

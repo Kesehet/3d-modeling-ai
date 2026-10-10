@@ -6450,6 +6450,32 @@ def _apply_preservation_audit(evaluation: dict, audit: dict) -> dict:
     return result
 
 
+def _verified_scoped_part_proof(root: Path, feature_id: str, baseline: int, candidate: int) -> dict:
+    qa = _read_json_if_present(root / "exports" / f"model-v{candidate}-qa.json") or {}
+    proof = qa.get("protected_part_proof") or {}
+    if not isinstance(proof, dict):
+        return {"verified": False}
+    names = proof.get("protected_object_names") or []
+    before = proof.get("baseline_signatures") or {}
+    after = proof.get("candidate_signatures") or {}
+    if not isinstance(before, dict) or not isinstance(after, dict):
+        return {"verified": False}
+    if not (
+        proof.get("verified") is True
+        and proof.get("feature_id") == feature_id
+        and proof.get("baseline_version") == baseline
+        and proof.get("candidate_version") == candidate
+        and proof.get("baseline_blend_path") == str(root / "scene" / f"model-v{baseline}.blend")
+        and isinstance(names, list) and bool(names)
+        and all(isinstance(name, str) and isinstance(before.get(name), str)
+                and re.fullmatch(r"[0-9a-f]{64}", before[name])
+                and before[name] == after.get(name) for name in names)
+    ):
+        return {"verified": False}
+    return {"verified": True, "object_names": names, "baseline_version": baseline,
+            "candidate_version": candidate, "method": proof.get("method")}
+
+
 def _verified_component_parent_mesh_proof(
     root: Path, feature_id: str, baseline_version: int, candidate_version: int
 ) -> dict:
@@ -6631,6 +6657,7 @@ async def _evaluate_protected_feature_preservation(
     parent_mesh_proof = _verified_component_parent_mesh_proof(
         root, active_feature.id, baseline_version, candidate_version
     )
+    scoped_part_proof = _verified_scoped_part_proof(root, active_feature.id, baseline_version, candidate_version)
     system = (
         "You are an independent regression auditor for an autonomous 3D modeler. "
         "Your ONLY job is to protect geometry that was already visually accepted. "
@@ -6644,12 +6671,17 @@ async def _evaluate_protected_feature_preservation(
         "were removed merely because a changed camera view or newly installed part hides them. However, "
         "new component geometry can still visibly OCCLUDE, intersect, disconnect or damage physical contacts; "
         "fail for those defects with specific visual evidence. An unverified proof provides no assurance. "
+        "A VERIFIED SCOPED PART PROOF likewise proves unchanged evaluated geometry/world placement for ONLY "
+        "its listed exact object names, including their modifiers. Do not claim those named parts were deleted "
+        "or reshaped from perspective alone. Unlisted objects remain unproven, and new occlusion, intersection "
+        "and contact defects still require independent rejection. "
         "Return JSON only matching the schema."
     )
     prompt = (
         f"ACTIVE FEATURE: {json.dumps(active_feature.model_dump(), ensure_ascii=False)}\n"
         f"PROTECTED ACCEPTED FEATURES: {json.dumps(protected_context, ensure_ascii=False)}\n"
         f"BLENDER PARENT MESH INVARIANCE EVIDENCE: {json.dumps(parent_mesh_proof)}\n"
+        f"BLENDER SCOPED PART PROOF: {json.dumps(scoped_part_proof)}\n"
         f"Images in order: BASELINE v{baseline_version} {list(views)}, then CANDIDATE v{candidate_version} {list(views)}.\n"
         f"Image labels: {labels}\n"
         "Judge preservation only. damaged_feature_ids must contain only IDs from PROTECTED ACCEPTED FEATURES."
@@ -6685,6 +6717,7 @@ async def _evaluate_protected_feature_preservation(
             "active_feature_id": active_feature.id,
             "protected_feature_ids": sorted(protected_ids),
             "parent_mesh_proof": parent_mesh_proof,
+            "scoped_part_proof": scoped_part_proof,
             "images": labels,
             "created_at": datetime.now(UTC).isoformat(),
         }
@@ -7377,6 +7410,7 @@ async def _execute_generic_spec(
     *,
     version: int,
     activate_status: bool = True,
+    preservation_context: dict | None = None,
 ) -> dict:
     root = _require_job(job_id)
     require_unused_version(root, version)
@@ -7396,6 +7430,7 @@ async def _execute_generic_spec(
                 "exports_dir": str(root / "exports"),
                 "qa_path": str(qa_path),
                 "prefix": prefix,
+                "preservation_context": preservation_context,
             },
             "transport": "headless",
             "factory_startup": True,
@@ -11596,7 +11631,18 @@ async def refine_generic_scene(job_id: str, request: GenericRefineRequest) -> di
             break
         previous = _read_status(root)
         version = reserve_model_version(root)
-        build = await _execute_generic_spec(job_id, revised, version=version, activate_status=False)
+        preservation_context = None
+        if scoped_repair:
+            editable_names = set(result.data["editable_object_names"])
+            preservation_context = {
+                "baseline_blend_path": str(root / "scene" / f"model-v{current_version}.blend"),
+                "baseline_version": current_version, "candidate_version": version,
+                "feature_id": feature_task.id,
+                "protected_object_names": [item.name for item in current_spec.objects if item.name not in editable_names],
+            }
+        build = await _execute_generic_spec(
+            job_id, revised, version=version, activate_status=False, preservation_context=preservation_context,
+        )
         result = await _review_procedural_candidate(job_id, build, previous, feature_task)
         append_history(root, "agent_revision", version=version, model=selected_model,
                        object_count=len(revised.objects), kept=result["kept"])

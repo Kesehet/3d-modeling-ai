@@ -1,3 +1,4 @@
+import ast
 import json
 
 import pytest
@@ -1044,3 +1045,117 @@ def test_component_assembler_checks_parent_mesh_invariance_before_export():
     assert "mesh_signature(obj) != parent_signatures[obj.name]" in script
     assert '"parent_geometry_preserved": True' in script
     assert '"parent_mesh_signature_sha256": hashlib.sha256(' in script
+
+
+
+def _mesh_section_measurement():
+    # Load just the pure numeric section function from the generated Blender
+    # runtime script. Tests exercise the very same implementation deployed.
+    script = ast.parse(component_assembly_script())
+    function = next(
+        node for node in script.body
+        if isinstance(node, ast.FunctionDef) and node.name == "cross_section_profile"
+    )
+    scope = {}
+    exec(compile(ast.Module(body=[function], type_ignores=[]), "mesh-profile", "exec"), scope)
+    return scope["cross_section_profile"]
+
+
+def _tapered_prism_mesh():
+    # Only 8 vertices, no intermediate width samples: cross-sections must
+    # intersect actual mesh edges rather than binning nearby vertex positions.
+    # Positive Y is the narrow root; negative Y is the wide distal end.
+    vertices = []
+    for y, half_width in ((1.0, 0.10), (-1.0, 0.35)):
+        for z in (-0.05, 0.05):
+            for x in (-half_width, half_width):
+                vertices.append((x, y, z))
+    edges = []
+    for layer in (0, 4):
+        edges.extend((layer + a, layer + b) for a,b in ((0,1),(2,3),(0,2),(1,3)))
+    edges.extend((i, i+4) for i in range(4))
+    return vertices, edges
+
+
+def test_blender_mesh_sections_detect_taper_from_sparse_real_edges():
+    calculate = _mesh_section_measurement()
+    vertices, edges = _tapered_prism_mesh()
+    outward = calculate(
+        vertices, edges, longitudinal_axis=1, width_axis=0, outward_sign=-1
+    )
+    assert outward["measured"] is True
+    assert outward["direction"] == "widens_outward"
+    assert outward["distal_to_root_ratio"] > 1.7
+    assert outward["root_width"] < outward["distal_width"]
+
+    inward = calculate(
+        vertices, edges, longitudinal_axis=1, width_axis=0, outward_sign=1
+    )
+    assert inward["direction"] == "narrows_outward"
+    assert inward["root_width"] > inward["distal_width"]
+
+
+def test_blender_section_profile_fails_closed_for_ambiguous_geometry():
+    calculate = _mesh_section_measurement()
+    vertices, edges = _tapered_prism_mesh()
+    assert calculate(vertices, [], longitudinal_axis=1, width_axis=0, outward_sign=-1)["measured"] is False
+    assert calculate(vertices, edges, longitudinal_axis=1, width_axis=1, outward_sign=-1)["measured"] is False
+    assert calculate(vertices, edges, longitudinal_axis=1, width_axis=0, outward_sign=0)["measured"] is False
+    assert calculate([(0,0,0),(1,0,0)], [(0,1)], longitudinal_axis=1, width_axis=0, outward_sign=1)["measured"] is False
+
+
+def _signed_profile_payload(root, *, candidate=5, baseline=4):
+    (root / "exports").mkdir(parents=True, exist_ok=True)
+    (root / "scene").mkdir(parents=True, exist_ok=True)
+    record = {
+        "feature_id": "repeated-part", "candidate_version": candidate,
+        "baseline_version": baseline,
+        "assembly": {"long_axis_sign": "negative", "instances": [{}, {}, {}]},
+    }
+    profile = {
+        "measured": True,
+        "method": "mesh_edge_intersections_at_20_and_80_percent_of_signed_longitudinal_extent",
+        "root_width": 0.2, "distal_width": 0.48, "distal_to_root_ratio": 2.4,
+        "direction": "widens_outward", "long_axis": "Y", "width_axis": "X",
+        "radial_alignment_cosine": 0.99,
+    }
+    qa = {
+        "parent_source_blend": str(root / "scene" / f"model-v{baseline}.blend"),
+        "component_source_blend": "/tmp/frozen-child/model-v3.blend",
+        "component_axis_alignment": "radial",
+        "component_long_axis_sign": "negative",
+        "installed_instances": 3,
+        "component_width_profiles": [
+            {**profile, "instance_index": index} for index in (1,2,3)
+        ],
+    }
+    (root / f"component-assembly-v{candidate}.json").write_text(json.dumps(record))
+    (root / "exports" / f"model-v{candidate}-qa.json").write_text(json.dumps(qa))
+    return qa
+
+
+def test_verified_blender_taper_evidence_is_bound_to_assembly_candidate(tmp_path):
+    qa = _signed_profile_payload(tmp_path)
+    evidence = main._verified_repeated_component_profile(
+        tmp_path, "repeated-part", 4, 5
+    )
+    assert evidence["verified"] is True
+    assert evidence["all_same_direction"] is True
+    assert all(row["direction"] == "widens_outward" for row in evidence["measurements"])
+    # Never let another feature, candidate or parent version launder the proof.
+    assert not main._verified_repeated_component_profile(tmp_path, "other", 4, 5)["verified"]
+    assert not main._verified_repeated_component_profile(tmp_path, "repeated-part", 3, 5)["verified"]
+    assert not main._verified_repeated_component_profile(tmp_path, "repeated-part", 4, 6)["verified"]
+
+    qa["component_width_profiles"][1]["radial_alignment_cosine"] = -1.0
+    (tmp_path / "exports" / "model-v5-qa.json").write_text(json.dumps(qa))
+    assert not main._verified_repeated_component_profile(tmp_path, "repeated-part", 4, 5)["verified"]
+
+
+def test_frozen_blender_script_carries_measurements_without_auto_accepting():
+    source = component_assembly_script()
+    assert "cross_section_profile(" in source
+    assert '"component_width_profiles": repeated_profiles' in source
+    assert "radial_alignment_cosine" in source
+    assert "parent_geometry_preserved" in source
+    assert "criteria_satisfied" not in source

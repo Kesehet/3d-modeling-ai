@@ -122,6 +122,41 @@ assert abs(geometry_center_x - 3.0) < 0.001, geometry_center_x
              "vertices": [[-.3,-.2,0],[.3,-.2,0],[.2,.2,0],[-.2,.2,0],
                           [-.3,-.2,.1],[.3,-.2,.1],[.2,.2,.1],[-.2,.2,.1]],
              "faces": [[0,1,2,3],[4,7,6,5],[0,4,5,1],[1,5,6,2],[2,6,7,3],[3,7,4,0]]}
+    profile_child = run(root, "section_profile_child", generic_scene_script() + r"""
+modifier = objects[0].modifiers.new("Measured array", "ARRAY")
+modifier.count = 2
+modifier.use_relative_offset = False
+modifier.use_constant_offset = True
+modifier.constant_offset_displace = (.4, 0, 0)
+bpy.context.view_layer.update()
+bpy.ops.wm.save_as_mainfile(filepath=BLEND)
+""", {"spec": {
+        "title": "Tapered offset panel", "presentation_base": False,
+        "objects": [{**panel, "location": [0, 1, 0], "vertices": [
+            [-.8,0,-.05],[.8,0,-.05],[.3,4,-.05],[-.3,4,-.05],
+            [-.8,0,.05],[.8,0,.05],[.3,4,.05],[-.3,4,.05],
+        ]}],
+    }})
+    run(root, "section_profile_assembly", component_assembly_script() + r"""
+profile = qa["component_width_profiles"][0]
+assert profile["long_axis"] == "Y", profile
+root_widths = [profile["root_width"]]
+distal_widths = [profile["distal_width"]]
+assert abs(root_widths[0] - 2.4) < .001, root_widths
+assert abs(distal_widths[0] - 3.6) < .001, distal_widths
+assert profile["direction"] == "widens_outward", profile
+assert all(p["measured"] and p["direction"] == "widens_outward" for p in qa["component_width_profiles"])
+assert qa["parent_geometry_preserved"] is True
+""", {
+        "parent_blend_path": str(parent / "model-v1.blend"),
+        "component_blend_path": str(profile_child / "model-v1.blend"),
+        "component_name": "measured_panel", "long_axis_sign": "negative", "repeated_axis_alignment": "radial",
+        "instances": [
+            {"location": [5,0,0], "scale": [2,1,3], "rotation_deg": [0,0,90]},
+            {"location": [-2.5,4.330127,0], "scale": [2,1,3], "rotation_deg": [0,0,210]},
+            {"location": [-2.5,-4.330127,0], "scale": [2,1,3], "rotation_deg": [0,0,330]},
+        ],
+    })
     run(root, "mesh_part", generic_scene_script(), {"spec": {
         "title": "Polygon panel", "presentation_base": False, "objects": [panel]}})
     run(root, "cage_panel", hard_surface_cage_script(), {"spec": {**spec, "attachments": [panel]}})

@@ -1,5 +1,28 @@
 # Vision: Iterative Visual 3D Agent
 
+## Measured assembly retry feedback — October 11, 2026
+
+- Main `a42b1d5` (#134) is deployed; live health confirmed it. It grounds strict
+  directional taper QA in signed Blender cross-sections. Parent
+  `eabc4e96-60e0-469e-8582-8a64e2d1cf22` still has four accepted required features.
+- Live v30 was correctly rejected: signed negative-axis installation measured
+  root width 0.48, distal width 0.24 (narrows outward); criterion requires the
+  opposite. Planner incorrectly described the frozen child's end orientation.
+  Preservation passed. No full model or final integrity success is claimed.
+- Follow-up supplies provenance-bound measured profiles in persisted rejected
+  installation context, including after manual resets. Coordinator reasons from
+  measured direction and revisits signed axis/rotation; scaling cannot reverse
+  taper. Frozen geometry and strict QA thresholds are preserved.
+- Measurements now use evaluated Blender meshes including modifiers/curves rather
+  than raw vertices. Full real Blender 4.4.3 integration passed with a tapered
+  offset child, unapplied array modifier, three radial copies, negative local
+  axis, nonuniform scale and rotation; geometry/renders/GLB/OBJ/STL checks passed.
+  Python suite: 271 passed, Ruff/compile passed.
+- A recovery command requeued blade installation from preserved parent v21.
+  Deploy follow-up and resume bounded auto; inspect measured direction and all
+  final physical/visual verdicts. A recovery is not the fresh autonomous release
+  gate; also test a different unseen subject before declaring the project done.
+
 ## Recovery and Boolean shading — October 7, 2026
 
 - PR #124 merged as `aa6cc2474a67dbd381decbdb1d0f55dc9dca17aa`; all CI and

@@ -2587,6 +2587,9 @@ def _last_rejected_component_assembly(
                 "assembly": payload["assembly"],
             }
     if latest:
+        latest["measured_sections"] = _verified_repeated_component_profile(
+            root, feature_id, accepted_parent_version, latest_version
+        )
         # Retry resets can clear the feature's summary. The rejection history is
         # authoritative negative QA evidence and survives those resets.
         for event in reversed(load_history(root)):
@@ -2700,6 +2703,11 @@ async def _plan_component_assembly(
         "Use the failed renders, blocking defects and repair instructions to make a deliberate correction; do not "
         "blindly repeat the old transforms. Location, rotation and instance scale are all available repair controls. "
         "The ordinary FEATURE RETRY QA and last rejected installation are also authoritative NEGATIVE evidence. "
+        "If the rejected installation includes verified measured_sections, use its signed root/distal widths "
+        "to establish taper direction rather than guessing the child's orientation from a thumbnail. "
+        "Positive local scaling changes widths but cannot reverse their ratio. If direction is the defect, "
+        "reconsider long_axis_sign and rotation, then recalculate the origin placement to preserve root contact. "
+        "Unverified measurements are unknown, not permission to infer a direction. "
         "Explicitly compare the previous rejected component dimensions and instance scales against the visible defect. "
         "When the failure names width, length, thickness, or proportions, change the relevant LOCAL AXIS scale "
         "and explain the calculated new dimensions rather than shrinking every axis or repeating failed placement. "

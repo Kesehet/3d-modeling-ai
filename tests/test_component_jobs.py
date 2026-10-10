@@ -1161,3 +1161,21 @@ def test_frozen_blender_script_carries_measurements_without_auto_accepting():
     assert "radial_alignment_cosine" in source
     assert "parent_geometry_preserved" in source
     assert "criteria_satisfied" not in source
+
+
+def test_rejected_assembly_retry_receives_measured_direction_after_reset(tmp_path):
+    _signed_profile_payload(tmp_path)
+    main.append_history(
+        tmp_path, "component_assembly_rejected", feature_id="repeated-part",
+        candidate_version=5, reason="Directional installation defect",
+    )
+    feedback = main._last_rejected_component_assembly(tmp_path, "repeated-part", 4)
+    evidence = feedback["measured_sections"]
+    assert evidence["verified"] is True
+    assert evidence["candidate_version"] == 5
+    assert evidence["measurements"][0]["direction"] == "widens_outward"
+    assert feedback["rejection_reason"] == "Directional installation defect"
+    # Stale parent binding never becomes valid measurement feedback.
+    assert main._last_rejected_component_assembly(
+        tmp_path, "repeated-part", 3
+    )["measured_sections"]["verified"] is False

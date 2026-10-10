@@ -400,6 +400,13 @@ for name, position in views.items():
     bpy.ops.render.render(write_still=True)
     rendered.append(path)
 
+# Attest the authoritative Blender artifact BEFORE exporters touch temporary
+# evaluated meshes/depsgraph caches. Export-side transient evaluations can differ
+# from the geometry actually saved in the candidate .blend.
+bpy.context.view_layer.update()
+candidate_signatures = {
+    obj.name: geometry_signature(obj) for obj in objects if obj.name in protected_names
+}
 bpy.ops.wm.save_as_mainfile(filepath=BLEND)
 
 # Export only authored model objects; exclude cameras and presentation base.
@@ -448,10 +455,6 @@ qa = {
     "note": "Generic blockout QA. Multi-object scenes require a deliberate union/repair pass before printing.",
 }
 if proof_context:
-    bpy.context.view_layer.update()
-    candidate_signatures = {
-        obj.name: geometry_signature(obj) for obj in objects if obj.name in protected_names
-    }
     matched = [name for name in protected_names if name in baseline_signatures
                and baseline_signatures[name] == candidate_signatures.get(name)]
     qa["protected_part_proof"] = {
@@ -460,7 +463,8 @@ if proof_context:
         "matched_object_names": matched,
         "baseline_signatures": baseline_signatures,
         "candidate_signatures": candidate_signatures,
-        "method": "Blender evaluated mesh vertices, topology, world matrices and material diffuse colors",
+        "method": "Blender evaluated mesh vertices, topology, world matrices and material diffuse colors "
+                  "at candidate blend save, before exports",
     }
 Path(QA_PATH).write_text(json.dumps(qa, indent=2), encoding="utf-8")
 

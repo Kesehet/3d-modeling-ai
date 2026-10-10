@@ -1057,7 +1057,9 @@ def _mesh_section_measurement():
         if isinstance(node, ast.FunctionDef) and node.name == "cross_section_profile"
     )
     scope = {}
-    exec(compile(ast.Module(body=[function], type_ignores=[]), "mesh-profile", "exec"), scope)
+    exec(  # noqa: S102 - test-only execution of function AST from our generated script
+        compile(ast.Module(body=[function], type_ignores=[]), "mesh-profile", "exec"), scope
+    )
     return scope["cross_section_profile"]
 
 

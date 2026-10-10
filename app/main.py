@@ -24,6 +24,7 @@ from .artifacts import require_unused_version, reserve_model_version
 from .builders import pikachu_script
 from .cage_edits import CageEditAction, apply_cage_edit_action
 from .component_assembly import component_assembly_script
+from .component_direction import required_taper_direction, reverse_failed_axis_contract
 from .config import (
     AUTO_IMPROVE_ROUND_TIMEOUT_SECONDS,
     JOBS_ROOT,
@@ -2641,6 +2642,13 @@ async def _plan_component_assembly(
         parent_root, feature_task.id, parent_version
     )
     rejected_version = rejected_installation.get("candidate_version")
+    measured_taper = rejected_installation.get("measured_sections") or {}
+    expected_taper_direction = required_taper_direction(feature_task.acceptance_criteria)
+    measured_taper_direction = (
+        measured_taper["measurements"][0]["direction"]
+        if measured_taper.get("verified") and measured_taper.get("all_same_direction")
+        else None
+    )
 
     image_paths: list[Path] = []
     for record in _usable_reference_index(parent_root)[-2:]:
@@ -2790,6 +2798,22 @@ async def _plan_component_assembly(
                 instance.location = [max(-50.0, min(50.0, float(v))) for v in instance.location]
                 instance.rotation_deg = [max(-360.0, min(360.0, float(v))) for v in instance.rotation_deg]
                 instance.scale = [max(0.02, min(20.0, float(v))) for v in instance.scale]
+            previous_assembly = rejected_installation.get("assembly") or {}
+            corrected_sign = reverse_failed_axis_contract(
+                requirement=expected_taper_direction,
+                proven_direction=measured_taper_direction,
+                previous_sign=previous_assembly.get("long_axis_sign"),
+                previous_alignment=previous_assembly.get("repeated_axis_alignment"),
+                proposed_sign=assembly.long_axis_sign,
+                proposed_alignment=assembly.repeated_axis_alignment,
+            )
+            if corrected_sign:
+                assembly.long_axis_sign = corrected_sign
+                assembly.rationale = (
+                    assembly.rationale[:1100]
+                    + " Measured taper proof contradicts the previous signed axis; "
+                    + f"set long_axis_sign={corrected_sign} and recheck physical contacts."
+                )[:1600]
             assembly = _normalize_component_assembly_symmetry(
                 assembly,
                 feature_task,
@@ -2806,6 +2830,9 @@ async def _plan_component_assembly(
             "model": candidate_model,
             "images": labels,
             "child_axis_context": child_axis_context,
+            "measured_taper_direction": measured_taper_direction,
+            "expected_taper_direction": expected_taper_direction,
+            "corrected_axis_from_geometry": bool(corrected_sign),
             "assembly": assembly.model_dump(),
             "created_at": datetime.now(UTC).isoformat(),
         }

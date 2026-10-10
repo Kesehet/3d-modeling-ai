@@ -331,7 +331,7 @@ if proof_context.get("reuse_protected_geometry"):
             objects.remove(obj)
             bpy.data.objects.remove(obj, do_unlink=True)
     with bpy.data.libraries.load(proof_context["baseline_blend_path"], link=False) as (data_from, data_to):
-        data_to.objects = protected_names
+        data_to.objects = list(protected_names)
     for name, obj in zip(protected_names, data_to.objects):
         if obj is None or obj.type != "MESH":
             raise RuntimeError("Protected baseline mesh could not be restored.")

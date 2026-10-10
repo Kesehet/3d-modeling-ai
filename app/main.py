@@ -2860,6 +2860,8 @@ async def _execute_component_assembly_candidate(
                 "prefix": prefix,
                 "component_name": feature_task.name,
                 "instances": [item.model_dump() for item in assembly.instances],
+                "repeated_axis_alignment": assembly.repeated_axis_alignment,
+                "long_axis_sign": assembly.long_axis_sign,
             },
             "transport": "headless",
             "factory_startup": True,
@@ -6420,6 +6422,82 @@ def _verified_component_parent_mesh_proof(
     }
 
 
+def _verified_repeated_component_profile(
+    root: Path, feature_id: str, baseline_version: int | None, candidate_version: int
+) -> dict:
+    """Bind measured taper evidence to the actual frozen-child assembly candidate."""
+    record = _read_json_if_present(root / f"component-assembly-v{candidate_version}.json")
+    qa = _read_json_if_present(root / "exports" / f"model-v{candidate_version}-qa.json")
+    if (
+        not isinstance(record, dict)
+        or not isinstance(qa, dict)
+        or record.get("feature_id") != feature_id
+        or record.get("candidate_version") != candidate_version
+        or record.get("baseline_version") != baseline_version
+        or qa.get("parent_source_blend") != str(root / "scene" / f"model-v{baseline_version}.blend")
+        or not qa.get("component_source_blend")
+        or qa.get("component_axis_alignment") != "radial"
+    ):
+        return {"verified": False, "reason": "No matching radial component assembly QA"}
+    assembly = record.get("assembly") or {}
+    instances = assembly.get("instances") or []
+    profiles = qa.get("component_width_profiles")
+    if (
+        not isinstance(instances, list)
+        or len(instances) < 2
+        or not isinstance(profiles, list)
+        or len(profiles) != len(instances)
+        or qa.get("installed_instances") != len(instances)
+        or qa.get("component_long_axis_sign") != assembly.get("long_axis_sign")
+    ):
+        return {"verified": False, "reason": "Missing/inconsistent instance measurements"}
+    proven = []
+    for index, profile in enumerate(profiles, start=1):
+        if (
+            not isinstance(profile, dict)
+            or profile.get("instance_index") != index
+            or profile.get("measured") is not True
+            or profile.get("direction") not in {
+                "widens_outward", "narrows_outward", "approximately_uniform"
+            }
+            or profile.get("method")
+            != "mesh_edge_intersections_at_20_and_80_percent_of_signed_longitudinal_extent"
+            or not isinstance(profile.get("radial_alignment_cosine"), (float, int))
+            or not math.isfinite(float(profile["radial_alignment_cosine"]))
+            or profile["radial_alignment_cosine"] < 0.85
+        ):
+            return {"verified": False, "reason": "Ambiguous/unavailable cross-sectional geometry"}
+        try:
+            root_width = float(profile["root_width"])
+            distal_width = float(profile["distal_width"])
+            ratio = float(profile["distal_to_root_ratio"])
+        except (KeyError, TypeError, ValueError):
+            return {"verified": False, "reason": "Invalid cross-sectional widths"}
+        if not all(math.isfinite(v) for v in (root_width, distal_width, ratio)):
+            return {"verified": False, "reason": "Non-finite cross-sectional widths"}
+        if root_width <= 0 or distal_width <= 0 or abs(ratio - distal_width / root_width) > 0.02:
+            return {"verified": False, "reason": "Inconsistent cross-sectional ratio"}
+        proven.append({
+            "instance_index": index,
+            "root_width": root_width,
+            "distal_width": distal_width,
+            "distal_to_root_ratio": ratio,
+            "direction": profile["direction"],
+            "long_axis": profile["long_axis"],
+            "width_axis": profile["width_axis"],
+        })
+    return {
+        "verified": True,
+        "method": "Blender mesh-edge cross-sections at 20% (root) / 80% (distal), not pixel interpretation",
+        "baseline_version": baseline_version,
+        "candidate_version": candidate_version,
+        "alignment": "signed child axis verified against outward radial placement",
+        "measurements": proven,
+        "all_same_direction": len({p["direction"] for p in proven}) == 1,
+        "caveat": "Only taper direction measured. Pitch, contact, collisions, count, feature match and integrity require separate QA.",
+    }
+
+
 async def _evaluate_protected_feature_preservation(
     job_id: str,
     active_feature: FeatureTask,
@@ -6620,6 +6698,7 @@ async def _focused_repeated_feature_adjudication(
     reference_match_required: bool,
     candidate_version: int,
     exact_prompt: str,
+    geometry_evidence: dict,
 ) -> dict:
     """Recheck disputed repeated geometry with clear, candidate-first plan views.
 
@@ -6650,7 +6729,10 @@ async def _focused_repeated_feature_adjudication(
         "cannot be established visually, reject with a concrete uncertainty. Do not hallucinate measured precision. "
         "The user request and criteria govern; automatically researched category reference images are illustrative "
         "rather than exact identity constraints. All criteria must be visibly supported; never approve an ambiguous "
-        "or regressed model. Return strict JSON matching the supplied FeatureEvaluation schema."
+        "or regressed model. When VERIFIED mesh-edge cross-sectional widths are supplied, those numbers "
+        "are more reliable for taper DIRECTION than perspective images. Do not assert the opposite direction "
+        "without concrete conflicting evidence. Measure nothing else from these widths: all other criteria "
+        "still require visual and physical verification. Return strict JSON matching the FeatureEvaluation schema."
     )
     prompt = (
         f"USER REQUEST: {exact_prompt}\n"
@@ -6658,6 +6740,9 @@ async def _focused_repeated_feature_adjudication(
         f"IMAGE LABELS IN ORDER: {labels}\n"
         f"REFERENCE ROLE: {'AUTHORITATIVE' if reference_match_required else 'GENERIC CONTEXT'}\n"
         f"CANDIDATE VERSION: {candidate_version}\n"
+        f"VERIFIED BLENDER CROSS-SECTION EVIDENCE: {json.dumps(geometry_evidence)}\n"
+        "Only verified=true measurements count as numerical evidence. Width/taper alone never satisfies "
+        "contact, pitch, placement, surface quality or any other feature criteria.\n"
         "For every acceptance criterion, determine what is actually visible in the candidate, with root/distal "
         "landmarks when relevant. Set criteria_satisfied=false for ANY unmet or unverifiable criterion. "
         "Set regression_detected=true for visible damage to previously accepted geometry. "
@@ -6788,6 +6873,11 @@ async def _evaluate_feature_candidate(
             "model": None,
         }
 
+    geometry_evidence = (
+        _verified_repeated_component_profile(
+            root, feature_task.id, baseline_version, candidate_version
+        ) if feature_task.count > 1 else {"verified": False}
+    )
     image_paths = reference_paths + baseline_paths + candidate_paths
     images = _encode_vision_images(image_paths)
     labels = [f"{path.parent.name}/{path.name}" for path in image_paths]
@@ -6814,7 +6904,10 @@ async def _evaluate_feature_candidate(
         "from these images (for example exact millimetres or a 1% tolerance), do NOT pretend it was measured: set "
         "criteria_satisfied=false and explain the unverifiable criterion. If the candidate merely improved but remains "
         "wrong, passed MUST be false. If unrelated protected geometry regressed, regression_detected must be true. "
-        "Return JSON only matching the supplied schema."
+        "Independently VERIFIED Blender cross-sectional measurements, if present, are authoritative for "
+        "the numerical DIRECTION of taper; do not guess an opposite root/distal width from camera perspective. "
+        "However, such evidence says nothing about physical contact, count, pitch, surface quality or other criteria. "
+        "All remaining requirements must pass independently. Return JSON only matching the supplied schema."
     )
     comparison_context = (
         f"Reference images come first. Then BASELINE v{baseline_version} views {list(views)}. "
@@ -6827,6 +6920,7 @@ async def _evaluate_feature_candidate(
     prompt = (
         f"User request: {job_request.get('prompt', '')}\n"
         f"ACTIVE FEATURE SUB-JOB: {json.dumps(feature_task.model_dump(), ensure_ascii=False)}\n"
+        f"BLENDER CROSS-SECTION EVIDENCE: {json.dumps(geometry_evidence)}\n"
         f"Other planned features (owned by later passes): "
         f"{json.dumps(other_features)}\n"
         f"Images in order: {labels}\n"
@@ -6881,6 +6975,7 @@ async def _evaluate_feature_candidate(
             "candidate_version": candidate_version,
             "images": labels,
             "reference_match_required": reference_match_required,
+            "geometry_evidence": geometry_evidence,
             "created_at": datetime.now(UTC).isoformat(),
         }
         # Orthographic repeated parts can be misjudged when eleven mixed
@@ -6900,6 +6995,7 @@ async def _evaluate_feature_candidate(
                 reference_match_required=reference_match_required,
                 candidate_version=candidate_version,
                 exact_prompt=str(job_request.get("prompt") or ""),
+                geometry_evidence=geometry_evidence,
             )
             response["focused_adjudication"] = {
                 key: value for key, value in adjudication.items() if key != "reviews"

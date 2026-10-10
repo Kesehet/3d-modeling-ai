@@ -90,8 +90,9 @@ def main():
         "objects": [{"name": "part", "shape": "cube", "location": [0, 0, 0],
                      "scale": [0.3, 0.3, 0.3], "color": "#567890"}],
     }})
-    for changed in (False, True):
-        run(root, "scoped_proof_changed" if changed else "scoped_proof_unchanged", generic_scene_script() + r"""
+    for changed, reuse in ((False, False), (True, False), (True, True)):
+        name = "scoped_frozen_parts" if reuse else "scoped_proof_changed" if changed else "scoped_proof_unchanged"
+        run(root, name, generic_scene_script() + r"""
 proof = qa["protected_part_proof"]
 assert proof["verified"] is args["expected_preserved"], proof
 """, {
@@ -101,8 +102,9 @@ assert proof["verified"] is args["expected_preserved"], proof
                 {"name": "new_contact", "shape": "cube", "location": [1,0,0], "scale": [.1,.1,.1]},
             ]},
             "preservation_context": {"baseline_blend_path": str(child / "model-v1.blend"),
+                                     "reuse_protected_geometry": reuse,
                                      "protected_object_names": ["part"]},
-            "expected_preserved": not changed,
+            "expected_preserved": reuse or not changed,
         })
     run(root, "assembly", component_assembly_script(), {
         "parent_blend_path": str(parent / "model-v1.blend"),

@@ -11638,6 +11638,7 @@ async def refine_generic_scene(job_id: str, request: GenericRefineRequest) -> di
                 "baseline_blend_path": str(root / "scene" / f"model-v{current_version}.blend"),
                 "baseline_version": current_version, "candidate_version": version,
                 "feature_id": feature_task.id,
+                "reuse_protected_geometry": True,
                 "protected_object_names": [item.name for item in current_spec.objects if item.name not in editable_names],
             }
         build = await _execute_generic_spec(

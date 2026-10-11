@@ -11,7 +11,6 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-
 CAMERAS = {
     "front-left": (1.0, -1.2, 0.75),
     "back-right": (-1.0, 1.2, 0.75),

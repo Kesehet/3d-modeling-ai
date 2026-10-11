@@ -27,7 +27,7 @@ EXPORTS = {"step": "assembly.step", "stl": "assembly.stl",
            "glb": "assembly.glb", "json": "manifest.json",
            "front-left": "assembly-front-left.png", "back-right": "assembly-back-right.png",
            "left": "assembly-left.png", "right": "assembly-right.png",
-           "top": "assembly-top.png"}
+           "top": "assembly-top.png", "history": "repair-history.json"}
 
 
 class CadRequest(BaseModel):
@@ -173,6 +173,7 @@ async def generate_cad(
     last_export: tuple[CadBlueprint, dict, Path] | None = None
     best_grade: tuple[float, float, float] = (-1.0, -999.0, -1.0)
     previous_evidence: dict | None = None
+    repair_history: list[dict] = []
     try:
         for attempt in range(1, 4):
             query = prompt if not error else (
@@ -225,6 +226,7 @@ async def generate_cad(
                 blueprint = blueprint.model_copy(update={"assembly_mode": assembly_mode})
             except (ValidationError, ValueError, TypeError) as exc:
                 error = f"Blueprint schema: {exc}"
+                repair_history.append({"attempt": attempt, "status": "invalid_blueprint", "error": error[:800]})
                 continue
             if outline_complex and not any(
                 part.kind in ("profile_extrusion", "section_loft") for part in blueprint.parts
@@ -236,12 +238,22 @@ async def generate_cad(
                     "explicit sloping 2D polygon coordinates, or multi-section lofts. "
                     "No predesigned object templates are allowed."
                 )
+                repair_history.append({
+                    "attempt": attempt, "status": "missing_silhouette_coverage",
+                    "blueprint": blueprint.model_dump(exclude_none=True),
+                    "error": error,
+                })
                 continue
             attempt_dir = final_dir / f"attempt-{attempt}"
             try:
                 report = await asyncio.to_thread(build_cad, blueprint, attempt_dir)
             except (ValueError, RuntimeError, OSError) as exc:
                 error = f"CAD construction/export: {exc}"
+                repair_history.append({
+                    "attempt": attempt, "status": "invalid_cad",
+                    "blueprint": blueprint.model_dump(exclude_none=True),
+                    "error": error[:800],
+                })
                 shutil.rmtree(attempt_dir, ignore_errors=True)
                 continue
             # Run visual critique even if physical attachment QA failed. Otherwise
@@ -267,6 +279,13 @@ async def generate_cad(
             faults = list(graph["failures"])
             if review["status"] == "failed":
                 faults.extend(review.get("findings") or ["Reference subject mismatch"])
+            repair_history.append({
+                "attempt": attempt,
+                "status": "rejected" if faults else "geometry_reviewed",
+                "blueprint": blueprint.model_dump(exclude_none=True),
+                "assembly_qa": graph, "reference_visual_qa": review,
+                "issues": faults,
+            })
             if faults:
                 error = "; ".join(faults)
                 continue
@@ -278,6 +297,15 @@ async def generate_cad(
         for file in chosen_dir.iterdir():
             if file.is_file():
                 shutil.copy2(file, final_dir / file.name)
+        (final_dir / "repair-history.json").write_text(
+            json.dumps({
+                "prompt": prompt, "reference_mode": reference_mode,
+                "reference_geometry_brief": reference_brief,
+                "selected_blueprint_title": blueprint.title,
+                "attempts": repair_history,
+            }, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
         report["attempts"] = attempt
         report["id"] = experiment_id
         report["reference_geometry_brief"] = reference_brief

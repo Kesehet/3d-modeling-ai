@@ -16,7 +16,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field, ValidationError
 
 from .cad_assembly_repair import suggest_group_attachment
-from .cad_engine import CAD_SYSTEM_PROMPT, CadBlueprint, build_cad
+from .cad_engine import CAD_SYSTEM_PROMPT, CadBlueprint, build_cad, cad_generation_schema
 from .cad_semantic_qa import evaluate_required_component_coverage
 from .config import JOBS_ROOT, REASONING_MODEL, VISION_MODEL
 from .ollama import OllamaProxyClient, OllamaProxyError
@@ -236,7 +236,7 @@ async def generate_cad(
                 system=CAD_SYSTEM_PROMPT,
                 prompt=query,
                 images=reference_images if reference_brief["status"] == "unverified" else None,
-                schema=CadBlueprint.model_json_schema(),
+                schema=cad_generation_schema(),
                 temperature=0.15,
             )
             try:

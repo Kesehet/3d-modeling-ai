@@ -95,3 +95,4 @@ jobs:
           path: live-cad-evidence/
           retention-days: 14
           if-no-files-found: warn
+          include-hidden-files: true

@@ -208,6 +208,7 @@ def test_cad_sidecar_has_internal_api_and_external_ollama_networks():
     assert "worker-net" in cad["networks"] and "worker-net" in api["networks"]
     assert "traefik-proxy" in cad["networks"]
     assert "ports" not in cad
+    assert "traefik.enable=false" in cad["labels"]
     assert cad["environment"]["CAD_EXPERIMENT_ENABLED"] == "1"
     assert compose["networks"]["worker-net"]["internal"] is True
     assert cad["mem_limit"]

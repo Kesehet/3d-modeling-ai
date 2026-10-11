@@ -109,6 +109,8 @@ services:
       context: .
       dockerfile: Dockerfile.cad
     image: 3d-modeling-ai-cad:local
+    labels:
+      - traefik.enable=false
     restart: unless-stopped
     init: true
     environment:

@@ -86,3 +86,44 @@ network. It uses its **own** volume so the CAD engine doesn't need access to
 Blender worker files. The main API receives exports over internal HTTP,
 stores them atomically in the standard job workspace, and cleans up the
 sidecar's temporary run. The existing Blender worker continues unchanged.
+
+
+## Reference-aware CPU CAD and reliable state reporting (PR #145)
+
+The existing **New Job** dialog supports up to three PNG/JPEG/WebP reference images.
+They are ingested through the same validated `/v1/jobs/{id}/references`
+endpoint as Blender jobs before CAD generation starts. The CPU CAD adapter
+selects previously uploaded or verified reference files, downsamples them to
+JPEG, and passes the bounded base64 images over the private Docker network to
+the Ollama-driven CAD sidecar.
+
+`POST /v1/jobs/{id}/cad` and the dashboard support:
+- `reference_mode`: `exact_match`, `shape_guidance` (default), or `inspiration`.
+- `assembly_mode`: `single` (default) or `independent` for truly separate deliverables.
+  **The caller sets this mode.** The LLM cannot silently opt out of connected-part QA.
+
+Every successful geometry export also produces headless CPU render evidence:
+`renders/model-vN-front-left.png` and `renders/model-vN-top.png`. When references
+are supplied, an independent vision-model call receives the original reference
+images FIRST and the rendered evidence LAST. The review records
+`reference_match_score`, `passed`, `subject_recognizable`, and specific findings.
+A failed review is fed back to the planner for up to three bounded corrective
+attempts; unavailable/invalid visual review is **unverified**, not a pass.
+
+`assembly_qa` is measured on actual generated CAD solids and rejects disconnected
+AABB part groups with mm gap evidence, except explicitly independent requests.
+It never uses keywords such as "wheel" or "blade" to determine placements.
+**Limitation:** overlap of bounding boxes is NOT proof of physical contact,
+interference-free parts, watertight combined assembly, dimensional fidelity, or
+mechanical feasibility. This first-stage QA is conservative rather than final.
+
+When structural or reference visual checks still fail, the job status is
+`state=failed`, stage `cad_needs_assembly_repair` or `cad_needs_reference_repair`,
+and the last valid STEP/GLB/STL and render evidence remain available. Export
+integrity and subject quality never share the same pass flag. A job with no
+reference images remains `cad_needs_visual_review`; it cannot claim visually
+verified quality. Existing Blender generation is separate and unchanged.
+
+Before claiming a broadly reliable general model maker, add real narrow-phase
+contact/penetration checks, photo-to-geometry multi-view registration, and
+fresh independent visual reviews across unrelated unseen objects.

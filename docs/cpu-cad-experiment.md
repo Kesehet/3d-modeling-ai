@@ -45,9 +45,9 @@ retries, invalid schema rejection, and emits inspectable files.
 `live_ollama=true`, with repository secret `OLLAMA_PROXY_API_KEY`.
 It asks the real configured Ollama model to independently plan and construct a
 three-bladed fan; it saves exported artifacts even if visual review is still
-required. GitHub only permits dispatch when the workflow file exists on the
-repository default branch; use a safe manual equivalent from the branch first
-if this hasn't been merged.
+required. Until the workflow is on the default branch, a **single tagged push** whose
+commit message contains `[cad-live]` can run the live Ollama test on this
+experiment branch. Ordinary pushes and pull requests never use Ollama secrets.
 
 ## Limitations / promotion criteria
 

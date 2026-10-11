@@ -75,7 +75,8 @@ jobs:
         run: docker run --rm --entrypoint python 3d-ai-cad:ci -c "from build123d import Box; assert Box(10,10,10).volume > 0"
 
   cad-real-ollama:
-    if: github.event_name == 'workflow_dispatch' && inputs.live_ollama == true
+    # One-shot branch probe: only an explicitly tagged push consumes real proxy credits.
+    if: (github.event_name == 'workflow_dispatch' && inputs.live_ollama == true) || (github.event_name == 'push' && contains(github.event.head_commit.message, '[cad-live]'))
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:

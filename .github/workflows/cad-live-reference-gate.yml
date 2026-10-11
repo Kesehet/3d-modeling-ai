@@ -28,7 +28,7 @@ jobs:
           sudo apt-get update >/dev/null
           sudo apt-get install -y libgl1 libglu1-mesa libxrender1 libxext6 libsm6 >/dev/null
           python -m pip install ".[cad]"
-      # Verify side-photo, model-driven component list, bounded island attachment, CPU z-buffer, and exact BRep QA.
+      # Verify side-photo identity-aware component matching, bounded island attachment, CPU z-buffer, and exact BRep QA.
       - name: Unmocked reference-driven geometry/visual repair benchmark
         run: |
           set -euo pipefail

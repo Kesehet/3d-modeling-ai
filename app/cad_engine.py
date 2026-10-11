@@ -137,6 +137,12 @@ A section_loft uses LOCAL Z for stations and LOCAL XY for width
 and depth; rotate it if a horizontal or diagonal longitudinal shape is needed.
 Think through final world-space bounds after all rotations and translations.
 Every part may have position_mm=[x,y,z] and rotation_deg=[rx,ry,rz].
+Critical axis math for ALL solids: cylinders and tubes initially point along Z.
+To align their AXIS to world Y, use rotation_deg=[90,0,0], NOT [0,90,0].
+To align their AXIS to world X, use rotation_deg=[0,90,0].
+To keep axial orientation vertical, use rotation_deg=[0,0,0].
+Reason explicitly about full world-space rotated dimensions before claiming
+parts are mounted, co-axial, radial or attached.
 Compose separate components with sane proportions and correct contact/overlap at joints.
 Think in physical assembly relationships BEFORE choosing numeric positions:
 - Z is UP. For hanging objects, the support must extend toward the ceiling.

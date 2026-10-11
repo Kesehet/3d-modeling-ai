@@ -15,6 +15,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field, ValidationError
 
+from .cad_assembly_repair import suggest_group_attachment
 from .cad_engine import CAD_SYSTEM_PROMPT, CadBlueprint, build_cad
 from .cad_semantic_qa import evaluate_required_component_coverage
 from .config import JOBS_ROOT, REASONING_MODEL, VISION_MODEL
@@ -278,6 +279,35 @@ async def generate_cad(
                 })
                 shutil.rmtree(attempt_dir, ignore_errors=True)
                 continue
+            if not report["assembly_qa"]["pass"]:
+                proposal = suggest_group_attachment(blueprint, report)
+                report["assembly_autorepair"] = {
+                    "attempted": proposal["changed"], "moves": proposal["moves"],
+                    "reason": proposal["reason"],
+                }
+                if proposal["changed"]:
+                    corrected = attempt_dir / "assembly-correction"
+                    try:
+                        improved = await asyncio.to_thread(
+                            build_cad, proposal["blueprint"], corrected
+                        )
+                    except (ValueError, RuntimeError, OSError) as exc:
+                        report["assembly_autorepair"]["error"] = str(exc)[:350]
+                    else:
+                        initial_groups = len(report["assembly_qa"]["groups"])
+                        fixed_groups = len(improved["assembly_qa"]["groups"])
+                        if fixed_groups < initial_groups:
+                            blueprint = proposal["blueprint"]
+                            report = improved
+                            attempt_dir = corrected
+                            report["assembly_autorepair"] = {
+                                "attempted": True, "accepted": True,
+                                "groups_before": initial_groups,
+                                "groups_after": fixed_groups,
+                                "moves": proposal["moves"],
+                            }
+                        else:
+                            report["assembly_autorepair"]["accepted"] = False
             # Run visual critique even if physical attachment QA failed. Otherwise
             # the next planner only repairs gap measurements, not shape.
             review = await _review_reference_match(
@@ -307,7 +337,9 @@ async def generate_cad(
                 "attempt": attempt,
                 "status": "rejected" if faults else "geometry_reviewed",
                 "blueprint": blueprint.model_dump(exclude_none=True),
-                "assembly_qa": graph, "reference_visual_qa": review,
+                "assembly_qa": graph,
+                "assembly_autorepair": report.get("assembly_autorepair"),
+                "reference_visual_qa": review,
                 "issues": faults,
             })
             if faults:

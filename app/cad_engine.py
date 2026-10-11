@@ -122,7 +122,7 @@ def build_cad(blueprint: CadBlueprint, output_dir: Path) -> dict:
             solid = Sphere(part.radius_mm)
         solid = Pos(*part.position_mm) * Rot(*part.rotation_deg) * solid
         volume = float(solid.volume)
-        if not solid.is_valid() or not math.isfinite(volume) or volume < 1e-6:
+        if not solid.is_valid or not math.isfinite(volume) or volume < 1e-6:
             raise ValueError(f"Invalid or zero-volume solid: {part.name}")
         solids.append(solid)
         # Per-part STL is an intermediate triangulation, not the primary CAD output.
@@ -145,7 +145,7 @@ def build_cad(blueprint: CadBlueprint, output_dir: Path) -> dict:
     glb.write_bytes(scene.export(file_type="glb"))
 
     imported = import_step(str(step))
-    valid = bool(imported and imported.is_valid() and imported.volume > 0)
+    valid = bool(imported and imported.is_valid and imported.volume > 0)
     if not valid:
         raise ValueError("STEP re-import geometry validation failed")
     glb_check = trimesh.load(str(glb), force="scene")

@@ -221,8 +221,8 @@ def test_exhausted_disconnected_model_is_never_certified(tmp_path, monkeypatch):
     disconnected = {
         "title": "Disconnected",
         "parts": [
-            {"name": "first", "kind": "sphere", "radius_mm": 5},
-            {"name": "second", "kind": "sphere", "radius_mm": 5,
+            {"name": "first", "kind": "box", "dimensions_mm": [10, 10, 10]},
+            {"name": "second", "kind": "box", "dimensions_mm": [10, 10, 10],
              "position_mm": [300, 0, 0]},
         ],
     }

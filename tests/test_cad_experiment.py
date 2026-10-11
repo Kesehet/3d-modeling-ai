@@ -515,3 +515,26 @@ def test_component_coverage_matches_identity_not_surface_descriptors():
     ])
     assert verdict["pass"]
     assert verdict["matched"] == verdict["checked"]
+
+
+def test_optional_null_schema_fields_removed_without_weakening_geometry():
+    source = {
+        "title": "Valid structural piece", "units": None, "assembly_mode": None,
+        "parts": [{
+            "name": "member", "kind": "box",
+            "dimensions_mm": [50, 10, 20],
+            "profile_plane": None, "profile_points_mm": None,
+            "radius_mm": None, "height_mm": None,
+        }],
+    }
+    normalized = cad_experiment._prune_omitted_optional_fields(source)
+    plan = CadBlueprint.model_validate(normalized)
+    assert plan.parts[0].profile_plane == "xy"
+    assert plan.units == "mm"
+    broken = {
+        "title": "Bad geometry",
+        "parts": [{"name": "member", "kind": "profile_extrusion",
+                   "height_mm": 10, "profile_points_mm": None}],
+    }
+    with pytest.raises(ValueError, match="profile_extrusion requires"):
+        CadBlueprint.model_validate(cad_experiment._prune_omitted_optional_fields(broken))

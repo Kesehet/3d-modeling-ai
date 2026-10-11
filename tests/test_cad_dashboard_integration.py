@@ -7,12 +7,13 @@ import httpx
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
-from app import cad_jobs, main
+from app import cad_jobs, dashboard, main
 from app.dashboard import dashboard_page
 
 
 def create_job_in_root(tmp_path, monkeypatch):
     monkeypatch.setattr(main, "JOBS_ROOT", tmp_path)
+    monkeypatch.setattr(dashboard, "JOBS_ROOT", tmp_path)
     job_id = str(uuid.uuid4())
     root = tmp_path / job_id
     for folder in main.ARTIFACT_CATEGORIES:

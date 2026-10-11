@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 from app import cad_experiment
 from app.cad_engine import CadBlueprint, build_cad
 from app.cad_service import app
+from scripts.cad_ci_benchmark import evaluate_spatial_contract
 
 # Base CI installs only [dev]; the dedicated CAD workflow installs [cad,dev].
 pytest.importorskip("build123d")
@@ -36,6 +37,39 @@ class FakeOllama:
     async def chat_json(self, **kwargs):
         self.calls.append(kwargs)
         return SimpleNamespace(data=self.responses[min(len(self.calls) - 1, len(self.responses) - 1)])
+
+
+
+def test_spatial_quality_gate_detects_assembly_errors():
+    data = {
+        "title": "Radial assembly QA",
+        "parts": [
+            {"name": "motor_housing", "kind": "cylinder", "radius_mm": 30, "height_mm": 40},
+            {"name": "rotor_hub", "kind": "cylinder", "radius_mm": 15, "height_mm": 20},
+            {"name": "downrod", "kind": "cylinder", "radius_mm": 10, "height_mm": 200,
+             "position_mm": [0, 0, 120]},
+            {"name": "blade_1", "kind": "box", "dimensions_mm": [300, 30, 5],
+             "position_mm": [165, 0, 0]},
+            {"name": "blade_2", "kind": "box", "dimensions_mm": [300, 30, 5],
+             "position_mm": [-82.5, 142.894, 0], "rotation_deg": [0, 0, 120]},
+            {"name": "blade_3", "kind": "box", "dimensions_mm": [300, 30, 5],
+             "position_mm": [-82.5, -142.894, 0], "rotation_deg": [0, 0, 240]},
+        ],
+    }
+    kwargs = {
+        "coaxial_terms": ("motor", "hub", "rod"),
+        "vertical_support_term": "rod",
+        "supported_term": "motor",
+        "radial_term": "blade",
+        "radial_count": 3,
+    }
+    assert evaluate_spatial_contract(CadBlueprint.model_validate(data), **kwargs)["pass"]
+    data["parts"][1]["position_mm"] = [0, 55, 0]
+    data["parts"][2]["position_mm"] = [0, 0, -115]
+    verdict = evaluate_spatial_contract(CadBlueprint.model_validate(data), **kwargs)
+    assert not verdict["pass"]
+    assert any("central axis" in issue for issue in verdict["failures"])
+    assert any("upward" in issue for issue in verdict["failures"])
 
 
 def test_cpu_build_creates_real_step_stl_and_named_glb(tmp_path):

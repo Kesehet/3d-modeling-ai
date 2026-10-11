@@ -140,7 +140,7 @@ def test_api_end_to_end_with_fake_ollama(tmp_path, monkeypatch):
         assert resp.status_code == 200, resp.text
         body = resp.json()
         assert body["part_count"] == 3 and body["step_reimport_valid"]
-        for suffix in ("step", "stl", "glb", "json"):
+        for suffix in ("step", "stl", "glb", "json", "history"):
             reply = client.get(body["files"][suffix])
             assert reply.status_code == 200 and len(reply.content) > 100
 
@@ -228,6 +228,7 @@ def test_multimodal_reference_compares_real_render_with_original(tmp_path, monke
     assert report["reference_geometry_brief"]["status"] == "verified"
     assert not report["repair_exhausted"]
     assert (out / "manifest.json").is_file()
+    assert (out / "repair-history.json").is_file()
 
 
 def test_photo_slope_requires_nonprimitive_outline(tmp_path, monkeypatch):

@@ -236,7 +236,7 @@ def test_photo_slope_requires_nonprimitive_outline(tmp_path, monkeypatch):
     simple_brief = {
         "subject_description": "A tapered multi-part structure",
         "silhouette_geometry": ["Trapezoidal roof with sloped side edges"],
-        "required_components": ["roof", "base"],
+        "required_components": ["roof"],
         "spatial_relationships": ["roof rests on base"],
         "relative_proportions": ["roof narrower at top"],
         "uncertain_details": [],
@@ -399,3 +399,38 @@ def test_profile_plane_is_geometrically_world_aligned(tmp_path):
     assert abs(span[0] - 90) < 0.5
     assert abs(span[1] - 22) < 0.5
     assert abs(span[2] - 35) < 0.5
+
+
+def test_reference_component_coverage_rejects_simplified_missing_subject_features():
+    from app.cad_semantic_qa import evaluate_required_component_coverage
+
+    requested = [
+        "Front hood surface", "Windshield plane", "Roof plane",
+        "Rear window plane", "Trunk lid surface", "Rear bumper fascia",
+        "Side door panels", "Four wheel assemblies", "Side mirror protrusions",
+    ]
+    trivial = CadBlueprint.model_validate({
+        "title": "Over-simplified", "parts": [
+            {"name": "Body", "kind": "box", "dimensions_mm": [70, 30, 20]},
+            *[{"name": f"wheel_{n}", "kind": "cylinder", "radius_mm": 3,
+               "height_mm": 2} for n in range(4)],
+        ],
+    })
+    score = evaluate_required_component_coverage(trivial, requested)
+    assert not score["pass"]
+    assert score["matched"] == 1  # Four wheel parts only.
+    assert any("hood" in item["required"].lower() for item in score["missing"])
+    comprehensive = CadBlueprint.model_validate({
+        "title": "Features", "parts": [
+            {"name": name, "kind": "box", "dimensions_mm": [40, 12, 6]}
+            for name in (
+                "front_hood", "windshield", "cabin_roof", "rear_window",
+                "rear_trunk", "rear_bumper", "side_door_left",
+                "side_mirror_left",
+            )
+        ] + [
+            {"name": f"wheel_{i}", "kind": "cylinder", "radius_mm": 3, "height_mm": 2}
+            for i in range(4)
+        ],
+    })
+    assert evaluate_required_component_coverage(comprehensive, requested)["pass"]

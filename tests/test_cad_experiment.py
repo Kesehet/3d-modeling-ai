@@ -538,3 +538,24 @@ def test_optional_null_schema_fields_removed_without_weakening_geometry():
     }
     with pytest.raises(ValueError, match="profile_extrusion requires"):
         CadBlueprint.model_validate(cad_experiment._prune_omitted_optional_fields(broken))
+
+
+def test_llm_blueprint_schema_requires_correct_shape_fields_not_null_everywhere():
+    from app.cad_engine import cad_generation_schema
+
+    schema = cad_generation_schema()
+    assert schema["type"] == "object"
+    assert schema["required"] == ["title", "parts"]
+    shapes = schema["properties"]["parts"]["items"]["oneOf"]
+    by_kind = {item["properties"]["kind"]["enum"][0]: item for item in shapes}
+    assert len(by_kind) == 7
+    for kind, spec in by_kind.items():
+        assert set(spec["required"]).issubset(spec["properties"])
+        assert "kind" in spec["required"] and "name" in spec["required"]
+        assert "position_mm" not in spec["required"]  # implicit origin permitted
+        assert spec["properties"]["kind"]["enum"] == [kind]
+        assert "profile_points_mm" not in spec["properties"] if kind != "profile_extrusion" else True
+    assert set(["profile_points_mm", "height_mm"]).issubset(
+        by_kind["profile_extrusion"]["required"]
+    )
+    assert "loft_sections_mm" in by_kind["section_loft"]["required"]

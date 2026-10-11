@@ -231,10 +231,14 @@ def build_cad(blueprint: CadBlueprint, output_dir: Path) -> dict:
     sizes = {fmt: (output_dir / f"assembly.{fmt}").stat().st_size for fmt in ("step", "stl", "glb")}
     if min(sizes.values()) < 100:
         raise ValueError("CAD export unexpectedly small")
-    from .cad_assembly_qa import evaluate_assembly_bounds
+    from .cad_assembly_qa import evaluate_assembly_solids
     from .cad_preview import render_cad_views
 
-    assembly_qa = evaluate_assembly_bounds(evaluated_bounds, assembly_mode=blueprint.assembly_mode)
+    assembly_qa = evaluate_assembly_solids(
+        {part.name: solid for part, solid in zip(blueprint.parts, solids, strict=True)},
+        evaluated_bounds,
+        assembly_mode=blueprint.assembly_mode,
+    )
     render_files = render_cad_views(scene, output_dir)
     result = {
         "ok": True,
@@ -246,7 +250,7 @@ def build_cad(blueprint: CadBlueprint, output_dir: Path) -> dict:
         "assembly_qa": assembly_qa,
         "renders": render_files,
         "exports": sizes,
-        "quality_scope": "STEP integrity and AABB assembly screening; physical contact, visual similarity and print fit require independent review",
+        "quality_scope": "STEP integrity and BRep solid-distance screening; actual mating contact, visual similarity and print fit require independent review",
     }
     (output_dir / "manifest.json").write_text(
         json.dumps({"blueprint": blueprint.model_dump(), "validation": result}, indent=2),

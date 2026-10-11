@@ -150,7 +150,7 @@ async def run_cad_job(job_id: str, version: int, *, model: str | None = None,
         )
         api._write_status(
             root,
-            state="ready",
+            state="failed" if assembly_failed or visual_failed else "ready",
             stage=("cad_needs_assembly_repair" if assembly_failed else
                    "cad_needs_reference_repair" if visual_failed else
                    "cad_needs_visual_review"),

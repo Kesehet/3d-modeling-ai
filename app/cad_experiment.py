@@ -110,7 +110,7 @@ async def generate_cad(
     try:
         for attempt in range(1, 4):
             query = prompt if not error else (
-                f"{prompt}\n\nPrevious candidate failed independent QA. "
+                f"{prompt}\n\nPrevious attempt failed independent QA. "
                 f"Return an improved complete JSON blueprint fixing measured issues: {error[:1200]}"
             )
             if reference_images:

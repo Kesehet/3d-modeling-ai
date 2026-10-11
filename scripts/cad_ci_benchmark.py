@@ -17,7 +17,6 @@ from types import SimpleNamespace
 from app import cad_experiment
 from app.ollama import OllamaProxyClient
 
-
 OFFLINE_CASES = {
     "multi_part_mechanism": {
         "title": "Generic rotating mechanical assembly",

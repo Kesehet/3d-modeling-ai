@@ -221,7 +221,7 @@ def test_multimodal_reference_compares_real_render_with_original(tmp_path, monke
     assert fake.calls[1]["images"] is None
     assert fake.calls[1]["model"] == "mock"
     assert "Independently inspected" in fake.calls[1]["prompt"]
-    assert len(fake.calls[2]["images"]) == 3
+    assert len(fake.calls[2]["images"]) == 6
     assert fake.calls[2]["images"][0] == "sample-original-b64"
     assert "wrong silhouette" in fake.calls[3]["prompt"]
     assert report["reference_visual_qa"]["status"] == "passed"
@@ -313,6 +313,8 @@ def test_nonprimitive_generic_shapes_export_true_cad(kind, details, tmp_path):
     assert report["step_reimport_valid"]
     assert report["assembly_qa"]["pass"]
     assert report["renders"]["top"] == "assembly-top.png"
+    assert report["renders"]["left"] == "assembly-left.png"
+    assert report["renders"]["back-right"] == "assembly-back-right.png"
     assert (tmp_path / "assembly.glb").stat().st_size > 100
 
 

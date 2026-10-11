@@ -1,0 +1,97 @@
+name: Unmocked Reference CAD Quality Gate
+
+on:
+  push:
+    branches: [feat/reference-aware-cad-qa-20261011]
+    paths: [".github/workflows/cad-live-reference-gate.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  live-reference-gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      OLLAMA_PROXY_API_KEY: ${{ secrets.OLLAMA_PROXY_API_KEY }}
+      REASONING_MODEL: ${{ vars.REASONING_MODEL || 'gpt-oss:120b' }}
+      VISION_MODEL: ${{ vars.VISION_MODEL || 'gemma4:31b-cloud' }}
+      JOBS_ROOT: ${{ github.workspace }}/live-cad-evidence
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install CPU OpenCascade and test runtime
+        run: |
+          sudo apt-get update >/dev/null
+          sudo apt-get install -y libgl1 libglu1-mesa libxrender1 libxext6 libsm6 >/dev/null
+          python -m pip install ".[cad]"
+      - name: Generate and independently review sedan against CC0 photograph
+        run: |
+          set -euo pipefail
+          test -n "$OLLAMA_PROXY_API_KEY"
+          mkdir -p "$JOBS_ROOT"
+          python - <<'PY'
+          import asyncio
+          import base64
+          import io
+          import json
+          import os
+          import urllib.parse
+          import urllib.request
+          from pathlib import Path
+          from PIL import Image
+          from app import cad_experiment
+
+          # CC0 Wikimedia Commons photo, independent of this project's own renders.
+          # https://commons.wikimedia.org/wiki/File:1998_Toyota_Camry_CSi_(SXV20R)_4-door_sedan,_Virginia_Gardens_2024-01-11.jpg
+          filename = "1998 Toyota Camry CSi (SXV20R) 4-door sedan, Virginia Gardens 2024-01-11.jpg"
+          url = "https://commons.wikimedia.org/wiki/Special:Redirect/file/" + urllib.parse.quote(filename) + "?width=640"
+          req = urllib.request.Request(url, headers={"User-Agent": "3DModelingAI-Reference-QA/1.0 (CAD test)"})
+          with urllib.request.urlopen(req, timeout=30) as response:
+              raw = response.read(3_000_000)
+          image = Image.open(io.BytesIO(raw)).convert("RGB")
+          image.thumbnail((640, 640))
+          buf = io.BytesIO()
+          image.save(buf, format="JPEG", quality=62, optimize=True)
+          encoded = base64.b64encode(buf.getvalue()).decode("ascii")
+          Path(os.environ["JOBS_ROOT"], "source-reference.jpg").write_bytes(buf.getvalue())
+          prompt = (
+              "Make a single connected simplified four-wheel passenger sedan in 3D CAD, "
+              "using the uploaded sedan photograph for body/cabin/hood/trunk proportions "
+              "and four physically mounted wheels. Use named editable parts, a raised "
+              "cabin roof, a distinct front hood and rear trunk. "
+              "No vehicle-specific geometry templates. Honor the silhouette and "
+              "placement evidence visible in the uploaded reference photo."
+          )
+          plan, report, location = asyncio.run(cad_experiment.generate_cad(
+              prompt, os.getenv("REASONING_MODEL", "gpt-oss:120b"),
+              reference_images=[encoded], reference_mode="shape_guidance",
+              assembly_mode="single",
+          ))
+          print(json.dumps({
+              "title": plan.title, "parts": [p.name for p in plan.parts],
+              "attempts": report["attempts"],
+              "assembly_qa": report["assembly_qa"],
+              "reference_visual_qa": report["reference_visual_qa"],
+              "repair_exhausted": report["repair_exhausted"],
+              "location": str(location),
+          }, indent=2))
+          summary = Path(os.environ["JOBS_ROOT"], "live-report.json")
+          summary.write_text(json.dumps(report, indent=2), encoding="utf-8")
+          # Production-readiness gate: never certify a model with failed geometry or visual QA.
+          if not report["assembly_qa"]["pass"]:
+              raise SystemExit("FAILED: real CAD still contains disconnected assemblies")
+          if report["reference_visual_qa"].get("status") != "passed":
+              raise SystemExit("FAILED: no independently verified reference comparison pass")
+          PY
+      - name: Save actual reference, candidate renders and STEP/GLB/manifest
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-reference-cad-evidence
+          path: live-cad-evidence/
+          retention-days: 14
+          if-no-files-found: warn

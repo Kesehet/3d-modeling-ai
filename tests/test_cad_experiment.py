@@ -8,10 +8,10 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app import cad_experiment
+from app.cad_assembly_qa import evaluate_assembly_solids
 from app.cad_engine import CadBlueprint, build_cad
 from app.cad_service import app
 from app.cad_spatial import evaluate_spatial_contract
-from app.cad_assembly_qa import evaluate_assembly_solids
 
 # Base CI installs only [dev]; the dedicated CAD workflow installs [cad,dev].
 pytest.importorskip("build123d")

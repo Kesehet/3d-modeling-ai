@@ -135,7 +135,7 @@ async def _review_reference_match(
         )
         review["status"] = "passed" if review["passed"] else "failed"
         return review
-    except (OllamaProxyError, ValueError, TypeError) as exc:
+    except (OllamaProxyError, httpx.HTTPError, ValueError, TypeError) as exc:
         return {"status": "unverified", "passed": None, "error": str(exc)[:300]}
 
 
@@ -341,11 +341,11 @@ async def generate_cad(
             report["reference_visual_qa"] = review
             graph = report["assembly_qa"]
             grade = (
+                float(graph["pass"] and review.get("status") == "passed"),
                 float(review.get("status") == "passed"),
                 float(review.get("reference_match_score") or 0.0),
                 float(graph["pass"]),
-                float(coverage.get("matched") or 0) / max(1.0, float(coverage.get("checked") or 0)),
-                min(1.0, len(blueprint.parts) / 12.0),
+                -float(len(graph["groups"])),
             )
             if last_export is None or grade > best_grade:
                 best_grade = grade

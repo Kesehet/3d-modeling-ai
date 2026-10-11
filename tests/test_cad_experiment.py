@@ -609,3 +609,47 @@ def test_empty_solid_evidence_is_failed_not_exception():
     verdict = evaluate_assembly_solids({}, {})
     assert not verdict['pass']
     assert verdict['attachment_candidates'] == []
+
+
+def test_accepted_assembly_beats_higher_visual_score_with_disconnected_parts(tmp_path, monkeypatch):
+    monkeypatch.setattr(cad_experiment, 'JOBS_ROOT', tmp_path)
+    disconnected = {'title': 'Visually plausible but broken', 'parts': [
+        {'name': 'first', 'kind': 'box', 'dimensions_mm': [10, 10, 10]},
+        {'name': 'second', 'kind': 'box', 'dimensions_mm': [10, 10, 10], 'position_mm': [300, 0, 0]},
+    ]}
+    fake = FakeOllama([
+        {'subject_description': 'A connected geometric structure'},
+        disconnected,
+        {'passed': True, 'subject_recognizable': True, 'reference_match_score': .98, 'findings': []},
+        BLUEPRINT,
+        {'passed': True, 'subject_recognizable': True, 'reference_match_score': .90, 'findings': []},
+    ])
+    plan, report, _ = asyncio.run(cad_experiment.generate_cad(
+        'A connected geometric structure', 'mock', client=fake, reference_images=['reference'],
+    ))
+    assert plan.title == BLUEPRINT['title']
+    assert report['assembly_qa']['pass']
+    assert report['reference_visual_qa']['reference_match_score'] == .90
+    assert not report['repair_exhausted']
+    assert 'attachment_candidates' not in fake.calls[3]['prompt']
+
+
+def test_reference_transport_failure_retains_export_without_certifying_quality(tmp_path, monkeypatch):
+    import httpx
+
+    monkeypatch.setattr(cad_experiment, 'JOBS_ROOT', tmp_path)
+
+    class ReviewOutage(FakeOllama):
+        async def chat_json(self, **kwargs):
+            if len(self.calls) == 2:
+                raise httpx.ReadTimeout('independent judge unavailable')
+            return await super().chat_json(**kwargs)
+
+    fake = ReviewOutage([{'subject_description': 'A connected geometric structure'}, BLUEPRINT])
+    _, report, output = asyncio.run(cad_experiment.generate_cad(
+        'A connected geometric structure', 'mock', client=fake, reference_images=['reference'],
+    ))
+    assert report['reference_visual_qa']['status'] == 'unverified'
+    assert report['reference_visual_qa']['passed'] is None
+    assert (output / 'assembly.step').stat().st_size > 100
+    assert (output / 'assembly.glb').stat().st_size > 100

@@ -186,7 +186,7 @@ def test_measured_disconnection_retries_and_preserves_good_export(tmp_path, monk
     ))
     assert report["attempts"] == 2
     assert report["assembly_qa"]["pass"]
-    assert "Disconnected part group" in fake.calls[1]["prompt"]
+    assert "Disconnected solid group" in fake.calls[1]["prompt"]
     assert plan.title == "Repaired candidate"
     assert (out / "assembly-front-left.png").stat().st_size > 100
     assert (out / "assembly-top.png").stat().st_size > 100

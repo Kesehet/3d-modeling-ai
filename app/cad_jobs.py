@@ -104,7 +104,7 @@ async def run_cad_job(job_id: str, version: int, *, model: str | None = None) ->
         )
         append_history(root, "cad_generation_exported", version=version,
                        part_count=payload["part_count"], formats=list(exports))
-    except Exception as exc:
+    except (httpx.HTTPError, ValueError, RuntimeError, OSError, KeyError, TypeError) as exc:
         # Do not override a prior accepted model when a new CAD attempt fails.
         api._write_status(root, state="failed", stage="cad_failed",
                           modeling_strategy="cpu_cad", error=str(exc)[:600])

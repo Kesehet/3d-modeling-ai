@@ -4,9 +4,9 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 
-from fastapi.testclient import TestClient
 import pytest
 import trimesh
+from fastapi.testclient import TestClient
 
 from app import cad_experiment
 from app.cad_engine import CadBlueprint, build_cad

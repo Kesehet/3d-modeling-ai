@@ -169,6 +169,11 @@ def cross_section_profile(vertices, edges, *, longitudinal_axis, width_axis, out
 # widths remain valid under independent axis scaling and exact rotations.
 source_vertices = []
 source_edges = []
+# Surface-area projections distinguish an extensive sheet from an open frame
+# that happens to have the same XYZ bounding dimensions. These are descriptive
+# measurements; the visual/semantic QA gate still judges the intended form.
+source_projected_areas = [0.0, 0.0, 0.0]
+source_geometry_parts = []
 depsgraph = bpy.context.evaluated_depsgraph_get()
 for source in source_objects:
     # Measure the same evaluated geometry shown in renders/exports, including
@@ -177,8 +182,27 @@ for source in source_objects:
     mesh = evaluated.to_mesh()
     try:
         offset = len(source_vertices)
-        source_vertices.extend(tuple(evaluated.matrix_world @ vertex.co) for vertex in mesh.vertices)
+        transformed = [evaluated.matrix_world @ vertex.co for vertex in mesh.vertices]
+        source_vertices.extend(tuple(point) for point in transformed)
         source_edges.extend(tuple(offset + i for i in edge.vertices) for edge in mesh.edges)
+        mesh.calc_loop_triangles()
+        for triangle in mesh.loop_triangles:
+            p, q, r = (transformed[index] for index in triangle.vertices)
+            oriented_area = (q - p).cross(r - p) * 0.5
+            for axis in range(3):
+                source_projected_areas[axis] += abs(float(oriented_area[axis]))
+        if transformed:
+            source_geometry_parts.append({
+                "name": source.name[:80],
+                "vertices": len(mesh.vertices),
+                "triangles": len(mesh.loop_triangles),
+                "bounds_min_xyz": [
+                    round(min(point[axis] for point in transformed), 5) for axis in range(3)
+                ],
+                "bounds_max_xyz": [
+                    round(max(point[axis] for point in transformed), 5) for axis in range(3)
+                ],
+            })
     finally:
         evaluated.to_mesh_clear()
 if source_vertices:
@@ -297,6 +321,95 @@ bpy.context.view_layer.update()
 for obj in parent_objects:
     if obj.name not in scene.objects or mesh_signature(obj) != parent_signatures[obj.name]:
         raise RuntimeError("Frozen parent mesh geometry was mutated during component assembly.")
+# Measurements refer to the exact evaluated child geometry used for the
+# assembly (modifiers and world offsets included), never guessed box sizes.
+if source_vertices:
+    source_low = Vector(tuple(min(v[axis] for v in source_vertices) for axis in range(3)))
+    source_high = Vector(tuple(max(v[axis] for v in source_vertices) for axis in range(3)))
+    dominant_normal_axis = min(range(3), key=lambda axis: child_bounds[axis])
+    plane_axes = [axis for axis in range(3) if axis != dominant_normal_axis]
+    projected_bbox_area = child_bounds[plane_axes[0]] * child_bounds[plane_axes[1]]
+    child_geometry_evidence = {
+        "coordinate_frame": "frozen_child_world_coordinates_before_instance_transform",
+        "source_bounds_min_xyz": [round(float(v), 5) for v in source_low],
+        "source_bounds_max_xyz": [round(float(v), 5) for v in source_high],
+        "source_dimensions_xyz": [round(float(v), 5) for v in child_bounds],
+        "source_bbox_center_xyz": [round(float(v), 5) for v in (source_low + source_high) * 0.5],
+        "origin_to_bbox_center_xyz": [
+            round(float(v), 5) for v in (source_low + source_high) * 0.5
+        ],
+        "source_geometry_parts": source_geometry_parts[:40],
+        "thin_axis": "XYZ"[dominant_normal_axis],
+        "projected_triangle_area_on_thin_axis": round(source_projected_areas[dominant_normal_axis], 5),
+        "projected_triangle_area_over_bbox_area": (
+            round(source_projected_areas[dominant_normal_axis] / projected_bbox_area, 4)
+            if projected_bbox_area > 1e-9 else None
+        ),
+        "projection_note": (
+            "Sum of absolute projected mesh triangle areas divided by the 2D bounding rectangle. "
+            "A closed full sheet typically counts both faces (~2), while open/segmented frames "
+            "cover less area. This is NOT an occupancy probability or a semantic geometry pass."
+        ),
+    }
+else:
+    child_geometry_evidence = {"error": "Frozen child has no evaluated vertices"}
+
+def object_world_bounds(obj):
+    corners = [obj.matrix_world @ Vector(corner) for corner in obj.bound_box]
+    return (
+        Vector(tuple(min(p[axis] for p in corners) for axis in range(3))),
+        Vector(tuple(max(p[axis] for p in corners) for axis in range(3))),
+    )
+
+parent_world_boxes = [(obj.name, *object_world_bounds(obj)) for obj in parent_objects]
+component_instance_spatial_evidence = []
+for number, instance in enumerate(INSTANCES, start=1):
+    if not source_vertices:
+        break
+    location = Vector(tuple(float(v) for v in instance.get("location", [0, 0, 0])[:3]))
+    rotation = Euler(tuple(math.radians(float(v)) for v in instance.get("rotation_deg", [0, 0, 0])[:3]), "XYZ")
+    scale = [max(0.02, min(50.0, float(v))) for v in instance.get("scale", [1, 1, 1])[:3]]
+    transform = Matrix.Translation(location) @ rotation.to_matrix().to_4x4() @ Matrix.Diagonal((*scale, 1.0))
+    placed = [transform @ Vector(point) for point in source_vertices]
+    low = Vector(tuple(min(v[axis] for v in placed) for axis in range(3)))
+    high = Vector(tuple(max(v[axis] for v in placed) for axis in range(3)))
+    extent = high - low
+    volume = max(float(extent.x * extent.y * extent.z), 1e-12)
+    contacts = []
+    for name, other_low, other_high in parent_world_boxes:
+        overlap = Vector(tuple(
+            max(0.0, min(high[axis], other_high[axis]) - max(low[axis], other_low[axis]))
+            for axis in range(3)
+        ))
+        gaps = Vector(tuple(
+            max(0.0, other_low[axis] - high[axis], low[axis] - other_high[axis])
+            for axis in range(3)
+        ))
+        intersection = float(overlap.x * overlap.y * overlap.z)
+        contacts.append({
+            "parent_object": name[:80],
+            "axis_overlap_xyz": [round(float(v), 5) for v in overlap],
+            "axis_gap_xyz": [round(float(v), 5) for v in gaps],
+            "aabb_separation": round(float(gaps.length), 5),
+            "aabb_overlap_fraction_of_child": round(min(1.0, intersection / volume), 4),
+            "child_aabb_inside_parent_aabb": all(
+                low[axis] >= other_low[axis] and high[axis] <= other_high[axis]
+                for axis in range(3)
+            ),
+        })
+    contacts.sort(key=lambda value: (
+        value["aabb_separation"], -value["aabb_overlap_fraction_of_child"]
+    ))
+    component_instance_spatial_evidence.append({
+        "instance_index": number,
+        "world_bounds_min_xyz": [round(float(v), 5) for v in low],
+        "world_bounds_max_xyz": [round(float(v), 5) for v in high],
+        "world_dimensions_xyz": [round(float(v), 5) for v in extent],
+        "world_geometry_center_xyz": [round(float(v), 5) for v in (low + high) * 0.5],
+        "world_anchor_xyz": [round(float(v), 5) for v in location],
+        "nearest_parent_aabb_contacts": contacts[:4],
+    })
+
 points = []
 for obj in all_model_objects:
     points.extend(obj.matrix_world @ Vector(corner) for corner in obj.bound_box)
@@ -401,6 +514,12 @@ qa = {
     "installed_instances": len(INSTANCES),
     "installed_mesh_objects": len(installed_objects),
     "component_width_profiles": repeated_profiles,
+    "component_geometry_evidence": child_geometry_evidence,
+    "component_instance_spatial_evidence": component_instance_spatial_evidence,
+    "component_spatial_measurement_note": (
+        "All contact checks use world-space axis-aligned bounding boxes, not mesh collision or "
+        "contact proofs. AABB overlap/containment is diagnostic only; strict visual QA remains required."
+    ),
     "component_axis_alignment": alignment_contract,
     "component_long_axis_sign": long_axis_sign,
     "measurement_description": (

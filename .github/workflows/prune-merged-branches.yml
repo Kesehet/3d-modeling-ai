@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
     inputs:
       execute:
-        description: "Delete branches proven to match already-merged PR tips"
+        description: "Delete SHA-verified merged PR and fully integrated branches"
         type: boolean
         default: false
 
@@ -80,7 +80,7 @@ jobs:
               head = p["head"]
               if not p.get("merged_at") or not head.get("repo"):
                   continue
-              if head["repo"]["full_name"] != repo or p["base"]["repo"]["full_name"] != repo:
+              if head["repo"]["full_name"] != repo or not p["base"].get("repo") or p["base"]["repo"]["full_name"] != repo:
                   continue
               merged_heads.setdefault(head["ref"], set()).add(head["sha"])
 
@@ -102,7 +102,7 @@ jobs:
                   candidates.append((name, sha))
 
           print(f"Scanned {len(branches)} branches and {len(pulls)} PRs; "
-                f"{len(candidates)} exact-tip merged-PR candidates. Execute={execute}", flush=True)
+                f"{len(candidates)} safe-to-prune candidates. Execute={execute}", flush=True)
           failures = []
           for name, expected_sha in candidates:
               # Re-read before any deletion: a changed branch must survive.

@@ -56,6 +56,7 @@ from .feature_tasks import (
     mark_component_ready,
     normalize_feature_plan_payload,
     record_feature_progress,
+    requeue_failed_structural_feature_as_component,
     retry_feature,
     save_feature_plan,
 )
@@ -3825,6 +3826,30 @@ async def _run_auto_improve(job_id: str, max_rounds: int) -> None:
         current_status = _advance_assembly_repair_if_ready(root, _read_status(root))
         blocked, unresolved = _feature_queue_is_blocked(root)
         if blocked:
+            # Failure after three attempts should not silently strand unrelated
+            # dependent features when a structurally separate part can be
+            # built in isolation and attached to the preserved parent instead.
+            # This fallback is bounded to one attempt per eligible feature,
+            # requires existing accepted geometry, and never touches cutouts.
+            request_payload = json.loads((root / "request.json").read_text(encoding="utf-8"))
+            depth = int(request_payload.get("component_depth") or 0)
+            has_parent_model = _active_model_artifact(root, current_status) is not None
+            if depth < COMPONENT_MAX_DEPTH and has_parent_model:
+                recovered = requeue_failed_structural_feature_as_component(
+                    root, max_previous_attempts=FEATURE_MAX_ATTEMPTS
+                )
+                if recovered is not None:
+                    append_history(
+                        root, "feature_representation_fallback",
+                        feature_id=recovered.id, feature_name=recovered.name,
+                        previous_mode="in_place", new_mode="component_job",
+                        reason="In-place geometry attempts exhausted; retry frozen part with an isolated AI model.",
+                    )
+                    # Do not count a one-time representation pivot as geometric
+                    # progress. The child still must pass strict parent-level QA.
+                    blocked = False
+                    no_progress_rounds = 0
+                    continue
             status = _read_status(root)
             _write_status(
                 root,

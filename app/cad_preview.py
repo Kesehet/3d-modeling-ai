@@ -16,6 +16,9 @@ def render_cad_views(scene, output_dir: Path) -> dict[str, str]:
     output_dir.mkdir(parents=True, exist_ok=True)
     cameras = {
         "front-left": (1.0, -1.2, 0.75),
+        "back-right": (-1.0, 1.2, 0.75),
+        "left": (0.0, -1.0, 0.08),
+        "right": (0.0, 1.0, 0.08),
         "top": (0.15, -0.15, 1.0),
     }
     results: dict[str, str] = {}

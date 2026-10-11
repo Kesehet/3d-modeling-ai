@@ -233,3 +233,39 @@ def test_exhausted_disconnected_model_is_never_certified(tmp_path, monkeypatch):
     assert report["repair_exhausted"]
     assert not report["assembly_qa"]["pass"]
     assert (out / "assembly.step").is_file()
+
+
+@pytest.mark.parametrize("kind,details", [
+    ("profile_extrusion", {
+        "profile_points_mm": [[-20, -10], [30, -10], [20, 8], [0, 15], [-15, 12]],
+        "height_mm": 15,
+    }),
+    ("section_loft", {
+        "loft_sections_mm": [
+            [-30, 50, 28, 0, 0],
+            [0, 60, 32, 8, 0],
+            [35, 28, 16, 0, 0],
+        ],
+    }),
+])
+def test_nonprimitive_generic_shapes_export_true_cad(kind, details, tmp_path):
+    blueprint = CadBlueprint.model_validate({
+        "title": "Independent shape", "parts": [
+            {"name": "model", "kind": kind, **details}
+        ],
+    })
+    report = build_cad(blueprint, tmp_path)
+    assert report["step_reimport_valid"]
+    assert report["assembly_qa"]["pass"]
+    assert report["renders"]["top"] == "assembly-top.png"
+    assert (tmp_path / "assembly.glb").stat().st_size > 100
+
+
+@pytest.mark.parametrize("bad", [
+    {"kind": "profile_extrusion", "height_mm": 20, "profile_points_mm": [[0, 0], [2, 2], [4, 4]]},
+    {"kind": "section_loft", "loft_sections_mm": [[2, 5, 6, 0, 0], [1, 5, 6, 0, 0]]},
+    {"kind": "section_loft", "loft_sections_mm": [[0, 5, 6, 0, 0], [1, -5, 6, 0, 0]]},
+])
+def test_nonprimitive_shapes_reject_degenerate_profiles(bad):
+    with pytest.raises(ValueError):
+        CadBlueprint.model_validate({"title": "Bad", "parts": [{"name": "bad", **bad}]})

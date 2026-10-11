@@ -149,6 +149,23 @@ def _root() -> Path:
     return JOBS_ROOT / ".cad-experiments"
 
 
+def _prune_omitted_optional_fields(value):
+    """Hosted structured-output models commonly emit every nullable field as null.
+
+    Strip optional null values so Pydantic applies declared defaults.
+    Missing REQUIRED CAD dimensions still fail shape validation.
+    """
+    if isinstance(value, dict):
+        return {
+            key: _prune_omitted_optional_fields(item)
+            for key, item in value.items()
+            if item is not None
+        }
+    if isinstance(value, list):
+        return [_prune_omitted_optional_fields(item) for item in value]
+    return value
+
+
 async def generate_cad(
     prompt: str,
     model: str,
@@ -223,12 +240,20 @@ async def generate_cad(
                 temperature=0.15,
             )
             try:
-                blueprint = CadBlueprint.model_validate(response.data)
+                blueprint = CadBlueprint.model_validate(_prune_omitted_optional_fields(response.data))
                 # The caller, not the LLM, chooses whether separation is intentional.
                 blueprint = blueprint.model_copy(update={"assembly_mode": assembly_mode})
             except (ValidationError, ValueError, TypeError) as exc:
-                error = f"Blueprint schema: {exc}"
-                repair_history.append({"attempt": attempt, "status": "invalid_blueprint", "error": error[:800]})
+                error = (
+                    "Blueprint schema: " + str(exc)[:1400]
+                    + ". For EVERY profile_extrusion part supply profile_plane as xy/xz/yz, "
+                    "at least three explicit 2D profile_points_mm pairs and positive "
+                    "height_mm. For EVERY section_loft supply two or more strictly "
+                    "ordered [z,width,depth,x,y] stations. If an operation cannot "
+                    "be numerically specified, choose a supported simpler solid "
+                    "rather than leaving required geometry empty."
+                )
+                repair_history.append({"attempt": attempt, "status": "invalid_blueprint", "error": error[:1600]})
                 continue
             coverage = evaluate_required_component_coverage(
                 blueprint,

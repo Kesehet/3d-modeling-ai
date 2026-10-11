@@ -25,7 +25,7 @@ class CadPart(BaseModel):
     height_mm: float | None = None
 
     @model_validator(mode="after")
-    def check_geometry(self) -> "CadPart":
+    def check_geometry(self) -> CadPart:
         vals = [*self.position_mm, *self.rotation_deg]
         if any(not math.isfinite(v) for v in vals):
             raise ValueError("Coordinates and angles must be finite")
@@ -59,7 +59,7 @@ class CadBlueprint(BaseModel):
     parts: list[CadPart] = Field(min_length=1, max_length=32)
 
     @model_validator(mode="after")
-    def unique_part_names(self) -> "CadBlueprint":
+    def unique_part_names(self) -> CadBlueprint:
         names = [part.name.lower() for part in self.parts]
         if len(names) != len(set(names)):
             raise ValueError("Each part must have a distinct name")
@@ -87,11 +87,20 @@ Do not use fan-specific, lamp-specific or any object templates.
 def build_cad(blueprint: CadBlueprint, output_dir: Path) -> dict:
     """Construct STEP/STL and a multi-node GLB on CPU; re-import STEP for QA."""
     # Optional heavy CAD packages are imported only in the opt-in experiment.
-    from build123d import (
-        Align, Box, Compound, Cone, Cylinder, Pos, Rot, Sphere,
-        export_step, export_stl, import_step,
-    )
     import trimesh
+    from build123d import (
+        Align,
+        Box,
+        Compound,
+        Cone,
+        Cylinder,
+        Pos,
+        Rot,
+        Sphere,
+        export_step,
+        export_stl,
+        import_step,
+    )
 
     output_dir.mkdir(parents=True, exist_ok=True)
     solids = []

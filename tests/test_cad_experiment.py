@@ -193,7 +193,16 @@ def test_measured_disconnection_retries_and_preserves_good_export(tmp_path, monk
 
 def test_multimodal_reference_compares_real_render_with_original(tmp_path, monkeypatch):
     monkeypatch.setattr(cad_experiment, "JOBS_ROOT", tmp_path)
+    brief = {
+        "subject_description": "Solid mechanical object with radial arms",
+        "silhouette_geometry": ["long horizontal pieces"],
+        "required_components": ["cylinder", "two arms"],
+        "spatial_relationships": ["arms attach to core"],
+        "relative_proportions": ["arm length exceeds core diameter"],
+        "uncertain_details": [],
+    }
     fake = FakeOllama([
+        brief,
         BLUEPRINT,
         {"passed": False, "subject_recognizable": False,
          "reference_match_score": 0.1, "findings": ["wrong silhouette"]},
@@ -205,13 +214,17 @@ def test_multimodal_reference_compares_real_render_with_original(tmp_path, monke
         "A spindle with two long arms", "mock", client=fake,
         reference_images=["sample-original-b64"], reference_mode="exact_match",
     ))
-    assert len(fake.calls) == 4
+    assert len(fake.calls) == 5
     assert fake.calls[0]["images"] == ["sample-original-b64"]
-    assert len(fake.calls[1]["images"]) == 3
-    assert fake.calls[1]["images"][0] == "sample-original-b64"
     assert fake.calls[0]["model"] == cad_experiment.VISION_MODEL
-    assert "wrong silhouette" in fake.calls[2]["prompt"]
+    assert fake.calls[1]["images"] is None
+    assert fake.calls[1]["model"] == "mock"
+    assert "Independently inspected" in fake.calls[1]["prompt"]
+    assert len(fake.calls[2]["images"]) == 3
+    assert fake.calls[2]["images"][0] == "sample-original-b64"
+    assert "wrong silhouette" in fake.calls[3]["prompt"]
     assert report["reference_visual_qa"]["status"] == "passed"
+    assert report["reference_geometry_brief"]["status"] == "verified"
     assert not report["repair_exhausted"]
     assert (out / "manifest.json").is_file()
 

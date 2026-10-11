@@ -8,6 +8,7 @@ import os
 import shutil
 import uuid
 from pathlib import Path
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse
@@ -31,6 +32,7 @@ class CadRequest(BaseModel):
     model: str | None = Field(default=None, min_length=2, max_length=120)
     reference_images: list[str] = Field(default_factory=list, max_length=3)
     reference_mode: str = Field(default="shape_guidance", pattern="^(exact_match|shape_guidance|inspiration)$")
+    assembly_mode: Literal["single", "independent"] = "single"
 
 
 class CadVisualReview(BaseModel):
@@ -95,6 +97,7 @@ async def generate_cad(
     client: OllamaProxyClient | None = None,
     reference_images: list[str] | None = None,
     reference_mode: str = "shape_guidance",
+    assembly_mode: Literal["single", "independent"] = "single",
 ) -> tuple[CadBlueprint, dict, Path]:
     """Repair invalid assemblies with measured feedback; retain the last real export."""
     client = client or OllamaProxyClient()
@@ -126,6 +129,8 @@ async def generate_cad(
             )
             try:
                 blueprint = CadBlueprint.model_validate(response.data)
+                # The caller, not the LLM, chooses whether separation is intentional.
+                blueprint = blueprint.model_copy(update={"assembly_mode": assembly_mode})
             except (ValidationError, ValueError, TypeError) as exc:
                 error = f"Blueprint schema: {exc}"
                 continue
@@ -189,6 +194,7 @@ async def create_experiment(payload: CadRequest) -> dict:
             _, report, _ = await generate_cad(
                 payload.prompt, payload.model or REASONING_MODEL,
                 reference_images=payload.reference_images, reference_mode=payload.reference_mode,
+                assembly_mode=payload.assembly_mode,
             )
         except (OllamaProxyError, ValueError, RuntimeError, OSError) as exc:
             raise HTTPException(422, detail=str(exc)[:1000]) from exc

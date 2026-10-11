@@ -105,3 +105,12 @@ async def get_export(experiment_id: uuid.UUID, extension: str):
         raise HTTPException(404, "Export not found")
     return FileResponse(file, filename=f"cad-{experiment_id.hex}.{extension}",
                         media_type="application/octet-stream")
+
+
+@router.delete("/{experiment_id}")
+async def delete_experiment(experiment_id: uuid.UUID) -> dict:
+    _enabled()
+    path = _root() / experiment_id.hex
+    if path.is_dir():
+        shutil.rmtree(path)
+    return {"deleted": True}

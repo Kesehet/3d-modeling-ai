@@ -42,31 +42,36 @@ cd "$WORKSPACE"
 echo "Building 3D Modeling AI from commit ${GITHUB_SHA} on the VPS..."
 docker compose -p "$PROJECT" -f compose.hostinger.yaml --env-file .env build
 
-echo "Starting API and Blender worker..."
+echo "Starting API, Blender worker, and CPU CAD worker..."
 docker compose -p "$PROJECT" -f compose.hostinger.yaml --env-file .env up -d --remove-orphans
 
 for attempt in $(seq 1 90); do
   api_id=$(docker compose -p "$PROJECT" -f compose.hostinger.yaml --env-file .env ps -q api)
   worker_id=$(docker compose -p "$PROJECT" -f compose.hostinger.yaml --env-file .env ps -q worker)
+  cad_id=$(docker compose -p "$PROJECT" -f compose.hostinger.yaml --env-file .env ps -q cad)
   api_health=""
   worker_health=""
+  cad_health=""
 
   [ -n "$api_id" ] && api_health=$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$api_id")
   [ -n "$worker_id" ] && worker_health=$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$worker_id")
+  [ -n "$cad_id" ] && cad_health=$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$cad_id")
 
-  echo "3D readiness $attempt/90: api=${api_health:-missing} worker=${worker_health:-missing}"
+  echo "3D readiness $attempt/90: api=${api_health:-missing} worker=${worker_health:-missing} cad=${cad_health:-missing}"
 
-  if [ "$api_health" = healthy ] && [ "$worker_health" = healthy ]; then
+  if [ "$api_health" = healthy ] && [ "$worker_health" = healthy ] && [ "$cad_health" = healthy ]; then
     echo THREED_BOOTSTRAP_OK
     exit 0
   fi
 
   api_state=""
   worker_state=""
+  cad_state=""
   [ -n "$api_id" ] && api_state=$(docker inspect --format '{{.State.Status}}' "$api_id")
   [ -n "$worker_id" ] && worker_state=$(docker inspect --format '{{.State.Status}}' "$worker_id")
+  [ -n "$cad_id" ] && cad_state=$(docker inspect --format '{{.State.Status}}' "$cad_id")
 
-  if [ "$api_state" = exited ] || [ "$api_state" = dead ] || [ "$worker_state" = exited ] || [ "$worker_state" = dead ]; then
+  if [ "$api_state" = exited ] || [ "$api_state" = dead ] || [ "$worker_state" = exited ] || [ "$worker_state" = dead ] || [ "$cad_state" = exited ] || [ "$cad_state" = dead ]; then
     echo "A 3D Modeling AI container exited during startup."
     docker compose -p "$PROJECT" -f compose.hostinger.yaml --env-file .env ps || true
     docker compose -p "$PROJECT" -f compose.hostinger.yaml --env-file .env logs --tail=200 || true

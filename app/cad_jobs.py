@@ -8,9 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import shutil
 import uuid
-from pathlib import Path
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
@@ -36,44 +34,46 @@ async def run_cad_job(job_id: str, version: int, *, model: str | None = None) ->
 
     root = api._require_job(job_id)
     export_dir = root / "exports"
-    work_root: Path | None = None
+    artifact_id: str | None = None
     try:
         request = json.loads((root / "request.json").read_text(encoding="utf-8"))
         api._write_status(root, state="running", stage="cad_reasoning", modeling_strategy="cpu_cad")
         append_history(root, "cad_generation_started", version=version, backend="build123d")
+        auth = {"Authorization": f"Bearer {API_TOKEN}"}
         async with httpx.AsyncClient(
             timeout=httpx.Timeout(CAD_MAX_WAIT_SECONDS, connect=10.0)
         ) as client:
             response = await client.post(
                 f"{CAD_WORKER_URL}/v1/cad-experiments",
                 json={"prompt": request["prompt"], **({"model": model} if model else {})},
-                headers={"Authorization": f"Bearer {API_TOKEN}"},
+                headers=auth,
             )
-        if not response.is_success:
-            raise RuntimeError(f"CAD worker returned {response.status_code}: {response.text[:350]}")
-        payload = response.json()
-        if not payload.get("ok") or not payload.get("step_reimport_valid"):
-            raise RuntimeError("CAD worker reported invalid STEP geometry")
-        identifier = uuid.UUID(str(payload["id"])).hex
-        work_root = api.JOBS_ROOT / ".cad-experiments" / identifier
-        if not work_root.is_dir():
-            raise RuntimeError("CAD worker exports are missing from the shared jobs volume")
-
-        api._write_status(root, state="running", stage="cad_exporting")
-        exports = {"glb": "assembly.glb", "step": "assembly.step", "stl": "assembly.stl",
-                   "json": "manifest.json"}
-        for extension, source_name in exports.items():
-            src = work_root / source_name
-            if not src.is_file() or src.stat().st_size < 100:
-                raise RuntimeError(f"CAD output missing or empty: {source_name}")
-        # Keep old Blender/CAD model versions intact, even if the new build fails.
-        for extension, source_name in exports.items():
+            if not response.is_success:
+                raise RuntimeError(f"CAD worker returned {response.status_code}: {response.text[:350]}")
+            payload = response.json()
+            if not payload.get("ok") or not payload.get("step_reimport_valid"):
+                raise RuntimeError("CAD worker reported invalid STEP geometry")
+            artifact_id = uuid.UUID(str(payload["id"])).hex
+            api._write_status(root, state="running", stage="cad_exporting")
+            exports = {"glb": "assembly.glb", "step": "assembly.step", "stl": "assembly.stl",
+                       "json": "manifest.json"}
+            download_files: dict[str, bytes] = {}
+            for extension in exports:
+                response = await client.get(
+                    f"{CAD_WORKER_URL}/v1/cad-experiments/{artifact_id}/files/{extension}",
+                    headers=auth,
+                    timeout=90.0,
+                )
+                if not response.is_success or not 100 <= len(response.content) <= 25_000_000:
+                    raise RuntimeError(f"CAD worker export was missing or invalid: {extension}")
+                download_files[extension] = response.content
+        # Transfer verified worker artifacts to the normal job before promotion.
+        for extension, content in download_files.items():
             suffix = f".{extension}" if extension != "json" else "-cad.json"
             dest = export_dir / f"model-v{version}{suffix}"
             temp = export_dir / f".model-v{version}{suffix}.tmp"
-            shutil.copyfile(work_root / source_name, temp)
+            temp.write_bytes(content)
             temp.replace(dest)
-
         quality = {
             "status": "geometric_integrity_only",
             "recognizable": None,
@@ -111,8 +111,15 @@ async def run_cad_job(job_id: str, version: int, *, model: str | None = None) ->
         append_history(root, "cad_generation_failed", version=version,
                        reason=str(exc)[:600])
     finally:
-        if work_root is not None and work_root.is_dir():
-            shutil.rmtree(work_root, ignore_errors=True)
+        if artifact_id:
+            try:
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    await client.delete(
+                        f"{CAD_WORKER_URL}/v1/cad-experiments/{artifact_id}",
+                        headers={"Authorization": f"Bearer {API_TOKEN}"},
+                    )
+            except (httpx.HTTPError, OSError):
+                pass
 
 
 async def start_cad_generation(job_id: str, request: CadGenerateRequest) -> dict:

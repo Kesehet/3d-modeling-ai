@@ -33,12 +33,9 @@ def test_dashboard_has_cpu_cad_choice_and_step_download():
 
 def test_cpu_cad_job_status_and_viewer_exports(tmp_path, monkeypatch):
     ident, root = create_job_in_root(tmp_path, monkeypatch)
-    worker_dir = tmp_path / ".cad-experiments" / uuid.uuid4().hex
-    worker_dir.mkdir(parents=True)
-    for filename in ("assembly.glb", "assembly.stl", "assembly.step", "manifest.json"):
-        (worker_dir / filename).write_bytes(b"x" * 220)
+    worker_id = uuid.uuid4().hex
     response_payload = {
-        "id": worker_dir.name, "ok": True, "step_reimport_valid": True,
+        "id": worker_id, "ok": True, "step_reimport_valid": True,
         "part_count": 3, "parts": [{"name": "core"}, {"name": "left"}, {"name": "right"}],
         "attempts": 1,
     }
@@ -46,6 +43,15 @@ def test_cpu_cad_job_status_and_viewer_exports(tmp_path, monkeypatch):
     class FakeClient:
         def __init__(self, **kwargs):
             pass
+
+        async def get(self, url, **kwargs):
+            suffix = url.rsplit("/", 1)[-1]
+            assert suffix in ("step", "stl", "glb", "json")
+            return httpx.Response(200, content=b"x" * 220, request=httpx.Request("GET", url))
+
+        async def delete(self, url, **kwargs):
+            assert url.endswith(worker_id)
+            return httpx.Response(200, json={"deleted": True}, request=httpx.Request("DELETE", url))
 
         async def __aenter__(self):
             return self
@@ -68,7 +74,6 @@ def test_cpu_cad_job_status_and_viewer_exports(tmp_path, monkeypatch):
     assert status["quality_gate"]["recognizable"] is None
     for suffix in (".step", ".stl", ".glb", "-cad.json", "-qa.json"):
         assert (root / "exports" / f"model-v1{suffix}").is_file()
-    assert not worker_dir.exists()
 
 
 def test_cpu_cad_worker_failure_is_visible_and_existing_model_is_preserved(tmp_path, monkeypatch):

@@ -18,6 +18,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+cad = [
+  "build123d>=0.9,<1",
+  "trimesh>=4,<5",
+]
 dev = [
   "pytest>=8,<9",
   "ruff>=0.8,<1",

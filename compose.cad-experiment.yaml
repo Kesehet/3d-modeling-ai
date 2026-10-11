@@ -1,0 +1,34 @@
+# Branch-only stand-alone CPU experiment: never auto-deployed to production.
+services:
+  cad:
+    build:
+      context: .
+      dockerfile: Dockerfile.cad
+    image: 3d-modeling-ai-cad:experiment
+    environment:
+      CAD_EXPERIMENT_ENABLED: "1"
+      JOBS_ROOT: /data/jobs
+      THREED_API_TOKEN_B64: ${THREED_API_TOKEN_B64:?must be configured}
+      OLLAMA_PROXY_API_KEY_B64: ${OLLAMA_PROXY_API_KEY_B64:?must be configured}
+      REASONING_MODEL: ${REASONING_MODEL:-gpt-oss:120b}
+    ports:
+      - "127.0.0.1:${CAD_PORT:-18084}:8084"
+    volumes:
+      - cad-jobs:/data/jobs
+    read_only: true
+    tmpfs:
+      - /tmp:size=256m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 2g
+    cpus: 1.5
+    pids_limit: 128
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8084/health', timeout=5)"]
+      interval: 20s
+      timeout: 10s
+      retries: 3
+volumes:
+  cad-jobs:

@@ -13,7 +13,7 @@ from .history import append_history
 
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
 PUBLIC_ARTIFACT_CATEGORIES = {"references", "renders", "scene", "exports"}
-DASHBOARD_UI_VERSION = "live-model-viewer-v2"
+DASHBOARD_UI_VERSION = "live-model-viewer-cpu-cad-v3"
 
 # A single AI/Blender stage should never sit untouched this long. Long-running
 # requests refresh status as they move between stages; anything older is an
@@ -247,6 +247,8 @@ def jobs_snapshot() -> dict:
             except (OSError, json.JSONDecodeError):
                 continue
 
+            if root.name.startswith(".") or not request or not status:
+                continue
             if request.get("prompt") == "Deployment MCP smoke test cube":
                 continue
 
@@ -340,6 +342,8 @@ def jobs_snapshot() -> dict:
                     "state": status.get("state", "unknown"),
                     "stage": status.get("stage", "unknown"),
                     "modeling_strategy": status.get("modeling_strategy"),
+                    "cad": status.get("cad") if isinstance(status.get("cad"), dict) else None,
+                    "error": status.get("error"),
                     "working_cage_version": status.get("working_cage_version"),
                     "cage_edit_stall_count": status.get("cage_edit_stall_count"),
                     "quality_gate": status.get("quality_gate") if isinstance(status.get("quality_gate"), dict) else None,
@@ -458,6 +462,7 @@ header{display:flex;align-items:center;justify-content:space-between;gap:16px;ma
   <div class="dialog">
     <h2>New model</h2>
     <div class="field"><label for="jobPrompt">What should we make?</label><textarea id="jobPrompt" placeholder="Describe the object or character..."></textarea></div>
+    <div class="field"><label for="jobEngine">Modeling engine</label><select id="jobEngine"><option value="cpu_cad">CPU CAD · fast parametric STEP/STL/GLB</option><option value="blender">Blender AI · iterative visual modeling</option></select></div>
     <div class="field"><label for="jobUse">Use</label><select id="jobUse"><option value="rendering">Rendering</option><option value="3d_printing">3D printing</option><option value="game_asset">Game asset</option></select></div>
     <div class="field"><label for="jobWidth">Width in mm (optional)</label><input id="jobWidth" type="number" min="0.01" max="10000" step="0.1"></div>
     <div class="actions"><button class="btn" id="cancelNew">Cancel</button><button class="btn primary" id="createModel">Create model</button></div>
@@ -466,14 +471,14 @@ header{display:flex;align-items:center;justify-content:space-between;gap:16px;ma
 </div>
 
 <script>
-const CLIENT_UI_VERSION="live-model-viewer-v2";
+const CLIENT_UI_VERSION="live-model-viewer-cpu-cad-v3";
 const byId=id=>document.getElementById(id);
 const esc=value=>String(value??"").replace(/[&<>"']/g,ch=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[ch]));
 const els={
   home:byId("homeView"),detail:byId("detailView"),gallery:byId("jobGallery"),
   title:byId("detailTitle"),meta:byId("detailMeta"),quality:byId("qualityBanner"),viewer:byId("liveModelViewer"),viewerEmpty:byId("viewerEmpty"),viewerLabel:byId("viewerLabel"),modelDownload:byId("modelDownload"),featurePanel:byId("featurePanel"),featureProgress:byId("featureProgress"),featureGrid:byId("featureGrid"),renders:byId("renderGrid"),references:byId("referenceGrid"),files:byId("fileList"),json:byId("detailJson"),
   newBtn:byId("newJobBtn"),dialog:byId("newJobDialog"),cancel:byId("cancelNew"),create:byId("createModel"),
-  prompt:byId("jobPrompt"),use:byId("jobUse"),width:byId("jobWidth"),notice:byId("newNotice"),
+  prompt:byId("jobPrompt"),engine:byId("jobEngine"),use:byId("jobUse"),width:byId("jobWidth"),notice:byId("newNotice"),
   back:byId("backBtn"),improve:byId("improveBtn"),deleteBtn:byId("deleteBtn")
 };
 let data=null;
@@ -520,6 +525,8 @@ function renderDetail(job){
   const autoText=auto?.enabled?(" · auto "+(auto.state||"")+" "+(auto.current_round||0)+"/"+(auto.max_rounds||30)):"";
   els.meta.textContent=(job.state||"")+" · "+(job.stage||"")+autoText+" · "+job.job_id;
   const activeModel=job.latest_model||null;
+  const isCad=job.modeling_strategy==="cpu_cad";
+  els.featurePanel.classList.toggle("hidden",isCad);
   if(activeModel?.name){
     const src=modelUrl(job.job_id,activeModel);
     els.viewerEmpty.hidden=true;
@@ -545,7 +552,10 @@ function renderDetail(job){
   const needsMesh=job.stage==="generic_needs_strategy_switch";
   const improvingMesh=job.stage==="adaptive_mesh_needs_refinement";
   const retryingQuality=job.stage==="generic_quality_unverified";
-  if(job.stage==="waiting_for_references"||job.stage==="researching_references"){
+  if(isCad){
+    els.quality.innerHTML=job.stage==="cad_failed"?("<strong>CPU CAD generation failed.</strong>"+esc(job.error||"See job history for the underlying error.")):(job.state==="running"?"<strong>CPU CAD is building.</strong>Ollama is planning parts and the CPU worker will export STEP, STL and GLB.":"<strong>CAD model ready for visual review.</strong>STEP/mesh integrity passed; appearance, part connections and mechanical correctness need review.");
+    els.quality.classList.add("show");
+  }else if(job.stage==="waiting_for_references"||job.stage==="researching_references"){
     const gate=job.reference_gate||{};
     els.quality.innerHTML='<strong>Reference images required before modeling.</strong>'+esc(gate.reason||"The system is searching for verified references. Geometry generation is paused until at least one usable reference is available.");
     els.quality.classList.add("show");
@@ -599,16 +609,16 @@ function renderDetail(job){
       }).join("")
     : '<div class="empty-state" style="grid-column:1/-1">No reference images are saved for this job.</div>';
   const scene=(job.artifacts?.scene||[]).filter(file=>/\.(blend)$/i.test(file.name));
-  const exports=(job.artifacts?.exports||[]).filter(file=>/\.(glb|obj|stl|3mf|json)$/i.test(file.name));
+  const exports=(job.artifacts?.exports||[]).filter(file=>/\.(glb|obj|stl|step|3mf|json)$/i.test(file.name));
   const files=[...scene.map(file=>["scene",file]),...exports.map(file=>["exports",file])];
   els.files.innerHTML=files.length
     ? files.map(([category,file])=>'<a class="file" download href="'+fileUrl(job.job_id,category,file.name)+'"><b>↓</b>'+esc(file.name)+'</a>').join("")
     : '<span style="color:var(--muted)">No downloadable model files yet.</span>';
   els.json.textContent=JSON.stringify({status:{state:job.state,stage:job.stage,modeling_strategy:job.modeling_strategy,quality_gate:job.quality_gate,auto_improve:job.auto_improve,reference_gate:job.reference_gate},latest_model:job.latest_model,feature_plan:job.feature_plan,references:job.references,latest_vision_images:job.latest_vision_images,qa:job.qa,history:job.history},null,2);
   const autoRunning=auto&&["scheduled","running","retrying"].includes(auto.state);
-  els.improve.disabled=busy||!scene.length||autoRunning;
+  els.improve.disabled=busy||isCad||!scene.length||autoRunning;
   if(!busy){
-    els.improve.textContent=autoRunning?("Auto improving "+(auto.current_round||0)+"/"+(auto.max_rounds||30)):"Auto improve ×30";
+    els.improve.textContent=isCad?"CAD refine: not available yet":autoRunning?("Auto improving "+(auto.current_round||0)+"/"+(auto.max_rounds||30)):"Auto improve ×30";
   }
   els.improve.title=retryingQuality?"Let the multimodal modeling director inspect the references and current renders and choose the next action.":(needsMesh?"Let the AI rebuild the current result using the mesh strategy.":"");
   els.deleteBtn.disabled=busy||job.state==="running";
@@ -641,7 +651,8 @@ async function createModel(){
     els.dialog.classList.remove("show");
     await refresh();
     openJob(created.job_id);
-    response=await fetch("/dashboard/jobs/"+encodeURIComponent(created.job_id)+"/generate",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({auto_research:true,auto_improve_rounds:30})});
+    const cad=els.engine.value==="cpu_cad";
+    response=await fetch("/dashboard/jobs/"+encodeURIComponent(created.job_id)+(cad?"/cad":"/generate"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(cad?{}:{auto_research:true,auto_improve_rounds:30})});
     if(!response.ok){
       await refresh();
       return;

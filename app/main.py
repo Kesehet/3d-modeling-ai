@@ -22,6 +22,7 @@ from pydantic import BaseModel, Field, ValidationError, model_validator
 
 from .artifacts import require_unused_version, reserve_model_version
 from .builders import pikachu_script
+from .cad_jobs import router as cad_jobs_router
 from .cage_edits import CageEditAction, apply_cage_edit_action
 from .component_assembly import component_assembly_script
 from .component_direction import required_taper_direction, reverse_failed_axis_contract
@@ -72,6 +73,7 @@ from .research import research_web_references, write_research_manifest
 from .security import require_api_token
 
 app = FastAPI(title="3D Modeling AI", version="0.2.0")
+app.include_router(cad_jobs_router)
 AUTO_IMPROVE_TASKS: dict[str, asyncio.Task[None]] = {}
 REFERENCE_RECOVERY_TASKS: dict[str, asyncio.Task[None]] = {}
 FEATURE_MAX_ATTEMPTS = 3
@@ -4815,6 +4817,8 @@ async def capabilities() -> dict:
             "generic-visual-refinement",
             "quality-regression-benchmark-suite",
             "permanent-job-delete",
+            "cpu-cad-ollama-generator",
+            "step-stl-glb-cad-downloads",
         ],
     }
 

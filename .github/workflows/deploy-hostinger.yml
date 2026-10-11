@@ -197,6 +197,66 @@ jobs:
             -X DELETE "$BASE_URL/v1/jobs/$JOB_ID" >/dev/null
           echo "Removed disposable infrastructure smoke job."
 
+      - name: Verify production CPU CAD via ordinary job and dashboard artifacts
+        env:
+          THREED_API_TOKEN: ${{ secrets.THREED_API_TOKEN }}
+          THREED_HOSTNAME: ${{ vars.THREED_HOSTNAME || '3d-modeling-ai.srv1058562.hstgr.cloud' }}
+        run: |
+          set -euo pipefail
+          BASE_URL="https://$THREED_HOSTNAME"
+          JOB_JSON=$(curl --fail --silent --show-error --max-time 20 \
+            -H "Authorization: Bearer $THREED_API_TOKEN" \
+            -H 'Content-Type: application/json' \
+            -d '{"prompt":"A ceiling fan with a central motor, upward support rod and three long radial blades around the hub","intended_use":"rendering"}' \
+            "$BASE_URL/v1/jobs")
+          JOB_ID=$(echo "$JOB_JSON" | jq -r '.job_id // empty')
+          test -n "$JOB_ID"
+          cleanup() {
+            curl --silent --show-error --max-time 15 -X DELETE \
+              -H "Authorization: Bearer $THREED_API_TOKEN" \
+              "$BASE_URL/v1/jobs/$JOB_ID" >/dev/null || true
+          }
+          trap cleanup EXIT
+          RESULT=$(curl --fail --silent --show-error --max-time 30 -X POST \
+            -H "Authorization: Bearer $THREED_API_TOKEN" \
+            -H 'Content-Type: application/json' -d '{}' \
+            "$BASE_URL/v1/jobs/$JOB_ID/cad")
+          echo "$RESULT" | jq -e '.started == true and .engine == "cpu_cad"' >/dev/null
+          echo "CPU CAD dispatched as normal job: $JOB_ID"
+          complete=0
+          for attempt in $(seq 1 72); do
+            STATUS=$(curl --fail --silent --show-error --max-time 20 \
+              -H "Authorization: Bearer $THREED_API_TOKEN" \
+              "$BASE_URL/v1/jobs/$JOB_ID")
+            state=$(echo "$STATUS" | jq -r '.state // "unknown"')
+            stage=$(echo "$STATUS" | jq -r '.stage // "unknown"')
+            echo "CAD attempt $attempt/72: state=$state stage=$stage"
+            if [ "$stage" = cad_needs_visual_review ] && [ "$state" = ready ]; then
+              echo "$STATUS" | jq -e '.cad.part_count >= 5 and .cad.visual_review_required == true' >/dev/null
+              complete=1
+              break
+            fi
+            if [ "$state" = failed ]; then
+              echo "$STATUS" | jq '{state,stage,error}'
+              exit 1
+            fi
+            sleep 5
+          done
+          test "$complete" -eq 1
+          VERSION=$(echo "$STATUS" | jq -r '.cad.version')
+          test "$VERSION" != null
+          curl --fail --silent --show-error --max-time 30 \
+            -H "Authorization: Bearer $THREED_API_TOKEN" \
+            "$BASE_URL/v1/jobs/$JOB_ID/artifacts/exports/model-v$VERSION.glb" \
+            -o /tmp/cad-smoke.glb
+          test "$(xxd -p -l 4 /tmp/cad-smoke.glb)" = "676c5446"
+          curl --fail --silent --show-error --max-time 30 \
+            -H "Authorization: Bearer $THREED_API_TOKEN" \
+            "$BASE_URL/v1/jobs/$JOB_ID/artifacts/exports/model-v$VERSION.step" \
+            -o /tmp/cad-smoke.step
+          grep -aq "ISO-10303-21" /tmp/cad-smoke.step
+          echo "Verified Ollama -> CPU CAD -> ordinary job -> dashboard STEP/GLB artifacts."
+
       - name: Run live Pikachu regression
         if: ${{ contains(github.event.head_commit.message || '', '[live-pikachu]') }}
         env:

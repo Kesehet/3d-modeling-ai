@@ -12,6 +12,7 @@ services:
     environment:
       THREED_API_TOKEN_B64: ${THREED_API_TOKEN_B64:?THREED_API_TOKEN_B64 must be set}
       WORKER_URL: http://worker:8090
+      CAD_WORKER_URL: http://cad:8084
       JOBS_ROOT: /var/lib/3d-modeling-ai/jobs
       OLLAMA_PROXY_API_KEY_B64: ${OLLAMA_PROXY_API_KEY_B64:?OLLAMA_PROXY_API_KEY_B64 must be set}
       REASONING_MODEL: ${REASONING_MODEL:-gpt-oss:120b}
@@ -23,6 +24,8 @@ services:
       - jobs-data:/var/lib/3d-modeling-ai/jobs
     depends_on:
       worker:
+        condition: service_healthy
+      cad:
         condition: service_healthy
     networks:
       - worker-net
@@ -101,6 +104,48 @@ services:
       retries: 5
       start_period: 45s
 
+  cad:
+    build:
+      context: .
+      dockerfile: Dockerfile.cad
+    image: 3d-modeling-ai-cad:local
+    labels:
+      - traefik.enable=false
+    restart: unless-stopped
+    init: true
+    environment:
+      CAD_EXPERIMENT_ENABLED: "1"
+      JOBS_ROOT: /data/jobs
+      THREED_API_TOKEN_B64: ${THREED_API_TOKEN_B64:?THREED_API_TOKEN_B64 must be set}
+      OLLAMA_PROXY_API_KEY_B64: ${OLLAMA_PROXY_API_KEY_B64:?OLLAMA_PROXY_API_KEY_B64 must be set}
+      REASONING_MODEL: ${REASONING_MODEL:-gpt-oss:120b}
+    volumes:
+      - cad-jobs:/data/jobs
+    networks:
+      - worker-net
+      - traefik-proxy
+    read_only: true
+    tmpfs:
+      - /tmp:size=256m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    mem_limit: ${CAD_WORKER_MEMORY:-2g}
+    cpus: ${CAD_WORKER_CPUS:-1.5}
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8084/health', timeout=5).read()"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
 networks:
   worker-net:
     internal: true
@@ -109,3 +154,4 @@ networks:
 
 volumes:
   jobs-data:
+  cad-jobs:

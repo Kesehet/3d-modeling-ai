@@ -64,3 +64,25 @@ experiment branch. Ordinary pushes and pull requests never use Ollama secrets.
   **actual unmocked Ollama run** plus independent visual inspection of
   downloaded GLB/STEP and honest missing-part reporting.
 * Workflows do not deploy or alter the production server.
+
+## Unified dashboard and live application
+
+Once this PR is merged, the regular **New Job** dialog will offer CPU CAD
+and Blender AI. Selecting CPU CAD creates the same existing job ID, status,
+history, GLB live model viewer and downloadable artifacts, but dispatches
+modeling to an internal CPU-only build123d/OpenCascade container. STEP is
+included in the regular Downloads panel.
+
+The API endpoint is `POST /v1/jobs/{job_id}/cad` (Bearer token); the
+dashboard dispatches to `POST /dashboard/jobs/{job_id}/cad`. Both start a
+tracked, asynchronous job and return immediately. The dashboard refreshes
+the status automatically. Errors are displayed, previous export versions
+are retained, and success explicitly means **geometry export passed, visual
+acceptance still required**. CPU CAD jobs do not offer the older Blender
+auto-improve action.
+
+The deployment adds a CPU-limited `cad` sidecar on the private Docker
+network. It uses its **own** volume so the CAD engine doesn't need access to
+Blender worker files. The main API receives exports over internal HTTP,
+stores them atomically in the standard job workspace, and cleans up the
+sidecar's temporary run. The existing Blender worker continues unchanged.

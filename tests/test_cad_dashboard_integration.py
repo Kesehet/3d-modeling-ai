@@ -112,3 +112,64 @@ def test_cpu_cad_rejects_running_legacy_job(tmp_path, monkeypatch):
         assert exc.status_code == 409
     else:
         raise AssertionError("Concurrent Blender/CAD generations must be rejected")
+
+def test_real_cpu_geometry_flows_through_standard_job_exports(tmp_path, monkeypatch):
+    """Actual OpenCascade STEP and GLB, simulated Ollama+network transport."""
+    import pytest
+    from build123d import import_step
+
+    trimesh = pytest.importorskip("trimesh")
+    from app.cad_engine import CadBlueprint, build_cad
+
+    ident, root = create_job_in_root(tmp_path, monkeypatch)
+    worker_id = uuid.uuid4().hex
+    worker_dir = tmp_path / "worker" / worker_id
+    blueprint = CadBlueprint.model_validate({
+        "title": "Three-body benchmark",
+        "parts": [
+            {"name": "motor", "kind": "cylinder", "radius_mm": 25, "height_mm": 25},
+            {"name": "shaft", "kind": "cylinder", "radius_mm": 7, "height_mm": 70,
+             "position_mm": [0, 0, 45]},
+            {"name": "side_arm", "kind": "box", "dimensions_mm": [60, 12, 4],
+             "position_mm": [35, 0, 0]},
+        ],
+    })
+    report = build_cad(blueprint, worker_dir)
+
+    class LocalWorkerTransport:
+        def __init__(self, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def post(self, url, **kwargs):
+            return httpx.Response(200, request=httpx.Request("POST", url),
+                                  json={"id": worker_id, "ok": True,
+                                        "step_reimport_valid": report["step_reimport_valid"],
+                                        "part_count": report["part_count"],
+                                        "parts": report["parts"], "attempts": 1})
+
+        async def get(self, url, **kwargs):
+            suffix = url.rsplit("/", 1)[-1]
+            filename = {"step": "assembly.step", "stl": "assembly.stl",
+                        "glb": "assembly.glb", "json": "manifest.json"}[suffix]
+            return httpx.Response(200, request=httpx.Request("GET", url),
+                                  content=(worker_dir / filename).read_bytes())
+
+        async def delete(self, url, **kwargs):
+            return httpx.Response(200, request=httpx.Request("DELETE", url),
+                                  json={"deleted": True})
+
+    monkeypatch.setattr(cad_jobs.httpx, "AsyncClient", LocalWorkerTransport)
+    asyncio.run(cad_jobs.run_cad_job(ident, 1))
+    stored = root / "exports"
+    assert main._read_status(root)["stage"] == "cad_needs_visual_review"
+    imported = import_step(str(stored / "model-v1.step"))
+    assert imported.is_valid and imported.volume > 0
+    glb = trimesh.load(stored / "model-v1.glb", force="scene")
+    assert len(glb.geometry) == 3
+    assert (stored / "model-v1-cad.json").stat().st_size > 100

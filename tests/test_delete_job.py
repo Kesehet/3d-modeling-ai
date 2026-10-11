@@ -4,7 +4,7 @@ from app.main import app
 
 
 def test_dashboard_exposes_delete_job_route():
-    paths = {route.path for route in app.routes}
+    paths = {route.path for route in app.routes if hasattr(route, "path")}
     assert "/dashboard/jobs/{job_id}" in paths
 
 

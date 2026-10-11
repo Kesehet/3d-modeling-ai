@@ -159,3 +159,77 @@ def test_failed_blueprint_cleans_temp_dir(tmp_path, monkeypatch):
         ))
     root = tmp_path / ".cad-experiments"
     assert list(root.iterdir()) == []
+
+
+def test_measured_disconnection_retries_and_preserves_good_export(tmp_path, monkeypatch):
+    monkeypatch.setattr(cad_experiment, "JOBS_ROOT", tmp_path)
+    floating = {
+        "title": "Bad candidate",
+        "parts": [
+            {"name": "object_A", "kind": "box", "dimensions_mm": [10, 10, 10]},
+            {"name": "object_B", "kind": "box", "dimensions_mm": [10, 10, 10],
+             "position_mm": [130, 0, 0]},
+        ],
+    }
+    repaired = {
+        **floating,
+        "title": "Repaired candidate",
+        "parts": [
+            floating["parts"][0],
+            {**floating["parts"][1], "position_mm": [9, 0, 0]},
+        ],
+    }
+    fake = FakeOllama([floating, repaired])
+    plan, report, out = asyncio.run(cad_experiment.generate_cad(
+        "Two parts that must touch", "mock", client=fake,
+    ))
+    assert report["attempts"] == 2
+    assert report["assembly_qa"]["pass"]
+    assert "Disconnected part group" in fake.calls[1]["prompt"]
+    assert plan.title == "Repaired candidate"
+    assert (out / "assembly-front-left.png").stat().st_size > 100
+    assert (out / "assembly-top.png").stat().st_size > 100
+
+
+def test_multimodal_reference_compares_real_render_with_original(tmp_path, monkeypatch):
+    monkeypatch.setattr(cad_experiment, "JOBS_ROOT", tmp_path)
+    fake = FakeOllama([
+        BLUEPRINT,
+        {"passed": False, "subject_recognizable": False,
+         "reference_match_score": 0.1, "findings": ["wrong silhouette"]},
+        BLUEPRINT,
+        {"passed": True, "subject_recognizable": True,
+         "reference_match_score": 0.92, "findings": []},
+    ])
+    _, report, out = asyncio.run(cad_experiment.generate_cad(
+        "A spindle with two long arms", "mock", client=fake,
+        reference_images=["sample-original-b64"], reference_mode="exact_match",
+    ))
+    assert len(fake.calls) == 4
+    assert fake.calls[0]["images"] == ["sample-original-b64"]
+    assert len(fake.calls[1]["images"]) == 3
+    assert fake.calls[1]["images"][0] == "sample-original-b64"
+    assert fake.calls[0]["model"] == cad_experiment.VISION_MODEL
+    assert "wrong silhouette" in fake.calls[2]["prompt"]
+    assert report["reference_visual_qa"]["status"] == "passed"
+    assert not report["repair_exhausted"]
+    assert (out / "manifest.json").is_file()
+
+
+def test_exhausted_disconnected_model_is_never_certified(tmp_path, monkeypatch):
+    monkeypatch.setattr(cad_experiment, "JOBS_ROOT", tmp_path)
+    disconnected = {
+        "title": "Disconnected",
+        "parts": [
+            {"name": "first", "kind": "sphere", "radius_mm": 5},
+            {"name": "second", "kind": "sphere", "radius_mm": 5,
+             "position_mm": [300, 0, 0]},
+        ],
+    }
+    _, report, out = asyncio.run(cad_experiment.generate_cad(
+        "Two touching spheres", "mock", client=FakeOllama([disconnected]),
+    ))
+    assert report["attempts"] == 3
+    assert report["repair_exhausted"]
+    assert not report["assembly_qa"]["pass"]
+    assert (out / "assembly.step").is_file()

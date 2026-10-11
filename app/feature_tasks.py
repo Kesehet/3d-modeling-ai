@@ -519,6 +519,10 @@ def active_or_next_feature(plan: FeaturePlan) -> FeatureTask | None:
     candidates.sort(
         key=lambda feature: (
             0 if feature.required else 1,
+            # Install a rescued structural part before starting unrelated
+            # in-place edits. Otherwise a later edit may target an out-of-date
+            # SceneSpec after the accepted child assembly becomes authoritative.
+            0 if feature.status == "retry" and feature.component_fallback_attempted else 1,
             0 if feature.build_mode == "in_place" else 1,
             order.get(feature.id, 10_000),
             feature.attempts,

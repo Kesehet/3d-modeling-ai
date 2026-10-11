@@ -100,6 +100,67 @@ class CadBlueprint(BaseModel):
         return self
 
 
+def cad_generation_schema() -> dict:
+    """Minimal per-shape LLM schema. Avoid forcing irrelevant nullable fields.
+
+    The true source of validation remains CadBlueprint/Pydantic after inference.
+    """
+    number = {"type": "number"}
+    triple = {"type": "array", "items": number, "minItems": 3, "maxItems": 3}
+    pair = {"type": "array", "items": number, "minItems": 2, "maxItems": 2}
+    loft_section = {"type": "array", "items": number, "minItems": 5, "maxItems": 5}
+    common = {
+        "name": {"type": "string", "minLength": 1},
+        "position_mm": triple,
+        "rotation_deg": triple,
+    }
+    variants = {
+        "box": {"dimensions_mm": triple},
+        "cylinder": {"radius_mm": number, "height_mm": number},
+        "cone": {"radius_mm": number, "top_radius_mm": number, "height_mm": number},
+        "sphere": {"radius_mm": number},
+        "tube": {"radius_mm": number, "inner_radius_mm": number, "height_mm": number},
+        "profile_extrusion": {
+            "profile_plane": {"type": "string", "enum": ["xy", "xz", "yz"]},
+            "profile_points_mm": {
+                "type": "array", "items": pair, "minItems": 3, "maxItems": 24,
+            },
+            "height_mm": number,
+        },
+        "section_loft": {
+            "loft_sections_mm": {
+                "type": "array", "items": loft_section, "minItems": 2, "maxItems": 12,
+            },
+        },
+    }
+    shapes = [
+        {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                **common,
+                "kind": {"type": "string", "enum": [kind]},
+                **properties,
+            },
+            "required": ["name", "kind", *(
+                name for name in properties if name != "profile_plane"
+            )],
+        }
+        for kind, properties in variants.items()
+    ]
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "title": {"type": "string", "minLength": 1},
+            "units": {"type": "string", "enum": ["mm"]},
+            "parts": {"type": "array", "items": {"oneOf": shapes},
+                      "minItems": 1, "maxItems": 32},
+        },
+        "required": ["title", "parts"],
+    }
+
+
 CAD_SYSTEM_PROMPT = """
 You are a parametric CAD designer. Return ONLY the requested JSON blueprint.
 Create physically plausible, separately named, correctly positioned components.

@@ -50,6 +50,7 @@ class FeatureTask(BaseModel):
     acceptance_model: str | None = Field(default=None, max_length=120)
     last_summary: str = Field(default="", max_length=1000)
     last_error: str = Field(default="", max_length=1000)
+    component_fallback_attempted: bool = False
 
 
 class FeatureEvaluation(BaseModel):
@@ -518,6 +519,10 @@ def active_or_next_feature(plan: FeaturePlan) -> FeatureTask | None:
     candidates.sort(
         key=lambda feature: (
             0 if feature.required else 1,
+            # Install a rescued structural part before starting unrelated
+            # in-place edits. Otherwise a later edit may target an out-of-date
+            # SceneSpec after the accepted child assembly becomes authoritative.
+            0 if feature.status == "retry" and feature.component_fallback_attempted else 1,
             0 if feature.build_mode == "in_place" else 1,
             order.get(feature.id, 10_000),
             feature.attempts,
@@ -668,6 +673,62 @@ def mark_component_ready(
         plan.active_feature_id = None
     save_feature_plan(root, plan)
     return plan
+
+
+def requeue_failed_structural_feature_as_component(
+    root: Path,
+    *,
+    max_previous_attempts: int = 3,
+) -> FeatureTask | None:
+    """Escalate one exhausted additive feature to isolated modeling, at most once.
+
+    This changes the *representation*, not the success criteria. A frozen parent
+    remains the installation baseline and its existing accepted siblings retain
+    their strict QA proofs. It deliberately refuses subtractive/detail work,
+    unbuilt primary objects, and unsafe unresolved dependencies.
+    """
+    plan = load_feature_plan(root)
+    if plan is None:
+        return None
+    refresh_feature_states(plan)
+    accepted_ids = {
+        feature.id
+        for feature in plan.features
+        if feature.status == "accepted" and feature.acceptance_verified
+    }
+    if not accepted_ids:
+        return None
+
+    for feature in plan.features:
+        if not (
+            feature.required
+            and feature.status == "failed"
+            and feature.build_mode == "in_place"
+            and feature.strategy in {"base_mesh_region", "attachment", "mixed"}
+            and feature.attempts >= max_previous_attempts
+            and not feature.component_fallback_attempted
+            and all(dep in accepted_ids for dep in feature.depends_on)
+        ):
+            continue
+
+        feature.build_mode = "component_job"
+        feature.component_fallback_attempted = True
+        feature.component_job_id = None
+        feature.component_version = None
+        feature.component_artifact = None
+        feature.status = "retry"
+        feature.attempts = 0
+        feature.last_error = ""
+        feature.last_summary = ""
+        feature.accepted_version = None
+        feature.acceptance_verified = False
+        feature.acceptance_score = 0.0
+        feature.acceptance_model = None
+        plan.active_feature_id = None
+        refresh_feature_states(plan)
+        save_feature_plan(root, plan)
+        return feature
+    return None
 
 
 def retry_feature(

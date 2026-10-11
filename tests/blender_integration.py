@@ -126,6 +126,16 @@ geometry_center_x = (min(point.x for point in world_points) + max(point.x for po
 # origin at parent x=2 must therefore put the geometry at x=3. Re-centering or
 # losing the unlinked source transform would incorrectly put it at x=2.
 assert abs(geometry_center_x - 3.0) < 0.001, geometry_center_x
+evidence = qa["component_geometry_evidence"]
+assert evidence["source_geometry_parts"][0]["triangles"] >= 12, evidence
+assert abs(evidence["origin_to_bbox_center_xyz"][0] - 1.0) < .001, evidence
+assert abs(evidence["projected_triangle_area_over_bbox_area"] - 2.0) < .05, evidence
+spatial = qa["component_instance_spatial_evidence"]
+assert len(spatial) == 1, spatial
+assert abs(spatial[0]["world_anchor_xyz"][0] - 2.0) < .001, spatial
+assert abs(spatial[0]["world_geometry_center_xyz"][0] - 3.0) < .001, spatial
+assert spatial[0]["nearest_parent_aabb_contacts"], spatial
+assert qa["parent_geometry_preserved"] is True
 """, {
         "parent_blend_path": str(parent / "model-v1.blend"),
         "component_blend_path": str(anchored_child / "model-v1.blend"),

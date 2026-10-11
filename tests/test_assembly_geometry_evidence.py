@@ -109,6 +109,6 @@ def test_repeated_rejected_frozen_child_gets_one_shape_rebuild(tmp_path, monkeyp
     assert new_child_id != child_id
     new_child = json.loads((main.JOBS_ROOT / new_child_id / "request.json").read_text())
     assert new_child["component_rebuild_of"] == child_id
-    assert "previously accepted frozen" in new_child["prompt"]
+    assert "earlier independently accepted frozen" in new_child["prompt"]
     assert "missing structural geometry" in new_child["prompt"]
     assert load_feature_plan(root).features[0].accepted_version == 3

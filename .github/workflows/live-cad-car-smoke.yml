@@ -1,0 +1,114 @@
+name: Live CPU CAD Car Smoke
+on:
+  push:
+    branches: [test/live-car-cad-20261011]
+    paths: ['.github/workflows/live-cad-car-smoke.yml']
+permissions:
+  contents: read
+  actions: read
+jobs:
+  live-car:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    environment: production
+    env:
+      GH_TOKEN: ${{ github.token }}
+      THREED_API_TOKEN: ${{ secrets.THREED_API_TOKEN }}
+      THREED_HOSTNAME: ${{ vars.THREED_HOSTNAME || '3d-modeling-ai.srv1058562.hstgr.cloud' }}
+    steps:
+      - name: Wait for real Hostinger deployment and smoke tests
+        run: |
+          set -euo pipefail
+          for n in $(seq 1 120); do
+            outcome=$(curl --fail --silent --show-error --max-time 15 \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H 'Accept: application/vnd.github+json' \
+              "https://api.github.com/repos/Kesehet/3d-modeling-ai/actions/runs/38144885332" \
+              | jq -r '.conclusion // "in_progress"')
+            echo "Production deployment verification: $outcome"
+            if [ "$outcome" = success ]; then exit 0; fi
+            if [ "$outcome" != in_progress ]; then
+              echo "Production deployment did not succeed; refuse to run a car test on a mismatched release"
+              exit 1
+            fi
+            sleep 10
+          done
+          echo "Production deployment did not finish in the bounded wait"
+          exit 1
+      - name: Submit real four-wheel car job using normal authenticated API
+        run: |
+          set -euo pipefail
+          test -n "$THREED_API_TOKEN"
+          mkdir -p smoke-artifacts
+          BASE="https://$THREED_HOSTNAME"
+          curl --fail --silent --show-error --max-time 20 "$BASE/health" | tee smoke-artifacts/health.json
+          BODY=$(jq -n --arg prompt "Make a recognizable simple four-wheel passenger sedan car as separate editable CAD solids. Include a wide long body with a hood and trunk, a visibly raised roof/passenger cabin, and four circular wheels in their correct positions: two at the front axle and two at the rear axle, one on each side. Wheel axes run across the vehicle width. Place each wheel at a realistic height beneath the body so tires meet the ground and do not float. Make the cabin rest on the body; make the car front and rear visibly distinct. Choose all proportions and placements yourself, use supported generic primitives, no hard-coded shape template or placeholder text. Return all four wheels as individually named parts." '{prompt:$prompt,intended_use:"rendering"}')
+          CREATED=$(curl --fail --silent --show-error --max-time 30 -X POST \
+            -H "Authorization: Bearer $THREED_API_TOKEN" \
+            -H 'Content-Type: application/json' --data "$BODY" "$BASE/v1/jobs")
+          echo "$CREATED" > smoke-artifacts/created.json
+          JOB_ID=$(echo "$CREATED" | jq -r '.job_id // empty')
+          test -n "$JOB_ID"
+          echo "JOB_ID=$JOB_ID" >> "$GITHUB_ENV"
+          echo "BASE=$BASE" >> "$GITHUB_ENV"
+          echo "Car job ID: $JOB_ID"
+          curl --fail --silent --show-error --max-time 30 -X POST \
+            -H "Authorization: Bearer $THREED_API_TOKEN" \
+            -H 'Content-Type: application/json' -d '{}' \
+            "$BASE/v1/jobs/$JOB_ID/cad" | tee smoke-artifacts/dispatched.json
+          jq -e '.started == true and .engine == "cpu_cad"' smoke-artifacts/dispatched.json
+      - name: Wait for CAD job completion and collect evidence
+        run: |
+          set -euo pipefail
+          completed=0
+          for n in $(seq 1 150); do
+            curl --fail --silent --show-error --max-time 20 \
+              -H "Authorization: Bearer $THREED_API_TOKEN" \
+              "$BASE/v1/jobs/$JOB_ID" > smoke-artifacts/status.json
+            state=$(jq -r '.state // "unknown"' smoke-artifacts/status.json)
+            stage=$(jq -r '.stage // "unknown"' smoke-artifacts/status.json)
+            echo "Car CAD attempt $n: state=$state stage=$stage"
+            if [ "$state" = ready ] && [ "$stage" = cad_needs_visual_review ]; then
+              completed=1
+              break
+            fi
+            if [ "$state" = failed ]; then
+              jq '{state,stage,error}' smoke-artifacts/status.json
+              exit 1
+            fi
+            sleep 6
+          done
+          test "$completed" = 1
+          jq -e '.cad.visual_review_required == true and .cad.part_count >= 6' smoke-artifacts/status.json
+          VERSION=$(jq -r '.cad.version' smoke-artifacts/status.json)
+          test -n "$VERSION"
+          for extension in glb step stl; do
+            curl --fail --silent --show-error --max-time 45 \
+              -H "Authorization: Bearer $THREED_API_TOKEN" \
+              "$BASE/v1/jobs/$JOB_ID/artifacts/exports/model-v$VERSION.$extension" \
+              -o "smoke-artifacts/car.$extension"
+          done
+          curl --fail --silent --show-error --max-time 30 \
+            -H "Authorization: Bearer $THREED_API_TOKEN" \
+            "$BASE/v1/jobs/$JOB_ID/artifacts/exports/model-v$VERSION-cad.json" \
+            -o smoke-artifacts/manifest.json
+          test "$(xxd -p -l 4 smoke-artifacts/car.glb)" = "676c5446"
+          grep -aq "ISO-10303-21" smoke-artifacts/car.step
+          jq -e '.validation.ok == true and .validation.step_reimport_valid == true' smoke-artifacts/manifest.json
+          jq -r '{title:.blueprint.title,parts:[.blueprint.parts[]|{name,kind,position_mm,rotation_deg}],valid:.validation.step_reimport_valid}' smoke-artifacts/manifest.json
+          WHEELS=$(jq '[.blueprint.parts[] | select((.name | ascii_downcase | test("wheel|tire")) and (.kind=="cylinder" or .kind=="tube"))] | length' smoke-artifacts/manifest.json)
+          echo "Four-wheel semantic check: found $WHEELS named solid wheels"
+          if [ "$WHEELS" -lt 4 ]; then
+            echo "Export succeeded, but car semantic requirement failed: fewer than four CAD wheel solids"
+            exit 1
+          fi
+          echo "Car generated with four wheel solids and validated GLB/STEP/STL; visual QA still requires manual inspection."
+          echo "Inspect retained test job at $BASE/#job/$JOB_ID"
+      - name: Upload inspected car artifacts and job evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-car-cpu-cad-evidence
+          path: smoke-artifacts/
+          if-no-files-found: warn
+          retention-days: 14

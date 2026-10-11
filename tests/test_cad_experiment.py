@@ -493,3 +493,25 @@ def test_component_coverage_handles_paired_positions_and_generic_descriptors():
     ])
     assert verdict["pass"]
     assert verdict["matched"] == 2
+
+
+def test_component_coverage_matches_identity_not_surface_descriptors():
+    from app.cad_semantic_qa import evaluate_required_component_coverage
+
+    plan = CadBlueprint.model_validate({
+        "title": "All semantic parts",
+        "parts": [
+            {"name": label, "kind": "box", "dimensions_mm": [20, 15, 8]}
+            for label in (
+                "hood", "windshield", "cabin_roof", "rear_window",
+                "front_bumper", "headlight", "side_mirror", "door",
+            )
+        ],
+    })
+    verdict = evaluate_required_component_coverage(plan, [
+        "Front hood plane", "Windshield slope", "Roof plane",
+        "Rear window slope", "Side door panels", "Front bumper fascia",
+        "Headlight recessed volumes", "Side mirror protrusions",
+    ])
+    assert verdict["pass"]
+    assert verdict["matched"] == verdict["checked"]

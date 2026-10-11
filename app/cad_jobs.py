@@ -94,7 +94,9 @@ async def run_cad_job(job_id: str, version: int, *, model: str | None = None,
                        "json": "manifest.json"}
             download_files: dict[str, bytes] = {}
             if payload.get("renders"):
-                exports.update({"front-left": "assembly-front-left.png", "top": "assembly-top.png"})
+                exports.update({view: f"assembly-{view}.png" for view in (
+                    "front-left", "back-right", "left", "right", "top"
+                )})
             for extension in exports:
                 response = await client.get(
                     f"{CAD_WORKER_URL}/v1/cad-experiments/{artifact_id}/files/{extension}",
@@ -106,7 +108,7 @@ async def run_cad_job(job_id: str, version: int, *, model: str | None = None,
                 download_files[extension] = response.content
         # Transfer verified worker artifacts to the normal job before promotion.
         for extension, content in download_files.items():
-            suffix = f".{extension}" if extension not in ("json", "front-left", "top") else (
+            suffix = f".{extension}" if extension not in ("json", "front-left", "back-right", "left", "right", "top") else (
                 "-cad.json" if extension == "json" else None
             )
             if suffix is None:

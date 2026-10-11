@@ -467,6 +467,7 @@ header{display:flex;align-items:center;justify-content:space-between;gap:16px;ma
     <div class="field"><label for="jobWidth">Width in mm (optional)</label><input id="jobWidth" type="number" min="0.01" max="10000" step="0.1"></div>
     <div class="field"><label for="jobReferences">Reference images (up to 3)</label><input id="jobReferences" type="file" accept="image/png,image/jpeg,image/webp" multiple><small>Upload product photos or front/side/top references to guide generation and comparison.</small></div>
     <div class="field"><label for="jobReferenceMode">Reference behavior</label><select id="jobReferenceMode"><option value="shape_guidance">Shape guidance</option><option value="exact_match">Exact geometry match</option><option value="inspiration">Inspiration only</option></select></div>
+    <div class="field"><label for="jobAssemblyMode">Geometry relationship</label><select id="jobAssemblyMode"><option value="single">One connected assembly</option><option value="independent">Intentionally independent parts</option></select></div>
     <div class="actions"><button class="btn" id="cancelNew">Cancel</button><button class="btn primary" id="createModel">Create model</button></div>
     <div class="notice" id="newNotice"></div>
   </div>
@@ -480,7 +481,7 @@ const els={
   home:byId("homeView"),detail:byId("detailView"),gallery:byId("jobGallery"),
   title:byId("detailTitle"),meta:byId("detailMeta"),quality:byId("qualityBanner"),viewer:byId("liveModelViewer"),viewerEmpty:byId("viewerEmpty"),viewerLabel:byId("viewerLabel"),modelDownload:byId("modelDownload"),featurePanel:byId("featurePanel"),featureProgress:byId("featureProgress"),featureGrid:byId("featureGrid"),renders:byId("renderGrid"),references:byId("referenceGrid"),files:byId("fileList"),json:byId("detailJson"),
   newBtn:byId("newJobBtn"),dialog:byId("newJobDialog"),cancel:byId("cancelNew"),create:byId("createModel"),
-  prompt:byId("jobPrompt"),engine:byId("jobEngine"),use:byId("jobUse"),width:byId("jobWidth"),refs:byId("jobReferences"),refMode:byId("jobReferenceMode"),notice:byId("newNotice"),
+  prompt:byId("jobPrompt"),engine:byId("jobEngine"),use:byId("jobUse"),width:byId("jobWidth"),refs:byId("jobReferences"),refMode:byId("jobReferenceMode"),assemblyMode:byId("jobAssemblyMode"),notice:byId("newNotice"),
   back:byId("backBtn"),improve:byId("improveBtn"),deleteBtn:byId("deleteBtn")
 };
 let data=null;
@@ -663,7 +664,7 @@ async function createModel(){
     await refresh();
     openJob(created.job_id);
     const cad=els.engine.value==="cpu_cad";
-    response=await fetch("/dashboard/jobs/"+encodeURIComponent(created.job_id)+(cad?"/cad":"/generate"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(cad?{reference_mode:els.refMode.value}:{auto_research:true,auto_improve_rounds:30})});
+    response=await fetch("/dashboard/jobs/"+encodeURIComponent(created.job_id)+(cad?"/cad":"/generate"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(cad?{reference_mode:els.refMode.value,assembly_mode:els.assemblyMode.value}:{auto_research:true,auto_improve_rounds:30})});
     if(!response.ok){
       await refresh();
       return;

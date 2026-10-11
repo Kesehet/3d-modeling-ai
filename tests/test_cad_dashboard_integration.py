@@ -30,7 +30,7 @@ def test_dashboard_has_cpu_cad_choice_and_step_download():
     assert 'value="cpu_cad"' in html
     assert '/cad' in html
     assert 'glb|obj|stl|step' in html
-    assert 'CAD model ready for visual review' in html
+    assert 'CAD model exported for review' in html
 
 
 def test_cpu_cad_job_status_and_viewer_exports(tmp_path, monkeypatch):

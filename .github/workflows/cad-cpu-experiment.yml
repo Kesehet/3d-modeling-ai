@@ -68,6 +68,11 @@ jobs:
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v5
+      - name: Validate production sidecar network and resource limits
+        env:
+          THREED_API_TOKEN_B64: Y2ktdG9rZW4=
+          OLLAMA_PROXY_API_KEY_B64: Y2kta2V5
+        run: docker compose -f compose.hostinger.yaml config -q
       - name: Validate isolated Compose service
         env:
           THREED_API_TOKEN_B64: Y2ktdG9rZW4=

@@ -194,3 +194,20 @@ def test_dashboard_cad_route_creates_trackable_job(tmp_path, monkeypatch):
         assert client.get("/dashboard/api").json()["jobs"][0]["job_id"] == ident
     assert (root / "scene" / ".model-v1.reserve").is_file()
     assert invocations == [(ident, 1)]
+
+def test_cad_sidecar_has_internal_api_and_external_ollama_networks():
+    from pathlib import Path
+
+    import yaml
+
+    compose = yaml.safe_load(
+        (Path(__file__).resolve().parents[1] / "compose.hostinger.yaml").read_text()
+    )
+    cad = compose["services"]["cad"]
+    api = compose["services"]["api"]
+    assert "worker-net" in cad["networks"] and "worker-net" in api["networks"]
+    assert "traefik-proxy" in cad["networks"]
+    assert "ports" not in cad
+    assert cad["environment"]["CAD_EXPERIMENT_ENABLED"] == "1"
+    assert compose["networks"]["worker-net"]["internal"] is True
+    assert cad["mem_limit"]

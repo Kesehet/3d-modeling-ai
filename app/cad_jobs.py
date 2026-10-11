@@ -11,6 +11,7 @@ import json
 import os
 import uuid
 from io import BytesIO
+from typing import Literal
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
@@ -31,6 +32,7 @@ CAD_MAX_WAIT_SECONDS = 840.0
 class CadGenerateRequest(BaseModel):
     model: str | None = Field(default=None, min_length=2, max_length=120)
     reference_mode: str = Field(default="shape_guidance", pattern="^(exact_match|shape_guidance|inspiration)$")
+    assembly_mode: Literal["single", "independent"] = "single"
 
 
 def _load_reference_images(root) -> list[str]:
@@ -58,7 +60,8 @@ def _load_reference_images(root) -> list[str]:
 
 
 async def run_cad_job(job_id: str, version: int, *, model: str | None = None,
-                      reference_mode: str = "shape_guidance") -> None:
+                      reference_mode: str = "shape_guidance",
+                      assembly_mode: str = "single") -> None:
     from . import main as api
 
     root = api._require_job(job_id)
@@ -76,7 +79,8 @@ async def run_cad_job(job_id: str, version: int, *, model: str | None = None,
             response = await client.post(
                 f"{CAD_WORKER_URL}/v1/cad-experiments",
                 json={"prompt": request["prompt"], "reference_images": references,
-                      "reference_mode": reference_mode, **({"model": model} if model else {})},
+                      "reference_mode": reference_mode, "assembly_mode": assembly_mode,
+                      **({"model": model} if model else {})},
                 headers=auth,
             )
             if not response.is_success:
@@ -195,7 +199,8 @@ async def start_cad_generation(job_id: str, request: CadGenerateRequest) -> dict
     api._write_status(root, state="running", stage="cad_queued",
                       modeling_strategy="cpu_cad", error=None)
     task = asyncio.create_task(run_cad_job(
-        job_id, version, model=request.model, reference_mode=request.reference_mode
+        job_id, version, model=request.model, reference_mode=request.reference_mode,
+        assembly_mode=request.assembly_mode
     ))
     CAD_JOBS[job_id] = task
     task.add_done_callback(lambda done, job_id=job_id: CAD_JOBS.pop(job_id, None)

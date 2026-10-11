@@ -156,6 +156,12 @@ async def generate_cad(
     final_dir.mkdir(parents=True, exist_ok=False)
     error = ""
     reference_brief = await _reference_geometry_brief(client, prompt, reference_images)
+    outline_complex = reference_brief["status"] == "verified" and any(
+        term in str(item).lower()
+        for item in reference_brief.get("silhouette_geometry", [])
+        for term in ("trapezoid", "slope", "taper", "angled", "curve", "rounded",
+                     "fillet", "profile", "bevel", "swept", "wedge")
+    )
     last_export: tuple[CadBlueprint, dict, Path] | None = None
     best_grade: tuple[float, float, float] = (-1.0, -999.0, -1.0)
     previous_evidence: dict | None = None
@@ -165,6 +171,14 @@ async def generate_cad(
                 f"{prompt}\n\nPrevious attempt failed independent QA. "
                 f"Return an improved complete JSON blueprint fixing measured issues: {error[:1600]}"
             )
+            if outline_complex:
+                query += (
+                    "\nShape coverage contract: source image contains tapered/sloped/"
+                    "nonorthogonal silhouette. At least one main OUTER component MUST "
+                    "use profile_extrusion on an explicit xz/yz plane or section_loft. "
+                    "A tall cuboid is not an acceptable substitute. "
+                    "This is a generic silhouette condition, not an object template."
+                )
             if previous_evidence:
                 query += (
                     "\nPrior candidate and measured critique (not a geometry template):\n"
@@ -203,6 +217,17 @@ async def generate_cad(
                 blueprint = blueprint.model_copy(update={"assembly_mode": assembly_mode})
             except (ValidationError, ValueError, TypeError) as exc:
                 error = f"Blueprint schema: {exc}"
+                continue
+            if outline_complex and not any(
+                part.kind in ("profile_extrusion", "section_loft") for part in blueprint.parts
+            ):
+                error = (
+                    "Reference silhouette has nonrectangular/sloped geometry, but blueprint "
+                    "contains only primitive blocks, spheres and cylinders. Rebuild major "
+                    "outer forms with profile_extrusion using profile_plane=xz/yz and "
+                    "explicit sloping 2D polygon coordinates, or multi-section lofts. "
+                    "No predesigned object templates are allowed."
+                )
                 continue
             attempt_dir = final_dir / f"attempt-{attempt}"
             try:

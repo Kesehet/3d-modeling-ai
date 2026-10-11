@@ -216,9 +216,10 @@ def test_cad_sidecar_has_internal_api_and_external_ollama_networks():
 
 def test_cad_reads_uploaded_images_and_normalizes_for_proxy(tmp_path, monkeypatch):
     import base64
+
     from PIL import Image
 
-    ident, root = create_job_in_root(tmp_path, monkeypatch)
+    _ident, root = create_job_in_root(tmp_path, monkeypatch)
     source = root / "references" / "a-test.png"
     Image.new("RGB", (1300, 750), "navy").save(source)
     (root / "references.json").write_text(json.dumps([

@@ -180,7 +180,8 @@ def test_dashboard_cad_route_creates_trackable_job(tmp_path, monkeypatch):
     ident, root = create_job_in_root(tmp_path, monkeypatch)
     invocations = []
 
-    async def fake_cad_runner(job_id, version, *, model=None, reference_mode="shape_guidance"):
+    async def fake_cad_runner(job_id, version, *, model=None, reference_mode="shape_guidance",
+                              assembly_mode="single"):
         invocations.append((job_id, version))
 
     monkeypatch.setattr(cad_jobs, "run_cad_job", fake_cad_runner)
@@ -236,4 +237,5 @@ def test_dashboard_reference_route_and_input_are_present():
     html = dashboard_page().body.decode()
     assert 'id="jobReferences"' in html
     assert 'id="jobReferenceMode"' in html
+    assert 'id="jobAssemblyMode"' in html
     assert "/references" in html

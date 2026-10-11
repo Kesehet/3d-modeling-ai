@@ -5,6 +5,7 @@ import uuid
 
 import httpx
 from fastapi import HTTPException
+from fastapi.testclient import TestClient
 
 from app import cad_jobs, main
 from app.dashboard import dashboard_page
@@ -173,3 +174,22 @@ def test_real_cpu_geometry_flows_through_standard_job_exports(tmp_path, monkeypa
     glb = trimesh.load(stored / "model-v1.glb", force="scene")
     assert len(glb.geometry) == 3
     assert (stored / "model-v1-cad.json").stat().st_size > 100
+
+def test_dashboard_cad_route_creates_trackable_job(tmp_path, monkeypatch):
+    ident, root = create_job_in_root(tmp_path, monkeypatch)
+    invocations = []
+
+    async def fake_cad_runner(job_id, version, *, model=None):
+        invocations.append((job_id, version))
+
+    monkeypatch.setattr(cad_jobs, "run_cad_job", fake_cad_runner)
+    with TestClient(main.app) as client:
+        response = client.post(f"/dashboard/jobs/{ident}/cad", json={})
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["started"] is True
+        assert body["job_id"] == ident
+        assert body["engine"] == "cpu_cad"
+        assert client.get("/dashboard/api").json()["jobs"][0]["job_id"] == ident
+    assert (root / "scene" / ".model-v1.reserve").is_file()
+    assert invocations == [(ident, 1)]

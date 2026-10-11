@@ -48,10 +48,10 @@ jobs:
           python -m pip install ".[cad,dev]"
       - name: Static checks
         run: |
-          ruff check app/cad_engine.py app/cad_experiment.py app/cad_service.py app/cad_jobs.py tests/test_cad_experiment.py tests/test_cad_dashboard_integration.py scripts/cad_ci_benchmark.py
+          ruff check app/cad_engine.py app/cad_assembly_qa.py app/cad_preview.py app/cad_experiment.py app/cad_service.py app/cad_jobs.py tests/test_cad_assembly_qa.py tests/test_cad_experiment.py tests/test_cad_dashboard_integration.py scripts/cad_ci_benchmark.py
           python -m compileall -q app/cad_engine.py app/cad_experiment.py app/cad_service.py
       - name: End-to-end CAD API and real BRep export tests (fake LLM)
-        run: pytest -q tests/test_cad_experiment.py tests/test_cad_dashboard_integration.py
+        run: pytest -q tests/test_cad_assembly_qa.py tests/test_cad_experiment.py tests/test_cad_dashboard_integration.py
       - name: Produce independent inspectable CPU CAD outputs
         run: python scripts/cad_ci_benchmark.py --output cad-artifacts
       - name: Upload STEP/STL/GLB and validation evidence

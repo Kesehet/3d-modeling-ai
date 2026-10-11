@@ -13,7 +13,7 @@ def test_rejected_assembly_includes_only_matching_blender_spatial_proof(tmp_path
         "feature_id": "support",
         "candidate_version": 7,
         "baseline_version": 6,
-        "child_job_id": "child",
+        "child_job_id": "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee",
         "child_version": 2,
         "assembly": {"instances": [{"location": [1, 2, 3], "scale": [1, 1, 1]}]},
     }
@@ -22,7 +22,7 @@ def test_rejected_assembly_includes_only_matching_blender_spatial_proof(tmp_path
     qa_path = root / "exports" / "model-v7-qa.json"
     qa = {
         "parent_source_blend": str(root / "scene" / "model-v6.blend"),
-        "component_source_blend": str(main.JOBS_ROOT / "child" / "scene" / "model-v2.blend"),
+        "component_source_blend": str(main.JOBS_ROOT / "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee" / "scene" / "model-v2.blend"),
         "parent_geometry_preserved": True,
         "installed_instances": 1,
         "component_geometry_evidence": {

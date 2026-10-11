@@ -10,6 +10,7 @@ import uuid
 from pathlib import Path
 from typing import Literal
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field, ValidationError
@@ -68,7 +69,7 @@ async def _reference_geometry_brief(
             temperature=0.0,
         )
         return {"status": "verified", **CadReferenceBrief.model_validate(result.data).model_dump()}
-    except (OllamaProxyError, ValueError, TypeError) as exc:
+    except (OllamaProxyError, httpx.HTTPError, ValueError, TypeError) as exc:
         return {"status": "unverified", "error": str(exc)[:350]}
 
 
@@ -256,7 +257,7 @@ async def create_experiment(payload: CadRequest) -> dict:
                 reference_images=payload.reference_images, reference_mode=payload.reference_mode,
                 assembly_mode=payload.assembly_mode,
             )
-        except (OllamaProxyError, ValueError, RuntimeError, OSError) as exc:
+        except (OllamaProxyError, httpx.HTTPError, ValueError, RuntimeError, OSError) as exc:
             raise HTTPException(422, detail=str(exc)[:1000]) from exc
     ident = report["id"]
     report["files"] = {extension: f"/v1/cad-experiments/{ident}/files/{extension}"

@@ -74,6 +74,17 @@ async def _review_reference_match(
             temperature=0.0,
         )
         review = CadVisualReview.model_validate(raw.data).model_dump()
+        threshold = {"exact_match": 0.80, "shape_guidance": 0.68, "inspiration": 0.50}[mode]
+        if not review["subject_recognizable"]:
+            review["findings"].append("Subject is not recognizable from candidate pixels")
+        if review["reference_match_score"] < threshold:
+            review["findings"].append(
+                f"Reference similarity {review['reference_match_score']:.2f} below {threshold:.2f}"
+            )
+        review["passed"] = bool(
+            review["passed"] and review["subject_recognizable"]
+            and review["reference_match_score"] >= threshold
+        )
         review["status"] = "passed" if review["passed"] else "failed"
         return review
     except (OllamaProxyError, ValueError, TypeError) as exc:

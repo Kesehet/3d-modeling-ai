@@ -180,7 +180,7 @@ def test_dashboard_cad_route_creates_trackable_job(tmp_path, monkeypatch):
     ident, root = create_job_in_root(tmp_path, monkeypatch)
     invocations = []
 
-    async def fake_cad_runner(job_id, version, *, model=None):
+    async def fake_cad_runner(job_id, version, *, model=None, reference_mode="shape_guidance"):
         invocations.append((job_id, version))
 
     monkeypatch.setattr(cad_jobs, "run_cad_job", fake_cad_runner)
@@ -212,3 +212,27 @@ def test_cad_sidecar_has_internal_api_and_external_ollama_networks():
     assert cad["environment"]["CAD_EXPERIMENT_ENABLED"] == "1"
     assert compose["networks"]["worker-net"]["internal"] is True
     assert cad["mem_limit"]
+
+
+def test_cad_reads_uploaded_images_and_normalizes_for_proxy(tmp_path, monkeypatch):
+    import base64
+    from PIL import Image
+
+    ident, root = create_job_in_root(tmp_path, monkeypatch)
+    source = root / "references" / "a-test.png"
+    Image.new("RGB", (1300, 750), "navy").save(source)
+    (root / "references.json").write_text(json.dumps([
+        {"stored_name": "a-test.png", "uploaded_at": "2026-10-11T00:00:00Z"}
+    ]))
+    refs = cad_jobs._load_reference_images(root)
+    assert len(refs) == 1
+    raw = base64.b64decode(refs[0])
+    assert raw[:2] == bytes.fromhex("ffd8")
+    assert len(raw) < 425_000
+
+
+def test_dashboard_reference_route_and_input_are_present():
+    html = dashboard_page().body.decode()
+    assert 'id="jobReferences"' in html
+    assert 'id="jobReferenceMode"' in html
+    assert "/references" in html

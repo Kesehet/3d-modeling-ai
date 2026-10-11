@@ -35,6 +35,43 @@ class CadRequest(BaseModel):
     assembly_mode: Literal["single", "independent"] = "single"
 
 
+class CadReferenceBrief(BaseModel):
+    subject_description: str = Field(min_length=5, max_length=700)
+    silhouette_geometry: list[str] = Field(default_factory=list, max_length=12)
+    required_components: list[str] = Field(default_factory=list, max_length=24)
+    spatial_relationships: list[str] = Field(default_factory=list, max_length=20)
+    relative_proportions: list[str] = Field(default_factory=list, max_length=16)
+    uncertain_details: list[str] = Field(default_factory=list, max_length=10)
+
+
+async def _reference_geometry_brief(
+    client: OllamaProxyClient, prompt: str, references: list[str]
+) -> dict:
+    if not references:
+        return {"status": "not_applicable"}
+    try:
+        result = await client.chat_json(
+            model=VISION_MODEL,
+            system=(
+                "Analyze real reference pixels for a generic editable CAD construction brief. "
+                "Describe the subject's primary silhouette using 3D volumes, attachment topology, "
+                "spatial relationships and approximate relative proportions. Describe profiles, "
+                "lofts and planar shapes where visible, not object-name templates. Never invent "
+                "hidden dimensions, mechanical internals or invisible backside details."
+            ),
+            prompt=(
+                f"User wants: {prompt}. Analyze {len(references)} source reference images. "
+                "Use concise measurable spatial evidence and flag uncertainty."
+            ),
+            images=references,
+            schema=CadReferenceBrief.model_json_schema(),
+            temperature=0.0,
+        )
+        return {"status": "verified", **CadReferenceBrief.model_validate(result.data).model_dump()}
+    except (OllamaProxyError, ValueError, TypeError) as exc:
+        return {"status": "unverified", "error": str(exc)[:350]}
+
+
 class CadVisualReview(BaseModel):
     passed: bool
     subject_recognizable: bool
@@ -117,6 +154,7 @@ async def generate_cad(
     final_dir = _root() / experiment_id
     final_dir.mkdir(parents=True, exist_ok=False)
     error = ""
+    reference_brief = await _reference_geometry_brief(client, prompt, reference_images)
     last_export: tuple[CadBlueprint, dict, Path] | None = None
     try:
         for attempt in range(1, 4):
@@ -130,11 +168,21 @@ async def generate_cad(
                     f"Reference policy: {reference_mode}. Infer dimensions, layout and "
                     "silhouette from visible evidence; do not invent unseen details."
                 )
+                if reference_brief["status"] == "verified":
+                    query += (
+                        "\nIndependently inspected source-image geometry evidence:\n"
+                        + json.dumps(reference_brief, ensure_ascii=False)
+                        + "\nConstruct BRep from this evidence; use profile_extrusion "
+                        "or section_loft for nonrectangular silhouettes instead of "
+                        "improvised box stacks. The later visual judge will check "
+                        "your geometry against the actual original image."
+                    )
             response = await client.chat_json(
-                model=VISION_MODEL if reference_images else model,
+                model=model if reference_brief["status"] == "verified" else
+                      VISION_MODEL if reference_images else model,
                 system=CAD_SYSTEM_PROMPT,
                 prompt=query,
-                images=reference_images or None,
+                images=reference_images if reference_brief["status"] == "unverified" else None,
                 schema=CadBlueprint.model_json_schema(),
                 temperature=0.15,
             )
@@ -175,6 +223,7 @@ async def generate_cad(
                 shutil.copy2(file, final_dir / file.name)
         report["attempts"] = attempt
         report["id"] = experiment_id
+        report["reference_geometry_brief"] = reference_brief
         report["repair_exhausted"] = bool(
             not report["assembly_qa"]["pass"]
             or report.get("reference_visual_qa", {}).get("status") == "failed"

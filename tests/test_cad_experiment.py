@@ -473,3 +473,23 @@ def test_generic_assembly_correction_does_not_drag_remote_parts(tmp_path):
     proposal = suggest_group_attachment(blueprint, verdict)
     assert not proposal["changed"]
     assert "no safe corrections" in proposal["reason"]
+
+
+def test_component_coverage_handles_paired_positions_and_generic_descriptors():
+    from app.cad_semantic_qa import evaluate_required_component_coverage
+
+    plan = CadBlueprint.model_validate({
+        "title": "Four generic attachments",
+        "parts": [
+            {"name": name, "kind": "box", "dimensions_mm": [20, 15, 8]}
+            for name in (
+                "front_bumper", "rear_bumper", "side_mirror_left", "side_mirror_right"
+            )
+        ],
+    })
+    verdict = evaluate_required_component_coverage(plan, [
+        "Front and rear bumper fasciae",
+        "Two side-view mirror housings",
+    ])
+    assert verdict["pass"]
+    assert verdict["matched"] == 2

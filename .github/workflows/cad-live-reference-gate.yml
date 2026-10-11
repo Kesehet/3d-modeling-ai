@@ -28,6 +28,7 @@ jobs:
           sudo apt-get update >/dev/null
           sudo apt-get install -y libgl1 libglu1-mesa libxrender1 libxext6 libsm6 >/dev/null
           python -m pip install ".[cad]"
+      # Gate latest candidate-retention, multi-view critique, and BRep solid proximity.
       - name: Unmocked reference-driven geometry/visual repair benchmark
         run: |
           set -euo pipefail

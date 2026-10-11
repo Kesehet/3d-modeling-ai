@@ -16,6 +16,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field, ValidationError
 
 from .cad_engine import CAD_SYSTEM_PROMPT, CadBlueprint, build_cad
+from .cad_semantic_qa import evaluate_required_component_coverage
 from .config import JOBS_ROOT, REASONING_MODEL, VISION_MODEL
 from .ollama import OllamaProxyClient, OllamaProxyError
 from .security import require_api_token
@@ -228,6 +229,27 @@ async def generate_cad(
                 error = f"Blueprint schema: {exc}"
                 repair_history.append({"attempt": attempt, "status": "invalid_blueprint", "error": error[:800]})
                 continue
+            coverage = evaluate_required_component_coverage(
+                blueprint,
+                reference_brief.get("required_components", [])
+                if reference_brief["status"] == "verified" and reference_mode != "inspiration"
+                else [],
+            )
+            if not coverage["pass"]:
+                error = (
+                    "Independently identified reference components are missing in the "
+                    "blueprint: " + json.dumps(coverage["missing"], ensure_ascii=False)[:1600]
+                    + ". Preserve all parts already accepted and add independently "
+                    "editable missing major components. Do not collapse the subject to "
+                    "a single box or generic body to satisfy physical contact checks."
+                )
+                repair_history.append({
+                    "attempt": attempt, "status": "missing_component_coverage",
+                    "blueprint": blueprint.model_dump(exclude_none=True),
+                    "component_coverage_qa": coverage,
+                    "error": error,
+                })
+                continue
             if outline_complex and not any(
                 part.kind in ("profile_extrusion", "section_loft") for part in blueprint.parts
             ):
@@ -309,6 +331,11 @@ async def generate_cad(
         report["attempts"] = attempt
         report["id"] = experiment_id
         report["reference_geometry_brief"] = reference_brief
+        report["semantic_component_qa"] = evaluate_required_component_coverage(
+            blueprint, reference_brief.get("required_components", [])
+            if reference_brief["status"] == "verified" and reference_mode != "inspiration"
+            else [],
+        )
         report["repair_exhausted"] = bool(
             not report["assembly_qa"]["pass"]
             or report.get("reference_visual_qa", {}).get("status") == "failed"

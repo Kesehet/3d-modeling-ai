@@ -121,6 +121,14 @@ Prefer these general profile tools when plain boxes/cylinders cannot reproduce
 the requested silhouette. Avoid stacks of blocky rectangles as a substitute
 for a coherent profile. All sections/points are explicitly chosen from prompt
 and reference understanding; never use object-name templates.
+Coordinate contract: WORLD Z is vertical. A profile_extrusion profile lives
+in LOCAL XY and extrudes along LOCAL Z. If its outline must lie in a vertical
+world plane (XZ/YZ), ROTATE the entire profile with rotation_deg accordingly;
+never confuse local sketch Y with world up. Place the part so the entire
+extrusion touches intended neighbors without protruding through the main
+silhouette. A section_loft uses LOCAL Z for stations and LOCAL XY for width
+and depth; rotate it if a horizontal or diagonal longitudinal shape is needed.
+Think through final world-space bounds after all rotations and translations.
 Every part may have position_mm=[x,y,z] and rotation_deg=[rx,ry,rz].
 Compose separate components with sane proportions and correct contact/overlap at joints.
 Think in physical assembly relationships BEFORE choosing numeric positions:

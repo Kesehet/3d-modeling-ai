@@ -116,8 +116,8 @@ def test_cpu_cad_rejects_running_legacy_job(tmp_path, monkeypatch):
 def test_real_cpu_geometry_flows_through_standard_job_exports(tmp_path, monkeypatch):
     """Actual OpenCascade STEP and GLB, simulated Ollama+network transport."""
     import pytest
-    from build123d import import_step
 
+    import_step = pytest.importorskip("build123d").import_step
     trimesh = pytest.importorskip("trimesh")
     from app.cad_engine import CadBlueprint, build_cad
 

@@ -129,6 +129,6 @@ def test_dashboard_exposes_feature_worker_state_and_disables_cache():
 
     assert 'AI feature sub-jobs' in html
     assert 'Feature coordinator' in html
-    assert 'CLIENT_UI_VERSION="live-model-viewer-v2"' in html
+    assert 'CLIENT_UI_VERSION="live-model-viewer-cpu-cad-v3"' in html
     assert 'data.ui_version' in html
     assert response.headers["cache-control"] == "no-store, no-cache, must-revalidate"

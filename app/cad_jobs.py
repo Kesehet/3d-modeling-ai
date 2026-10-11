@@ -91,7 +91,7 @@ async def run_cad_job(job_id: str, version: int, *, model: str | None = None,
             artifact_id = uuid.UUID(str(payload["id"])).hex
             api._write_status(root, state="running", stage="cad_exporting")
             exports = {"glb": "assembly.glb", "step": "assembly.step", "stl": "assembly.stl",
-                       "json": "manifest.json"}
+                       "json": "manifest.json", "history": "repair-history.json"}
             download_files: dict[str, bytes] = {}
             if payload.get("renders"):
                 exports.update({view: f"assembly-{view}.png" for view in (
@@ -108,8 +108,9 @@ async def run_cad_job(job_id: str, version: int, *, model: str | None = None,
                 download_files[extension] = response.content
         # Transfer verified worker artifacts to the normal job before promotion.
         for extension, content in download_files.items():
-            suffix = f".{extension}" if extension not in ("json", "front-left", "back-right", "left", "right", "top") else (
-                "-cad.json" if extension == "json" else None
+            suffix = f".{extension}" if extension not in ("json", "history", "front-left", "back-right", "left", "right", "top") else (
+                "-cad.json" if extension == "json" else
+                "-cad-history.json" if extension == "history" else None
             )
             if suffix is None:
                 dest = root / "renders" / f"model-v{version}-{extension}.png"

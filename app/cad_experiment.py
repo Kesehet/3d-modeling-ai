@@ -40,10 +40,16 @@ class CadRequest(BaseModel):
     assembly_mode: Literal["single", "independent"] = "single"
 
 
+class CadRequiredComponent(BaseModel):
+    identity: str = Field(min_length=1, max_length=100)
+    minimum_count: int = Field(default=1, ge=1, le=32)
+    geometry_notes: str = Field(default="", max_length=400)
+
+
 class CadReferenceBrief(BaseModel):
     subject_description: str = Field(min_length=5, max_length=700)
     silhouette_geometry: list[str] = Field(default_factory=list, max_length=12)
-    required_components: list[str] = Field(default_factory=list, max_length=24)
+    required_components: list[CadRequiredComponent | str] = Field(default_factory=list, max_length=24)
     spatial_relationships: list[str] = Field(default_factory=list, max_length=20)
     relative_proportions: list[str] = Field(default_factory=list, max_length=16)
     uncertain_details: list[str] = Field(default_factory=list, max_length=10)
@@ -54,6 +60,10 @@ async def _reference_geometry_brief(
 ) -> dict:
     if not references:
         return {"status": "not_applicable"}
+    schema = CadReferenceBrief.model_json_schema()
+    # Older stored briefs remain readable; new vision calls must separate a
+    # component's noun identity/count from its surface and proportion evidence.
+    schema["properties"]["required_components"]["items"] = {"$ref": "#/$defs/CadRequiredComponent"}
     try:
         result = await client.chat_json(
             model=VISION_MODEL,
@@ -62,14 +72,20 @@ async def _reference_geometry_brief(
                 "Describe the subject's primary silhouette using 3D volumes, attachment topology, "
                 "spatial relationships and approximate relative proportions. Describe profiles, "
                 "lofts and planar shapes where visible, not object-name templates. Never invent "
-                "hidden dimensions, mechanical internals or invisible backside details."
+                "hidden dimensions, mechanical internals or invisible backside details. "
+                "For required_components use structured identity/minimum_count/geometry_notes objects. "
+                "Identity must be a concise noun naming the physical component, without counts, "
+                "shape adjectives, surface descriptions or attachment clauses. Put those details "
+                "in geometry_notes, and put multiplicity in minimum_count. Distinguish physical "
+                "parts from features formed into those parts; describe integral features in their "
+                "owning part's geometry_notes rather than demanding separate solids."
             ),
             prompt=(
                 f"User wants: {prompt}. Analyze {len(references)} source reference images. "
                 "Use concise measurable spatial evidence and flag uncertainty."
             ),
             images=references,
-            schema=CadReferenceBrief.model_json_schema(),
+            schema=schema,
             temperature=0.0,
         )
         return {"status": "verified", **CadReferenceBrief.model_validate(result.data).model_dump()}

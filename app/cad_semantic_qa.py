@@ -35,7 +35,7 @@ def _words(value: str) -> set[str]:
     return result
 
 
-def evaluate_required_component_coverage(blueprint, requirements: list[str]) -> dict:
+def evaluate_required_component_coverage(blueprint, requirements: list[str | dict]) -> dict:
     """Conservative name/kind coverage, independent of subject category."""
     if not requirements:
         return {"pass": True, "status": "no_requirements", "checked": 0, "missing": []}
@@ -46,10 +46,11 @@ def evaluate_required_component_coverage(blueprint, requirements: list[str]) -> 
     missing = []
     satisfied = []
     for requirement in requirements[:24]:
-        terms = _words(requirement)
+        identity = requirement["identity"] if isinstance(requirement, dict) else requirement
+        terms = _words(identity)
         if not terms:
             continue
-        low = requirement.lower()
+        low = identity.lower()
         paired = re.search(
             r"\b(front|rear|left|right|upper|lower)\s+and\s+"
             r"(front|rear|left|right|upper|lower)\b", low
@@ -83,6 +84,8 @@ def evaluate_required_component_coverage(blueprint, requirements: list[str]) -> 
         minimum_count = max(2, named or 1) if paired else (
             int(count_match.group(1)) if count_match else named or 1
         )
+        if isinstance(requirement, dict):
+            minimum_count = max(minimum_count, int(requirement.get("minimum_count", 1)))
         if paired_satisfied and len(matches) >= minimum_count:
             satisfied.append(requirement)
         else:

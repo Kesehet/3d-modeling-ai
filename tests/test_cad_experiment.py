@@ -653,3 +653,33 @@ def test_reference_transport_failure_retains_export_without_certifying_quality(t
     assert report['reference_visual_qa']['passed'] is None
     assert (output / 'assembly.step').stat().st_size > 100
     assert (output / 'assembly.glb').stat().st_size > 100
+
+
+def test_structured_component_identity_separates_visual_detail_and_enforces_count():
+    from app.cad_semantic_qa import evaluate_required_component_coverage
+
+    requirement = {'identity': 'support', 'minimum_count': 2,
+                   'geometry_notes': 'Slight convex curvature with longitudinal arch and integrated recesses'}
+    plan = CadBlueprint.model_validate({'title': 'Generic supports', 'parts': [
+        {'name': name, 'kind': 'box', 'dimensions_mm': [30, 10, 5]}
+        for name in ('left_support', 'right_support')
+    ]})
+    assert evaluate_required_component_coverage(plan, [requirement])['pass']
+    one = plan.model_copy(update={'parts': plan.parts[:1]})
+    assert not evaluate_required_component_coverage(one, [requirement])['pass']
+    unrelated = plan.model_copy(update={'parts': [
+        p.model_copy(update={'name': f'other_{i}'}) for i, p in enumerate(plan.parts)
+    ]})
+    assert not evaluate_required_component_coverage(unrelated, [requirement])['pass']
+
+
+def test_reference_brief_requests_structured_component_contract():
+    fake = FakeOllama([{'subject_description': 'Abstract support structure', 'required_components': [
+        {'identity': 'support', 'minimum_count': 2, 'geometry_notes': 'sloping top surface'},
+    ]}])
+    brief = asyncio.run(cad_experiment._reference_geometry_brief(fake, 'Abstract supports', ['reference']))
+    assert brief['status'] == 'verified'
+    assert brief['required_components'][0]['minimum_count'] == 2
+    assert fake.calls[0]['schema']['properties']['required_components']['items'] == {
+        '$ref': '#/$defs/CadRequiredComponent',
+    }

@@ -57,6 +57,7 @@ class CadBlueprint(BaseModel):
     title: str = Field(min_length=1, max_length=160)
     units: Literal["mm"] = "mm"
     parts: list[CadPart] = Field(min_length=1, max_length=32)
+    assembly_mode: Literal["single", "independent"] = "single"
 
     @model_validator(mode="after")
     def unique_part_names(self) -> CadBlueprint:
@@ -89,7 +90,7 @@ Think in physical assembly relationships BEFORE choosing numeric positions:
 - Ensure every requested part is present; do not replace a part with a text label.
 - Return separate editable parts, not one undifferentiated mesh.
 Do not emit code, macros, loops, copies, material-only objects, or unsupported kinds.
-Do not use fan-specific, lamp-specific or any object templates.
+For single assembled objects use assembly_mode=single and ensure all named parts form one physically connected assembly.\nFor intentionally separated independent objects ONLY use assembly_mode=independent.\nDo not use fan-specific, lamp-specific or any object templates.
 """
 
 
@@ -115,6 +116,7 @@ def build_cad(blueprint: CadBlueprint, output_dir: Path) -> dict:
     solids = []
     scene = trimesh.Scene()
     part_evidence = []
+    evaluated_bounds: dict[str, list[list[float]]] = {}
     for part in blueprint.parts:
         if part.kind == "box":
             solid = Box(*part.dimensions_mm)
@@ -141,6 +143,7 @@ def build_cad(blueprint: CadBlueprint, output_dir: Path) -> dict:
         if mesh.is_empty or not mesh.is_watertight:
             raise ValueError(f"Non-watertight tessellation: {part.name}")
         scene.add_geometry(mesh, geom_name=part.name, node_name=part.name)
+        evaluated_bounds[part.name] = mesh.bounds.tolist()
         part_stl.unlink(missing_ok=True)
         part_evidence.append({"name": part.name, "kind": part.kind, "volume_mm3": volume,
                               "mesh_watertight": bool(mesh.is_watertight)})
@@ -164,6 +167,11 @@ def build_cad(blueprint: CadBlueprint, output_dir: Path) -> dict:
     sizes = {fmt: (output_dir / f"assembly.{fmt}").stat().st_size for fmt in ("step", "stl", "glb")}
     if min(sizes.values()) < 100:
         raise ValueError("CAD export unexpectedly small")
+    from .cad_assembly_qa import evaluate_assembly_bounds
+    from .cad_preview import render_cad_views
+
+    assembly_qa = evaluate_assembly_bounds(evaluated_bounds, assembly_mode=blueprint.assembly_mode)
+    render_files = render_cad_views(scene, output_dir)
     result = {
         "ok": True,
         "title": blueprint.title,
@@ -171,8 +179,10 @@ def build_cad(blueprint: CadBlueprint, output_dir: Path) -> dict:
         "part_count": len(part_evidence),
         "parts": part_evidence,
         "step_reimport_valid": valid,
+        "assembly_qa": assembly_qa,
+        "renders": render_files,
         "exports": sizes,
-        "quality_scope": "geometric integrity only; not visual/semantic correctness or print assembly",
+        "quality_scope": "STEP integrity and AABB assembly screening; physical contact, visual similarity and print fit require independent review",
     }
     (output_dir / "manifest.json").write_text(
         json.dumps({"blueprint": blueprint.model_dump(), "validation": result}, indent=2),

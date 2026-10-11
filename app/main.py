@@ -3928,6 +3928,26 @@ def _expanded_auto_improve_round_limit(
     return max(requested_rounds, computed_limit)
 
 
+def _recover_blocked_feature(root: Path, status: dict) -> bool:
+    """Try the finite representation fallback before either autonomous stop path."""
+    request_payload = json.loads((root / "request.json").read_text(encoding="utf-8"))
+    depth = int(request_payload.get("component_depth") or 0)
+    if depth >= COMPONENT_MAX_DEPTH or _active_model_artifact(root, status) is None:
+        return False
+    recovered = requeue_failed_structural_feature_as_component(
+        root, max_previous_attempts=FEATURE_MAX_ATTEMPTS
+    )
+    if recovered is None:
+        return False
+    append_history(
+        root, "feature_representation_fallback",
+        feature_id=recovered.id, feature_name=recovered.name,
+        previous_mode="in_place", new_mode="component_job",
+        reason="In-place geometry attempts exhausted; retry frozen part with an isolated AI model.",
+    )
+    return True
+
+
 async def _run_auto_improve(job_id: str, max_rounds: int) -> None:
     root = _job_dir(job_id)
     if not root.is_dir():
@@ -3975,25 +3995,9 @@ async def _run_auto_improve(job_id: str, max_rounds: int) -> None:
             # built in isolation and attached to the preserved parent instead.
             # This fallback is bounded to one attempt per eligible feature,
             # requires existing accepted geometry, and never touches cutouts.
-            request_payload = json.loads((root / "request.json").read_text(encoding="utf-8"))
-            depth = int(request_payload.get("component_depth") or 0)
-            has_parent_model = _active_model_artifact(root, current_status) is not None
-            if depth < COMPONENT_MAX_DEPTH and has_parent_model:
-                recovered = requeue_failed_structural_feature_as_component(
-                    root, max_previous_attempts=FEATURE_MAX_ATTEMPTS
-                )
-                if recovered is not None:
-                    append_history(
-                        root, "feature_representation_fallback",
-                        feature_id=recovered.id, feature_name=recovered.name,
-                        previous_mode="in_place", new_mode="component_job",
-                        reason="In-place geometry attempts exhausted; retry frozen part with an isolated AI model.",
-                    )
-                    # Do not count a one-time representation pivot as geometric
-                    # progress. The child still must pass strict parent-level QA.
-                    blocked = False
-                    no_progress_rounds = 0
-                    continue
+            if _recover_blocked_feature(root, current_status):
+                no_progress_rounds = 0
+                continue
             status = _read_status(root)
             _write_status(
                 root,
@@ -4246,6 +4250,9 @@ async def _run_auto_improve(job_id: str, max_rounds: int) -> None:
 
         blocked, unresolved = _feature_queue_is_blocked(root)
         if blocked:
+            if round_number < round_limit and _recover_blocked_feature(root, after):
+                no_progress_rounds = 0
+                continue
             _write_status(
                 root,
                 state="ready",
@@ -7392,6 +7399,7 @@ async def _build_generic_scene_spec(
     auto_research: bool,
     *,
     feature_task: FeatureTask | None = None,
+    director_decision: dict | None = None,
 ) -> GenericSceneSpec:
     root = _require_job(job_id)
     job_request = json.loads((root / "request.json").read_text(encoding="utf-8"))
@@ -7474,6 +7482,11 @@ async def _build_generic_scene_spec(
         "supports, mounts, trim, repeated components, or other planned parts merely to make the whole object look "
         "more complete. The outer modeling loop adds later features after the active one passes review. "
         "SceneSpec JSON uses root fields title, rationale, presentation_base, objects, and optional cutters. "
+        "For primitive solids author explicit full local XYZ dimensions before rotation. A cylinder uses "
+        "dimensions=[diameter_x, diameter_y, height]; its unsized default depth is 2 units. "
+        "Radius alone does NOT set its height. The fields height, depth, length and width are not supported; "
+        "encode them in dimensions, never in invented fields. Location is the primitive center, not its end. "
+        "Check center +/- half-dimensions for every intended contact, gap, and thin-versus-tall proportion. "
         "Each object may use name, shape, location, dimensions, scale, rotation_deg, start/end, radius, profile, "
         "path, segments, color, bevel, smooth, vertices, and faces. Cutters use the same closed geometry fields "
         "plus target, the exact name of the object being subtracted from; sweep is not a cutter shape. Cutters may "
@@ -7488,6 +7501,7 @@ async def _build_generic_scene_spec(
         f"Required subject inventory: {json.dumps(inventory_context, ensure_ascii=False)}\n"
         f"Coordinated visible-feature plan: {json.dumps(feature_plan_context, ensure_ascii=False)}\n"
         f"ACTIVE FEATURE FOR THIS PASS: {json.dumps(active_feature_context, ensure_ascii=False)}\n"
+        f"DIRECTOR CORRECTION (address these diagnosed defects): {json.dumps(director_decision or {}, ensure_ascii=False)}\n"
         f"Spatial/modeling guidance:\n{_generic_spatial_guidance(str(job_request.get('prompt') or ''))}\n"
         "Create the SceneSpec for the CURRENT construction state. When ACTIVE FEATURE is non-empty, include only "
         "geometry owned by that feature; every other non-accepted feature must remain absent until its own pass. "
@@ -9637,12 +9651,14 @@ async def _generate_hard_surface_cage(
                     or feature_evaluation.get("summary")
                 ),
             )
-            record_feature_progress(
+            finish_feature(
                 root,
                 feature_task.id,
-                version=kept_working_version or version,
+                accepted=False,
+                version=None,
+                error="Replanned candidate did not improve the preserved geometry.",
                 summary=(
-                    "Replanned candidate reverted; feature remains active. "
+                    "Replanned candidate reverted. "
                     + str(
                         (comparison or {}).get("summary")
                         or feature_evaluation.get("summary")
@@ -10592,12 +10608,14 @@ async def _generate_adaptive_mesh_fallback(
             preserved_strategy=previous_strategy,
         )
         if feature_task is not None:
-            record_feature_progress(
+            finish_feature(
                 root,
                 feature_task.id,
-                version=baseline_version or version,
+                accepted=False,
+                version=None,
+                error="Alternative representation did not improve the preserved geometry.",
                 summary=(
-                    "Alternative representation candidate reverted; feature remains active. "
+                    "Alternative representation candidate reverted. "
                     + str(
                         (comparison or {}).get("summary")
                         or (feature_evaluation or {}).get("summary")
@@ -11310,16 +11328,19 @@ async def _generate_generic_scene_candidate(job_id: str, request: GenericGenerat
     if initial_action in {"build_mesh", "rebuild_mesh"}:
         return await _generate_directed_mesh(job_id, initial_decision)
 
-    return await _generate_procedural_candidate(job_id)
+    return await _generate_procedural_candidate(job_id, director_decision=initial_decision)
 
 
-async def _generate_procedural_candidate(job_id: str, *, feature_task: FeatureTask | None = None) -> dict:
+async def _generate_procedural_candidate(
+    job_id: str, *, feature_task: FeatureTask | None = None,
+    director_decision: dict | None = None,
+) -> dict:
     root = _require_job(job_id)
     previous = _read_status(root)
     feature_task = feature_task or begin_feature(root)
     _write_status(root, state="running", stage="planning_procedural_geometry")
     spec = await _build_generic_scene_spec(
-        job_id, auto_research=False, feature_task=feature_task,
+        job_id, auto_research=False, feature_task=feature_task, director_decision=director_decision,
     )
     version = reserve_model_version(root)
     build = await _execute_generic_spec(job_id, spec, version=version, activate_status=False)
@@ -11485,7 +11506,9 @@ async def refine_generic_scene(job_id: str, request: GenericRefineRequest) -> di
                     include_renders=True,
                 )
                 if decision["action"] in {"build_procedural", "revise_procedural"}:
-                    return await _generate_procedural_candidate(job_id, feature_task=feature_task)
+                    return await _generate_procedural_candidate(
+                        job_id, feature_task=feature_task, director_decision=decision,
+                    )
                 if decision["action"] in {"build_mesh", "rebuild_mesh"}:
                     return await _generate_directed_mesh(job_id, decision, feature_task=feature_task)
                 if decision["action"] == "refine_mesh":
@@ -11534,7 +11557,9 @@ async def refine_generic_scene(job_id: str, request: GenericRefineRequest) -> di
             )
             return {"job_id": job_id, "iterations": [], "rejected": None, "quality_gate": quality_gate, "status": status}
         if decision["action"] in {"build_procedural", "revise_procedural"}:
-            return await _generate_procedural_candidate(job_id, feature_task=feature_task)
+            return await _generate_procedural_candidate(
+                job_id, feature_task=feature_task, director_decision=decision,
+            )
         if decision["action"] in {"build_mesh", "rebuild_mesh"}:
             return await _generate_directed_mesh(job_id, decision, feature_task=feature_task)
         return await _refine_adaptive_mesh(

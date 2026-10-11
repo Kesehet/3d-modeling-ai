@@ -1498,3 +1498,111 @@ def test_post_assembly_refinement_never_edits_stale_scene_spec_when_active_fails
     assert persisted is not None
     assert persisted.features[0].status == "retry"
     assert not (root / "scene" / "model-v7.blend").exists()
+
+
+@pytest.mark.parametrize('strategy', ['adaptive_loft', 'hard_surface_cage'])
+def test_rejected_representation_consumes_retry_without_changing_baseline(tmp_path, monkeypatch, strategy):
+    root = job(tmp_path, monkeypatch)
+    save_feature_plan(root, FeaturePlan(subject='Generic assembly', features=[
+        FeatureTask(id='body', name='Body', strategy='base_mesh_region'),
+    ]))
+    main._write_status(root, state='ready', modeling_strategy=strategy,
+                       generic_model={'version': 1}, working_cage_version=1,
+                       quality_gate={'recognizable': False})
+    (root / 'scene/model-v1.blend').write_bytes(b'accepted baseline')
+
+    async def plan(*args, **kwargs):
+        return SimpleNamespace()
+
+    async def build(*args, version, **kwargs):
+        return {'candidate_model': {'version': version}, 'status': {'generic_model': {'version': version}}}
+
+    async def compare(*args, **kwargs):
+        return {'candidate_is_better': False, 'summary': 'Lost structure'}
+
+    async def evaluate(*args, **kwargs):
+        return {'passed': False, 'visible': True, 'criteria_satisfied': False,
+                'confidence': 1.0, 'reference_match_score': 0.1, 'summary': 'Lost structure'}
+
+    monkeypatch.setattr(main, '_compare_generic_versions', compare)
+    monkeypatch.setattr(main, '_evaluate_feature_candidate', evaluate)
+    if strategy == 'adaptive_loft':
+        monkeypatch.setattr(main, '_build_adaptive_loft_spec', plan)
+        monkeypatch.setattr(main, '_execute_adaptive_loft', build)
+        generate = main._generate_adaptive_mesh_fallback
+    else:
+        monkeypatch.setattr(main, '_build_hard_surface_cage_spec', plan)
+        monkeypatch.setattr(main, '_execute_hard_surface_cage', build)
+        generate = main._generate_hard_surface_cage
+    for attempt in range(1, 4):
+        asyncio.run(generate('abc123', reason='Try a better representation'))
+        feature = load_feature_plan(root).features[0]
+        assert feature.attempts == attempt
+        assert feature.status == ('failed' if attempt == 3 else 'retry')
+        assert feature.acceptance_verified is False
+        assert main._read_status(root)['generic_model']['version'] == 1
+    assert (root / 'scene/model-v1.blend').read_bytes() == b'accepted baseline'
+
+
+def test_director_correction_reaches_procedural_construction(tmp_path, monkeypatch):
+    root = job(tmp_path, monkeypatch)
+    save_feature_plan(root, FeaturePlan(subject='Generic object', features=[
+        FeatureTask(id='body', name='Body', strategy='base_mesh_region', status='retry', attempts=1),
+    ]))
+    main._write_status(root, state='ready', modeling_strategy='adaptive_loft',
+                       quality_gate={'recognizable': False, 'subject_match_score': 0.1})
+    monkeypatch.setattr(main, '_usable_reference_index', lambda _: [{'stored_name': 'ref.png'}])
+    decision = {'action': 'build_procedural', 'instructions': ['Restore the missing cylindrical support.']}
+
+    async def director(*args, **kwargs):
+        return decision
+
+    async def plan(*args, **kwargs):
+        assert kwargs['director_decision'] == decision
+        assert kwargs['feature_task'].id == 'body'
+        return SimpleNamespace()
+
+    async def build(*args, **kwargs):
+        return {'candidate_model': {'version': kwargs['version']}}
+
+    async def review(*args, **kwargs):
+        return {'reviewed': True}
+
+    monkeypatch.setattr(main, '_ask_modeling_director', director)
+    monkeypatch.setattr(main, '_build_generic_scene_spec', plan)
+    monkeypatch.setattr(main, '_execute_generic_spec', build)
+    monkeypatch.setattr(main, '_review_procedural_candidate', review)
+    assert asyncio.run(main.refine_generic_scene('abc123', main.GenericRefineRequest()))['reviewed']
+
+
+@pytest.mark.parametrize('rounds, expected_recovery', [(1, False), (3, True)])
+def test_auto_recovers_exhausted_component_in_same_run_within_budget(tmp_path, monkeypatch, rounds, expected_recovery):
+    root = job(tmp_path, monkeypatch)
+    (root / 'scene/model-v1.blend').write_bytes(b'protected body')
+    save_feature_plan(root, FeaturePlan(subject='Generic assembly', features=[
+        FeatureTask(id='body', name='Body', status='accepted', accepted_version=1,
+                    acceptance_verified=True, acceptance_score=0.95),
+        FeatureTask(id='support', name='Support', strategy='attachment', status='retry',
+                    attempts=2, depends_on=['body']),
+    ]))
+    main._write_status(root, state='ready', modeling_strategy='procedural',
+                       generic_model={'version': 1, 'blend': 'model-v1.blend'}, quality_gate={'recognizable': False})
+    monkeypatch.setattr(main, '_usable_reference_index', lambda _: [{'stored_name': 'ref.png'}])
+    modes = []
+
+    async def quality(_id, status):
+        return status
+
+    async def refine(*args, **kwargs):
+        feature = main.begin_feature(root)
+        modes.append(feature.build_mode)
+        main.finish_feature(root, feature.id, accepted=False, version=None, max_attempts=1)
+
+    monkeypatch.setattr(main, '_ensure_final_model_quality', quality)
+    monkeypatch.setattr(main, 'refine_generic_scene', refine)
+    asyncio.run(main._run_auto_improve('abc123', rounds))
+    feature = load_feature_plan(root).features[1]
+    assert feature.component_fallback_attempted is expected_recovery
+    assert modes == (['in_place', 'component_job'] if expected_recovery else ['in_place'])
+    assert load_feature_plan(root).features[0].acceptance_verified
+    assert main._read_status(root)['auto_improve']['state'] != 'completed'

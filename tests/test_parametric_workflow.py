@@ -194,7 +194,7 @@ def test_generate_procedural_candidate_passes_active_feature_to_planner(tmp_path
     _, feature = setup_job(tmp_path, monkeypatch)
     seen = {}
 
-    async def build_spec(job_id, auto_research, *, feature_task=None):
+    async def build_spec(job_id, auto_research, *, feature_task=None, director_decision=None):
         seen["feature_task"] = feature_task
         return main.GenericSceneSpec(
             title="Primary",

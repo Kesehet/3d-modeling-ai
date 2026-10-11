@@ -8,3 +8,11 @@ jobs
 *.blend
 *.blend1
 *.blend2
+
+# Only application code, package metadata and vendored MCP are copied by either Dockerfile.
+tests/
+scripts/
+docs/
+.ruff_cache/
+blender-artifacts/
+cad-artifacts/

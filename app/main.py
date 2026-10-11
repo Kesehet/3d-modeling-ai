@@ -1747,6 +1747,25 @@ def _create_component_child_job(parent_job_id: str, feature_task: FeatureTask) -
         "parent_prompt": parent_request.get("prompt"),
         "parent_owned_exclusions": parent_owned_exclusions,
     }
+    # When repeated installations prove a child cannot satisfy parent-level
+    # QA, the one allowed replacement is a NEW isolated job. Do not silently
+    # overwrite the frozen artifact that supplied earlier candidate renders.
+    replacement = _read_json_if_present(
+        parent_root / f"component-shape-rebuild-{feature_task.id}.json"
+    )
+    if replacement:
+        request["prompt"] += (
+            " CRITICAL REBUILD EVIDENCE: an earlier independently accepted frozen "
+            "child repeatedly FAILED parent-level visual acceptance. This is a "
+            "fresh geometric reconstruction, NOT a request to reposition or "
+            "uniformly scale that old mesh. Satisfy the actual distinct component "
+            "shape and three-dimensional structure in the reference images. "
+            "Do not manufacture geometry owned by other features. Failure: "
+            + str(replacement.get("last_rejection") or "")[:1800]
+            + " Measured earlier geometry: "
+            + json.dumps(replacement.get("geometry_evidence") or {}, ensure_ascii=False)[:2400]
+        )
+        request["component_rebuild_of"] = replacement.get("previous_child_job_id")
     (child_root / "request.json").write_text(
         json.dumps(request, indent=2, ensure_ascii=False),
         encoding="utf-8",
@@ -2657,6 +2676,78 @@ def _last_rejected_component_assembly(
     return latest
 
 
+def _schedule_bounded_component_shape_rebuild(
+    root: Path, feature_id: str, child_job_id: str
+) -> bool:
+    """Try new frozen geometry once after repeated failed placements of one child.
+
+    This never modifies an accepted parent, the previous child or another
+    feature. No guessed geometry or acceptance bypass is introduced.
+    """
+    if not re.fullmatch(r"[a-zA-Z0-9_-]{1,80}", feature_id):
+        return False
+    marker = root / f"component-shape-rebuild-{feature_id}.json"
+    if marker.exists():
+        return False
+    plan = load_feature_plan(root)
+    if plan is None:
+        return False
+    task = next((f for f in plan.features if f.id == feature_id), None)
+    if task is None or task.build_mode != "component_job" or task.component_job_id != child_job_id:
+        return False
+    failures = [
+        event for event in load_history(root)
+        if event.get("event") == "component_assembly_rejected"
+        and event.get("feature_id") == feature_id
+        and event.get("child_job_id") == child_job_id
+        and isinstance(event.get("candidate_version"), int)
+    ]
+    distinct = {event["candidate_version"] for event in failures}
+    if len(distinct) < 2:
+        return False
+    latest = max(failures, key=lambda item: item["candidate_version"])
+    version = latest["candidate_version"]
+    record = _read_json_if_present(root / f"component-assembly-v{version}.json")
+    prior = _last_rejected_component_assembly(
+        root, feature_id, record.get("baseline_version")
+        if isinstance(record.get("baseline_version"), int) else -1,
+    )
+    marker_content = {
+        "feature_id": feature_id,
+        "previous_child_job_id": child_job_id,
+        "rejected_versions": sorted(distinct),
+        "last_rejection": str(latest.get("reason") or "")[:2200],
+        "geometry_evidence": (prior.get("geometry_evidence") or {}).get("frozen_child") or {},
+    }
+    # Persist the one-shot budget BEFORE changing the plan. This makes a later
+    # retry safe even if the workflow restarts between steps.
+    tmp = marker.with_suffix(".tmp")
+    tmp.write_text(json.dumps(marker_content, indent=2, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(marker)
+    task.component_job_id = None
+    task.component_version = None
+    task.component_artifact = None
+    task.accepted_version = None
+    task.acceptance_verified = False
+    task.acceptance_score = 0.0
+    task.acceptance_model = None
+    task.status = "retry"
+    task.attempts = 0
+    task.last_summary = ""
+    task.last_error = ""
+    plan.active_feature_id = None
+    save_feature_plan(root, plan)
+    append_history(
+        root,
+        "component_shape_rebuild_queued",
+        feature_id=feature_id,
+        old_child_job_id=child_job_id,
+        rejected_versions=sorted(distinct),
+        reason="Two independent parent installations rejected; one new isolated child allowed.",
+    )
+    return True
+
+
 async def _plan_component_assembly(
     parent_job_id: str,
     feature_task: FeatureTask,
@@ -3291,6 +3382,17 @@ async def _build_and_install_component_feature(
             better_than_previous=better,
             reason=reason,
         )
+        if _schedule_bounded_component_shape_rebuild(
+            parent_root, refreshed_task.id, child_job_id
+        ):
+            status = _write_status(
+                parent_root,
+                state="ready",
+                stage="component_geometry_rebuild_queued",
+                modeling_strategy=previous_status.get("modeling_strategy") or "procedural",
+                generic_model=previous_status.get("generic_model"),
+                quality_gate=previous_status.get("quality_gate"),
+            )
 
     return {
         "job_id": parent_job_id,

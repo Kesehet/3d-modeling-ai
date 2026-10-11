@@ -57,8 +57,11 @@ async def evaluate(out: Path, live: bool):
     )
     report = []
     for name, blueprint in cases.items():
-        prompt = ("A complete ceiling fan with motor housing, a vertical mounting rod, "
-                  "and three distinct long blades attached around the hub."
+        prompt = ("A physically plausible ceiling fan suspended from an overhead ceiling: "
+                  "central motor housing and concentric rotor hub, "
+                  "a straight downrod extending UP from the motor toward the ceiling (Z-up), "
+                  "and three distinct long thin horizontal blades spaced 120 degrees apart "
+                  "radially around the SAME hub centre. Preserve all part connections."
                   if live else "Build a parametric multi-part mechanical test object.")
         client = OllamaProxyClient() if live else OfflineClient(blueprint)
         _, result, working = await cad_experiment.generate_cad(

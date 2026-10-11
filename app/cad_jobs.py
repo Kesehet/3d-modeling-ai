@@ -7,15 +7,14 @@ from __future__ import annotations
 
 import asyncio
 import base64
-from io import BytesIO
-
-from PIL import Image
 import json
 import os
 import uuid
+from io import BytesIO
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
+from PIL import Image
 from pydantic import BaseModel, Field
 
 from .artifacts import reserve_model_version

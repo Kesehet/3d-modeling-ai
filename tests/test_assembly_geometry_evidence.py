@@ -3,6 +3,7 @@
 import json
 
 from app import main
+from app.feature_tasks import FeaturePlan, FeatureTask, load_feature_plan, save_feature_plan
 
 
 def test_rejected_assembly_includes_only_matching_blender_spatial_proof(tmp_path, monkeypatch):
@@ -54,3 +55,60 @@ def test_rejected_assembly_includes_only_matching_blender_spatial_proof(tmp_path
         qa_path.write_text(json.dumps(tampered), encoding="utf-8")
         assert "geometry_evidence" not in main._last_rejected_component_assembly(root, "support", 6)
     assert main._last_rejected_component_assembly(root, "other-feature", 6) == {}
+
+
+def test_repeated_rejected_frozen_child_gets_one_shape_rebuild(tmp_path, monkeypatch):
+    monkeypatch.setattr(main, "JOBS_ROOT", tmp_path / "jobs")
+    parent_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+    child_id = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+    root = main.JOBS_ROOT / parent_id
+    root.mkdir(parents=True)
+    (root / "request.json").write_text(
+        json.dumps({"prompt": "A generic multi-part object", "intended_use": "rendering"})
+    )
+    save_feature_plan(root, FeaturePlan(
+        subject="Generic object",
+        features=[
+            FeatureTask(
+                id="body", name="Body", build_mode="in_place",
+                status="accepted", acceptance_verified=True, accepted_version=3,
+            ),
+            FeatureTask(
+                id="support", name="Attached support", build_mode="component_job",
+                component_job_id=child_id, status="failed", attempts=3,
+            ),
+        ],
+    ))
+    for version in [7, 8]:
+        (root / f"component-assembly-v{version}.json").write_text(
+            json.dumps({
+                "baseline_version": 3, "candidate_version": version,
+                "feature_id": "support", "child_job_id": child_id,
+                "assembly": {"instances": [{"location": [0, 0, 0]}]},
+            })
+        )
+        main.append_history(
+            root, "component_assembly_rejected",
+            feature_id="support", child_job_id=child_id, candidate_version=version,
+            reason="The installed part remains a flat shape; missing structural geometry.",
+        )
+        if version == 7:
+            assert main._schedule_bounded_component_shape_rebuild(root, "support", child_id) is False
+
+    assert main._schedule_bounded_component_shape_rebuild(root, "support", child_id) is True
+    plan = load_feature_plan(root)
+    support = next(feature for feature in plan.features if feature.id == "support")
+    body = next(feature for feature in plan.features if feature.id == "body")
+    assert support.component_job_id is None
+    assert support.status in {"retry", "ready"}
+    assert support.attempts == 0
+    assert body.status == "accepted" and body.accepted_version == 3
+    assert main._schedule_bounded_component_shape_rebuild(root, "support", child_id) is False
+
+    new_child_id = main._create_component_child_job(parent_id, support)
+    assert new_child_id != child_id
+    new_child = json.loads((main.JOBS_ROOT / new_child_id / "request.json").read_text())
+    assert new_child["component_rebuild_of"] == child_id
+    assert "previously accepted frozen" in new_child["prompt"]
+    assert "missing structural geometry" in new_child["prompt"]
+    assert load_feature_plan(root).features[0].accepted_version == 3

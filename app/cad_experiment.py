@@ -157,12 +157,22 @@ async def generate_cad(
     error = ""
     reference_brief = await _reference_geometry_brief(client, prompt, reference_images)
     last_export: tuple[CadBlueprint, dict, Path] | None = None
+    best_grade: tuple[float, float, float] = (-1.0, -999.0, -1.0)
+    previous_evidence: dict | None = None
     try:
         for attempt in range(1, 4):
             query = prompt if not error else (
                 f"{prompt}\n\nPrevious attempt failed independent QA. "
-                f"Return an improved complete JSON blueprint fixing measured issues: {error[:1200]}"
+                f"Return an improved complete JSON blueprint fixing measured issues: {error[:1600]}"
             )
+            if previous_evidence:
+                query += (
+                    "\nPrior candidate and measured critique (not a geometry template):\n"
+                    + json.dumps(previous_evidence, separators=(",", ":"), ensure_ascii=False)[:16000]
+                    + "\nPreserve correctly placed parts and already accepted geometry where "
+                    "possible. Change only the failed attachments, silhouette and proportions. "
+                    "Explain corrections through changed numeric sizes, profiles and transforms."
+                )
             if reference_images:
                 query += (
                     f"\nThere are {len(reference_images)} original reference images. "
@@ -201,14 +211,27 @@ async def generate_cad(
                 error = f"CAD construction/export: {exc}"
                 shutil.rmtree(attempt_dir, ignore_errors=True)
                 continue
-            last_export = (blueprint, report, attempt_dir)
             # Run visual critique even if physical attachment QA failed. Otherwise
             # the next planner only repairs gap measurements, not shape.
             review = await _review_reference_match(
                 client, prompt, reference_images, attempt_dir, reference_mode
             )
             report["reference_visual_qa"] = review
-            faults = list(report["assembly_qa"]["failures"])
+            graph = report["assembly_qa"]
+            grade = (
+                float(graph["pass"]),
+                -float(len(graph["groups"])),
+                float(review.get("reference_match_score") or 0.0),
+            )
+            if last_export is None or grade > best_grade:
+                best_grade = grade
+                last_export = (blueprint, report, attempt_dir)
+            previous_evidence = {
+                "blueprint": blueprint.model_dump(exclude_none=True),
+                "assembly_qa": graph,
+                "visual_qa": review,
+            }
+            faults = list(graph["failures"])
             if review["status"] == "failed":
                 faults.extend(review.get("findings") or ["Reference subject mismatch"])
             if faults:

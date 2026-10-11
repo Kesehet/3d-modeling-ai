@@ -24,6 +24,7 @@ class CadPart(BaseModel):
     inner_radius_mm: float | None = None
     height_mm: float | None = None
     profile_points_mm: list[tuple[float, float]] | None = Field(default=None, max_length=24)
+    profile_plane: Literal["xy", "xz", "yz"] = "xy"
     loft_sections_mm: list[tuple[float, float, float, float, float]] | None = Field(
         default=None, max_length=12
     )
@@ -104,16 +105,21 @@ You are a parametric CAD designer. Return ONLY the requested JSON blueprint.
 Create physically plausible, separately named, correctly positioned components.
 Choose geometry from the user's description; NEVER omit major requested components.
 Units are millimetres. Coordinate system is Z-up. Origin should be around assembly centre.
-Allowed part kinds: box, cylinder, cone, sphere, tube.
+Allowed part kinds: box, cylinder, cone, sphere, tube, profile_extrusion, section_loft.
 box: dimensions_mm=[x,y,z] are full sizes.
 cylinder: radius_mm and height_mm (along local Z).
 cone: radius_mm (bottom), top_radius_mm (top), height_mm (local Z).
 sphere: radius_mm.
 tube: radius_mm outer, inner_radius_mm inner, height_mm (local Z).
-profile_extrusion: profile_points_mm=[[local_x,local_y],...] describing a non-self-
-intersecting silhouette in local XY, height_mm = solid extrusion thickness along
-local Z. Use this for nonrectangular outlines, slanted faces, tapered shapes,
-and architectural/hard-surface silhouettes. Use rotation_deg to orient extrusion.
+profile_extrusion: profile_points_mm=[[u,v],...] in the selected
+profile_plane (xy, xz or yz), height_mm = symmetric SOLID EXTRUSION DEPTH
+normal to that plane. For a side silhouette needing vertical roof slopes,
+choose profile_plane="xz": [u,v]=[horizontal X, vertical Z], then give
+height_mm the WIDTH along Y. For front silhouettes choose "yz".
+Extrusion is centered about the sketch plane. Points describe actual outer
+contour with sloped sides, not a rectangular bounding box.
+Use this for angled/trapezoidal/curved-like polygon silhouettes; use
+rotation_deg only when the 3 named profile planes cannot represent the outline.
 section_loft: loft_sections_mm=[[z,width,depth,offset_x,offset_y], ...] at 2-12
 ordered stations along local Z. Adjacent rectangular sections are joined by
 smoothly varying surfaces to form tapered or offset solids.
@@ -121,12 +127,13 @@ Prefer these general profile tools when plain boxes/cylinders cannot reproduce
 the requested silhouette. Avoid stacks of blocky rectangles as a substitute
 for a coherent profile. All sections/points are explicitly chosen from prompt
 and reference understanding; never use object-name templates.
-Coordinate contract: WORLD Z is vertical. A profile_extrusion profile lives
-in LOCAL XY and extrudes along LOCAL Z. If its outline must lie in a vertical
-world plane (XZ/YZ), ROTATE the entire profile with rotation_deg accordingly;
-never confuse local sketch Y with world up. Place the part so the entire
-extrusion touches intended neighbors without protruding through the main
-silhouette. A section_loft uses LOCAL Z for stations and LOCAL XY for width
+Coordinate contract: WORLD Z is vertical, WORLD X is longitudinal,
+WORLD Y is lateral, subject to the reference. A profile_extrusion
+with plane=xz is the MOST DIRECT way to make a sloping roof or tall
+side elevation without confusing local coordinates: [x,z] coordinates,
+depth along world Y. Do not substitute a full-height box when the
+reference visibly has a trapezoidal/sloping outline.
+A section_loft uses LOCAL Z for stations and LOCAL XY for width
 and depth; rotate it if a horizontal or diagonal longitudinal shape is needed.
 Think through final world-space bounds after all rotations and translations.
 Every part may have position_mm=[x,y,z] and rotation_deg=[rx,ry,rz].
@@ -156,6 +163,7 @@ def build_cad(blueprint: CadBlueprint, output_dir: Path) -> dict:
         Cone,
         Cylinder,
         Polygon,
+        Plane,
         Pos,
         Rectangle,
         Rot,
@@ -185,8 +193,12 @@ def build_cad(blueprint: CadBlueprint, output_dir: Path) -> dict:
             bore = Cylinder(part.inner_radius_mm, part.height_mm + 2)
             solid = outer - bore
         elif part.kind == "profile_extrusion":
-            sketch = Polygon(*part.profile_points_mm, align=None)
-            solid = Pos(0, 0, -part.height_mm / 2) * extrude(sketch, amount=part.height_mm)
+            # World-aligned sketch planes remove local/world orientation ambiguity.
+            # Both-sided extrusion keeps position_mm at the profile's centre.
+            base = Polygon(*part.profile_points_mm, align=None)
+            plane = {"xy": Plane.XY, "xz": Plane.XZ, "yz": Plane.YZ}[part.profile_plane]
+            sketch = plane * base
+            solid = extrude(sketch, amount=part.height_mm / 2, both=True)
         elif part.kind == "section_loft":
             sections = [
                 Pos(x, y, z) * Rectangle(width, depth)

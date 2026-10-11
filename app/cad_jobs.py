@@ -119,6 +119,7 @@ async def run_cad_job(job_id: str, version: int, *, model: str | None = None,
             temp = dest.with_name(f".{dest.name}.tmp")
             temp.write_bytes(content)
             temp.replace(dest)
+        component_qa = payload.get("semantic_component_qa") or {"status": "no_requirements"}
         assembly_qa = payload.get("assembly_qa") or {"pass": None, "measurement": "not_run"}
         reference_qa = payload.get("reference_visual_qa") or {"status": "not_run_no_reference"}
         assembly_failed = assembly_qa.get("pass") is False
@@ -145,6 +146,7 @@ async def run_cad_job(job_id: str, version: int, *, model: str | None = None,
             "step_reimport_valid": True,
             "review_required": True,
             "assembly_qa": assembly_qa,
+            "semantic_component_qa": component_qa,
             "reference_visual_qa": reference_qa,
             "note": payload.get("quality_scope"),
         }

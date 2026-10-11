@@ -1,0 +1,16 @@
+FROM python:3.12-slim
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    JOBS_ROOT=/data/jobs CAD_EXPERIMENT_ENABLED=1
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates libgl1 libglu1-mesa libxrender1 libxext6 libsm6 \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+COPY pyproject.toml ./
+COPY app ./app
+RUN python -m pip install --no-cache-dir ".[cad]"
+RUN useradd --system --create-home --uid 10001 cad \
+    && mkdir -p /data/jobs \
+    && chown -R cad:cad /data
+USER cad
+EXPOSE 8084
+CMD ["uvicorn", "app.cad_service:app", "--host", "0.0.0.0", "--port", "8084"]

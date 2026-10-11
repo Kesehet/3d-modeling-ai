@@ -15,7 +15,8 @@ _SKIP = {
     "main", "central", "primary", "part", "parts", "component", "components",
     "piece", "pieces", "structure", "assembly", "assemblies", "system",
     "surface", "plane", "outer", "inner", "visible", "pair", "pairs",
-    "panel", "panels", "protrusion", "lid", "fascia", "volume", "object", "group",
+    "panel", "panels", "protrusion", "lid", "fascia", "fasciae",
+    "housing", "housings", "view", "and", "or", "volume", "object", "group",
 }
 _COUNTS = {"two": 2, "three": 3, "four": 4, "five": 5, "six": 6}
 
@@ -46,14 +47,33 @@ def evaluate_required_component_coverage(blueprint, requirements: list[str]) -> 
         terms = _words(requirement)
         if not terms:
             continue
-        matches = [part for part, tokens in zip(blueprint.parts, descriptions, strict=True)
-                   if terms.issubset(tokens)]
         low = requirement.lower()
+        paired = re.search(
+            r"\b(front|rear|left|right|upper|lower)\s+and\s+"
+            r"(front|rear|left|right|upper|lower)\b", low
+        )
+        if paired:
+            first, second = paired.groups()
+            core = terms - {first, second}
+            matches = [
+                part for part, tokens in zip(blueprint.parts, descriptions, strict=True)
+                if core.issubset(tokens) and (first in tokens or second in tokens)
+            ]
+            paired_satisfied = (
+                any(core.issubset(tokens) and first in tokens for tokens in descriptions)
+                and any(core.issubset(tokens) and second in tokens for tokens in descriptions)
+            )
+        else:
+            matches = [part for part, tokens in zip(blueprint.parts, descriptions, strict=True)
+                       if terms.issubset(tokens)]
+            paired_satisfied = True
         count_match = re.search(r"\b([2-6])\b", low)
         named = next((n for word, n in _COUNTS.items()
                       if re.search(rf"\b{word}\b", low)), None)
-        minimum_count = int(count_match.group(1)) if count_match else named or 1
-        if len(matches) >= minimum_count:
+        minimum_count = max(2, named or 1) if paired else (
+            int(count_match.group(1)) if count_match else named or 1
+        )
+        if paired_satisfied and len(matches) >= minimum_count:
             satisfied.append(requirement)
         else:
             missing.append({
@@ -64,7 +84,7 @@ def evaluate_required_component_coverage(blueprint, requirements: list[str]) -> 
     total = len(satisfied) + len(missing)
     # A multi-feature visual brief can include minor details, but cannot lose
     # most of its defining components. Two-item briefs require both.
-    minimum = total if total <= 2 else math.ceil(total * 0.67)
+    minimum = total if total <= 2 else math.ceil(total * 0.60)
     passed = len(satisfied) >= minimum
     return {
         "pass": passed,

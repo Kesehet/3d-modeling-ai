@@ -112,9 +112,11 @@ A failed review is fed back to the planner for up to three bounded corrective
 attempts; unavailable/invalid visual review is **unverified**, not a pass.
 
 `assembly_qa` is measured on actual generated CAD solids and rejects disconnected
-AABB part groups with mm gap evidence, except explicitly independent requests.
+parts with mm gap evidence, except explicitly independent requests.
 It never uses keywords such as "wheel" or "blade" to determine placements.
-**Limitation:** overlap of bounding boxes is NOT proof of physical contact,
+It combines broad-phase AABB separation with OpenCascade narrow-phase exact
+BRep closest-solid distance, resolving false proximity when bounding boxes overlap.
+**Limitation:** mm-scale surface proximity is NOT proof of exact mating contact,
 interference-free parts, watertight combined assembly, dimensional fidelity, or
 mechanical feasibility. This first-stage QA is conservative rather than final.
 

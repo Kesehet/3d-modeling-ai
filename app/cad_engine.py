@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field, model_validator
 
 class CadPart(BaseModel):
     name: str = Field(min_length=1, max_length=60, pattern=r"^[A-Za-z][A-Za-z0-9_.-]*$")
-    kind: Literal["box", "cylinder", "cone", "sphere", "tube"]
+    kind: Literal["box", "cylinder", "cone", "sphere", "tube", "profile_extrusion", "section_loft"]
     position_mm: tuple[float, float, float] = (0, 0, 0)
     rotation_deg: tuple[float, float, float] = (0, 0, 0)
     dimensions_mm: tuple[float, float, float] | None = None
@@ -23,6 +23,10 @@ class CadPart(BaseModel):
     top_radius_mm: float | None = None
     inner_radius_mm: float | None = None
     height_mm: float | None = None
+    profile_points_mm: list[tuple[float, float]] | None = Field(default=None, max_length=24)
+    loft_sections_mm: list[tuple[float, float, float, float, float]] | None = Field(
+        default=None, max_length=12
+    )
 
     @model_validator(mode="after")
     def check_geometry(self) -> CadPart:
@@ -33,6 +37,34 @@ class CadPart(BaseModel):
             raise ValueError("Position exceeds 10000 mm")
         if any(abs(v) > 360 for v in self.rotation_deg):
             raise ValueError("Rotation exceeds 360 degrees")
+        if self.kind == "profile_extrusion":
+            pts = self.profile_points_mm or []
+            if not 3 <= len(pts) <= 24:
+                raise ValueError("profile_extrusion requires 3 to 24 2D profile points")
+            if self.height_mm is None or not math.isfinite(self.height_mm) or not 0 < self.height_mm <= 20000:
+                raise ValueError("profile_extrusion requires positive extrusion height_mm")
+            if any(not math.isfinite(v) or abs(v) > 20000 for point in pts for v in point):
+                raise ValueError("Profile contains nonfinite/out-of-range coordinates")
+            signed_area = sum(
+                pts[i][0] * pts[(i + 1) % len(pts)][1]
+                - pts[(i + 1) % len(pts)][0] * pts[i][1]
+                for i in range(len(pts))
+            ) / 2
+            if abs(signed_area) < 1e-3:
+                raise ValueError("Profile has zero/tiny planar area")
+            return self
+        if self.kind == "section_loft":
+            stations = self.loft_sections_mm or []
+            if not 2 <= len(stations) <= 12:
+                raise ValueError("section_loft requires 2 to 12 stations")
+            if any(not math.isfinite(v) or abs(v) > 20000 for entry in stations for v in entry):
+                raise ValueError("Loft stations contain nonfinite/out-of-range coordinates")
+            if any(entry[1] <= 0 or entry[2] <= 0 for entry in stations):
+                raise ValueError("Loft station widths/depths must be positive")
+            if any(stations[i + 1][0] - stations[i][0] <= 0.01
+                   for i in range(len(stations) - 1)):
+                raise ValueError("Loft station Z coordinates must be strictly increasing")
+            return self
         if self.kind == "box":
             if self.dimensions_mm is None:
                 raise ValueError("Box requires dimensions_mm")
@@ -78,6 +110,17 @@ cylinder: radius_mm and height_mm (along local Z).
 cone: radius_mm (bottom), top_radius_mm (top), height_mm (local Z).
 sphere: radius_mm.
 tube: radius_mm outer, inner_radius_mm inner, height_mm (local Z).
+profile_extrusion: profile_points_mm=[[local_x,local_y],...] describing a non-self-
+intersecting silhouette in local XY, height_mm = solid extrusion thickness along
+local Z. Use this for nonrectangular outlines, slanted faces, tapered shapes,
+and architectural/hard-surface silhouettes. Use rotation_deg to orient extrusion.
+section_loft: loft_sections_mm=[[z,width,depth,offset_x,offset_y], ...] at 2-12
+ordered stations along local Z. Adjacent rectangular sections are joined by
+smoothly varying surfaces to form tapered or offset solids.
+Prefer these general profile tools when plain boxes/cylinders cannot reproduce
+the requested silhouette. Avoid stacks of blocky rectangles as a substitute
+for a coherent profile. All sections/points are explicitly chosen from prompt
+and reference understanding; never use object-name templates.
 Every part may have position_mm=[x,y,z] and rotation_deg=[rx,ry,rz].
 Compose separate components with sane proportions and correct contact/overlap at joints.
 Think in physical assembly relationships BEFORE choosing numeric positions:
@@ -104,9 +147,13 @@ def build_cad(blueprint: CadBlueprint, output_dir: Path) -> dict:
         Compound,
         Cone,
         Cylinder,
+        Polygon,
         Pos,
+        Rectangle,
         Rot,
         Sphere,
+        extrude,
+        loft,
         export_step,
         export_stl,
         import_step,
@@ -129,6 +176,15 @@ def build_cad(blueprint: CadBlueprint, output_dir: Path) -> dict:
             outer = Cylinder(part.radius_mm, part.height_mm)
             bore = Cylinder(part.inner_radius_mm, part.height_mm + 2)
             solid = outer - bore
+        elif part.kind == "profile_extrusion":
+            sketch = Polygon(*part.profile_points_mm, align=None)
+            solid = Pos(0, 0, -part.height_mm / 2) * extrude(sketch, amount=part.height_mm)
+        elif part.kind == "section_loft":
+            sections = [
+                Pos(x, y, z) * Rectangle(width, depth)
+                for z, width, depth, x, y in part.loft_sections_mm
+            ]
+            solid = loft(sections)
         else:
             solid = Sphere(part.radius_mm)
         solid = Pos(*part.position_mm) * Rot(*part.rotation_deg) * solid

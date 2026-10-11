@@ -360,3 +360,42 @@ def test_brep_distance_accepts_true_contact_for_unrelated_solids():
     assert report["pass"]
     assert report["solid_proximity_verified"] is True
     assert report["physical_fit_verified"] is False
+
+
+def test_dense_reference_preview_has_no_triangle_sampling_holes(tmp_path):
+    """The old renderer skipped most of a dense solid and drew fake mesh gaps."""
+    import numpy as np
+    from PIL import Image
+
+    from app.cad_preview import BACKGROUND, render_cad_views
+
+    mesh = trimesh.creation.box(extents=[180, 120, 85])
+    for _ in range(5):
+        mesh = mesh.subdivide()
+    assert len(mesh.faces) > 4500
+    scene = trimesh.Scene()
+    scene.add_geometry(mesh, geom_name="generic_dense_solid")
+    images = render_cad_views(scene, tmp_path)
+    assert set(images) == {"front-left", "back-right", "left", "right", "top"}
+    rendered = np.asarray(Image.open(tmp_path / images["front-left"]).convert("RGB"))
+    central = rendered[320:380, 320:380]
+    foreground = np.any(central != np.asarray(BACKGROUND), axis=2)
+    assert float(foreground.mean()) > 0.95
+
+
+def test_profile_plane_is_geometrically_world_aligned(tmp_path):
+    plan = CadBlueprint.model_validate({
+        "title": "Abstract sloped roof",
+        "parts": [{
+            "name": "tilted_roof", "kind": "profile_extrusion",
+            "profile_plane": "xz",
+            "profile_points_mm": [[-45, 0], [45, 0], [30, 35], [-20, 35]],
+            "height_mm": 22,
+        }],
+    })
+    build_cad(plan, tmp_path)
+    actual = trimesh.load(tmp_path / "assembly.glb", force="scene").bounds
+    span = actual[1] - actual[0]
+    assert abs(span[0] - 90) < 0.5
+    assert abs(span[1] - 22) < 0.5
+    assert abs(span[2] - 35) < 0.5

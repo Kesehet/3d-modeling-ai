@@ -70,6 +70,11 @@ jobs:
               if p["state"] == "open" and p["head"]["repo"]
               and p["head"]["repo"]["full_name"] == repo
           }
+          closed_unmerged_heads = {
+              p["head"]["ref"] for p in pulls
+              if p["state"] == "closed" and not p.get("merged_at")
+              and p["head"]["repo"] and p["head"]["repo"]["full_name"] == repo
+          }
           merged_heads = {}
           for p in pulls:
               head = p["head"]
@@ -84,9 +89,16 @@ jobs:
           for branch in branches:
               name, sha = branch["name"], branch["commit"]["sha"]
               if (name == repository["default_branch"] or name in protected_names
-                      or branch["protected"] or name in open_heads):
+                      or branch["protected"] or name in open_heads
+                      or name in closed_unmerged_heads):
                   continue
               if sha in merged_heads.get(name, set()):
+                  candidates.append((name, sha))
+                  continue
+              # A branch without a merged PR is still redundant if its exact
+              # tip is an ancestor of main (e.g. a cherry-picked fix).
+              comparison = api(f"/compare/{repository['default_branch']}...{quote(name, safe='/')}")
+              if comparison["ahead_by"] == 0 and comparison["status"] in ("behind", "identical"):
                   candidates.append((name, sha))
 
           print(f"Scanned {len(branches)} branches and {len(pulls)} PRs; "

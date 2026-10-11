@@ -2785,6 +2785,13 @@ async def _plan_component_assembly(
     rejected_installation = _last_rejected_component_assembly(
         parent_root, feature_task.id, parent_version
     )
+    # A new isolated child has a different shape, origin and local axes. Old
+    # placement failures must not impose stale transform/taper assumptions.
+    rejected_record = _read_json_if_present(
+        parent_root / f"component-assembly-v{rejected_installation.get('candidate_version')}.json"
+    ) if rejected_installation else {}
+    if rejected_record.get("child_job_id") != child_job_id:
+        rejected_installation = {}
     rejected_version = rejected_installation.get("candidate_version")
     measured_taper = rejected_installation.get("measured_sections") or {}
     expected_taper_direction = required_taper_direction(feature_task.acceptance_criteria)

@@ -6,6 +6,10 @@ All CAD processing happens inside the optional, CPU-limited internal service.
 from __future__ import annotations
 
 import asyncio
+import base64
+from io import BytesIO
+
+from PIL import Image
 import json
 import os
 import uuid
@@ -27,9 +31,35 @@ CAD_MAX_WAIT_SECONDS = 840.0
 
 class CadGenerateRequest(BaseModel):
     model: str | None = Field(default=None, min_length=2, max_length=120)
+    reference_mode: str = Field(default="shape_guidance", pattern="^(exact_match|shape_guidance|inspiration)$")
 
 
-async def run_cad_job(job_id: str, version: int, *, model: str | None = None) -> None:
+def _load_reference_images(root) -> list[str]:
+    # Main API already owns reference upload, identity checks and provenance.
+    from . import main as api
+
+    images: list[str] = []
+    for record in api._usable_reference_index(root)[:3]:
+        stored_name = str(record.get("stored_name") or "")
+        source = root / "references" / stored_name
+        if source.name != stored_name or not source.is_file():
+            continue
+        try:
+            with Image.open(source) as original:
+                frame = original.convert("RGB")
+                frame.thumbnail((640, 640))
+                buf = BytesIO()
+                frame.save(buf, format="JPEG", quality=65, optimize=True)
+            if buf.tell() <= 425_000:
+                images.append(base64.b64encode(buf.getvalue()).decode("ascii"))
+        except (OSError, ValueError):
+            continue
+    return images
+
+
+
+async def run_cad_job(job_id: str, version: int, *, model: str | None = None,
+                      reference_mode: str = "shape_guidance") -> None:
     from . import main as api
 
     root = api._require_job(job_id)
@@ -40,12 +70,14 @@ async def run_cad_job(job_id: str, version: int, *, model: str | None = None) ->
         api._write_status(root, state="running", stage="cad_reasoning", modeling_strategy="cpu_cad")
         append_history(root, "cad_generation_started", version=version, backend="build123d")
         auth = {"Authorization": f"Bearer {API_TOKEN}"}
+        references = _load_reference_images(root)
         async with httpx.AsyncClient(
             timeout=httpx.Timeout(CAD_MAX_WAIT_SECONDS, connect=10.0)
         ) as client:
             response = await client.post(
                 f"{CAD_WORKER_URL}/v1/cad-experiments",
-                json={"prompt": request["prompt"], **({"model": model} if model else {})},
+                json={"prompt": request["prompt"], "reference_images": references,
+                      "reference_mode": reference_mode, **({"model": model} if model else {})},
                 headers=auth,
             )
             if not response.is_success:
@@ -58,6 +90,8 @@ async def run_cad_job(job_id: str, version: int, *, model: str | None = None) ->
             exports = {"glb": "assembly.glb", "step": "assembly.step", "stl": "assembly.stl",
                        "json": "manifest.json"}
             download_files: dict[str, bytes] = {}
+            if payload.get("renders"):
+                exports.update({"front-left": "assembly-front-left.png", "top": "assembly-top.png"})
             for extension in exports:
                 response = await client.get(
                     f"{CAD_WORKER_URL}/v1/cad-experiments/{artifact_id}/files/{extension}",
@@ -69,15 +103,33 @@ async def run_cad_job(job_id: str, version: int, *, model: str | None = None) ->
                 download_files[extension] = response.content
         # Transfer verified worker artifacts to the normal job before promotion.
         for extension, content in download_files.items():
-            suffix = f".{extension}" if extension != "json" else "-cad.json"
-            dest = export_dir / f"model-v{version}{suffix}"
-            temp = export_dir / f".model-v{version}{suffix}.tmp"
+            suffix = f".{extension}" if extension not in ("json", "front-left", "top") else (
+                "-cad.json" if extension == "json" else None
+            )
+            if suffix is None:
+                dest = root / "renders" / f"model-v{version}-{extension}.png"
+            else:
+                dest = export_dir / f"model-v{version}{suffix}"
+            temp = dest.with_name(f".{dest.name}.tmp")
             temp.write_bytes(content)
             temp.replace(dest)
+        assembly_qa = payload.get("assembly_qa") or {"pass": None, "measurement": "not_run"}
+        reference_qa = payload.get("reference_visual_qa") or {"status": "not_run_no_reference"}
+        assembly_failed = assembly_qa.get("pass") is False
+        visual_failed = reference_qa.get("status") == "failed"
+        review_passed = reference_qa.get("status") == "passed" and not assembly_failed
         quality = {
-            "status": "geometric_integrity_only",
-            "recognizable": None,
-            "summary": "STEP and per-part mesh checks passed. Visual subject match and mechanical attachments are not yet verified.",
+            "status": ("failed_assembly_qa" if assembly_failed else
+                       "failed_reference_visual_qa" if visual_failed else
+                       "reference_visual_passed_pending_mechanical" if review_passed else
+                       "geometric_integrity_only"),
+            "recognizable": True if review_passed else False if visual_failed else None,
+            "summary": (
+                "; ".join(assembly_qa.get("failures") or []) if assembly_failed else
+                "; ".join(reference_qa.get("findings") or []) if visual_failed else
+                "Reference comparison passed; physical contact/print fit still requires review." if review_passed else
+                "STEP and AABB checks passed; visual subject match or physical contact unverified."
+            ),
         }
         qa = {
             "engine": "cpu_cad",
@@ -86,6 +138,8 @@ async def run_cad_job(job_id: str, version: int, *, model: str | None = None) ->
             "parts": payload["parts"],
             "step_reimport_valid": True,
             "review_required": True,
+            "assembly_qa": assembly_qa,
+            "reference_visual_qa": reference_qa,
             "note": payload.get("quality_scope"),
         }
         (export_dir / f"model-v{version}-qa.json").write_text(
@@ -94,10 +148,13 @@ async def run_cad_job(job_id: str, version: int, *, model: str | None = None) ->
         api._write_status(
             root,
             state="ready",
-            stage="cad_needs_visual_review",
+            stage=("cad_needs_assembly_repair" if assembly_failed else
+                   "cad_needs_reference_repair" if visual_failed else
+                   "cad_needs_visual_review"),
             modeling_strategy="cpu_cad",
             cad={"version": version, "part_count": payload["part_count"], "attempts": payload.get("attempts"),
-                 "engine": "build123d", "visual_review_required": True},
+                 "engine": "build123d", "visual_review_required": True,
+                 "assembly_qa": assembly_qa, "reference_visual_qa": reference_qa},
             generic_model={"version": version},
             quality_gate=quality,
             error=None,
@@ -138,7 +195,9 @@ async def start_cad_generation(job_id: str, request: CadGenerateRequest) -> dict
     version = reserve_model_version(root)
     api._write_status(root, state="running", stage="cad_queued",
                       modeling_strategy="cpu_cad", error=None)
-    task = asyncio.create_task(run_cad_job(job_id, version, model=request.model))
+    task = asyncio.create_task(run_cad_job(
+        job_id, version, model=request.model, reference_mode=request.reference_mode
+    ))
     CAD_JOBS[job_id] = task
     task.add_done_callback(lambda done, job_id=job_id: CAD_JOBS.pop(job_id, None)
                            if CAD_JOBS.get(job_id) is done else None)

@@ -79,6 +79,15 @@ sphere: radius_mm.
 tube: radius_mm outer, inner_radius_mm inner, height_mm (local Z).
 Every part may have position_mm=[x,y,z] and rotation_deg=[rx,ry,rz].
 Compose separate components with sane proportions and correct contact/overlap at joints.
+Think in physical assembly relationships BEFORE choosing numeric positions:
+- Z is UP. For hanging objects, the support must extend toward the ceiling.
+- Parts described as coaxial, centered, or concentric share the same axis and x/y centre.
+- A shaft, hub, bearing, or motor on a common rotational axis must remain aligned.
+- For repeated radial attachments, position and rotate each instance about the SAME chosen centre.
+- Joint ends should touch or intersect their mating parent; don't leave floating parts.
+- Check the sign of every positional offset and re-check relative placement and orientation.
+- Ensure every requested part is present; do not replace a part with a text label.
+- Return separate editable parts, not one undifferentiated mesh.
 Do not emit code, macros, loops, copies, material-only objects, or unsupported kinds.
 Do not use fan-specific, lamp-specific or any object templates.
 """

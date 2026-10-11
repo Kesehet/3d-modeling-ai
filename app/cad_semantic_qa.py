@@ -15,6 +15,7 @@ _SKIP = {
     "main", "central", "primary", "part", "parts", "component", "components",
     "piece", "pieces", "structure", "assembly", "assemblies", "system",
     "surface", "plane", "outer", "inner", "visible", "pair", "pairs",
+    "panel", "panels", "protrusion", "lid", "fascia", "volume", "object", "group",
 }
 _COUNTS = {"two": 2, "three": 3, "four": 4, "five": 5, "six": 6}
 

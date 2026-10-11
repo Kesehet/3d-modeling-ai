@@ -18,7 +18,6 @@ def suggest_group_attachment(blueprint, report: dict, *, max_fraction: float = 0
     if not all(part.name in bounds for part in blueprint.parts):
         return {"changed": False, "moves": [], "reason": "missing evaluated part bounds"}
 
-    names = {part.name: part for part in blueprint.parts}
     evidence = {row["name"]: float(row["volume_mm3"])
                 for row in report.get("parts", [])}
     if not evidence:

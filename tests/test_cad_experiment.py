@@ -5,12 +5,15 @@ import asyncio
 from types import SimpleNamespace
 
 import pytest
-import trimesh
 from fastapi.testclient import TestClient
 
 from app import cad_experiment
 from app.cad_engine import CadBlueprint, build_cad
 from app.cad_service import app
+
+# Base CI installs only [dev]; the dedicated CAD workflow installs [cad,dev].
+pytest.importorskip("build123d")
+trimesh = pytest.importorskip("trimesh")
 
 BLUEPRINT = {
     "title": "Three-part generic assembly",

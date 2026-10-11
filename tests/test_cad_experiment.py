@@ -230,6 +230,42 @@ def test_multimodal_reference_compares_real_render_with_original(tmp_path, monke
     assert (out / "manifest.json").is_file()
 
 
+def test_photo_slope_requires_nonprimitive_outline(tmp_path, monkeypatch):
+    monkeypatch.setattr(cad_experiment, "JOBS_ROOT", tmp_path)
+    simple_brief = {
+        "subject_description": "A tapered multi-part structure",
+        "silhouette_geometry": ["Trapezoidal roof with sloped side edges"],
+        "required_components": ["roof", "base"],
+        "spatial_relationships": ["roof rests on base"],
+        "relative_proportions": ["roof narrower at top"],
+        "uncertain_details": [],
+    }
+    box_only = {
+        "title": "Bad simplification",
+        "parts": [{"name": "roof", "kind": "box", "dimensions_mm": [80, 20, 20]}],
+    }
+    profiled = {
+        "title": "Reference silhouette respected",
+        "parts": [{
+            "name": "roof", "kind": "profile_extrusion", "profile_plane": "xz",
+            "profile_points_mm": [[-40, 0], [40, 0], [24, 25], [-20, 25]],
+            "height_mm": 20,
+        }],
+    }
+    fake = FakeOllama([
+        simple_brief, box_only, profiled,
+        {"passed": True, "subject_recognizable": True,
+         "reference_match_score": 0.9, "findings": []},
+    ])
+    _, report, _ = asyncio.run(cad_experiment.generate_cad(
+        "Tapered structural form", "mock", client=fake,
+        reference_images=["mock-reference"], reference_mode="shape_guidance",
+    ))
+    assert report["attempts"] == 2
+    assert report["parts"][0]["kind"] == "profile_extrusion"
+    assert "nonrectangular" in fake.calls[2]["prompt"].lower()
+
+
 def test_exhausted_disconnected_model_is_never_certified(tmp_path, monkeypatch):
     monkeypatch.setattr(cad_experiment, "JOBS_ROOT", tmp_path)
     disconnected = {
@@ -253,6 +289,11 @@ def test_exhausted_disconnected_model_is_never_certified(tmp_path, monkeypatch):
     ("profile_extrusion", {
         "profile_points_mm": [[-20, -10], [30, -10], [20, 8], [0, 15], [-15, 12]],
         "height_mm": 15,
+    }),
+    ("profile_extrusion", {
+        "profile_points_mm": [[-45, 0], [45, 0], [30, 28], [-22, 35]],
+        "profile_plane": "xz",
+        "height_mm": 30,
     }),
     ("section_loft", {
         "loft_sections_mm": [

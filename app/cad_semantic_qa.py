@@ -17,8 +17,10 @@ _SKIP = {
     "surface", "plane", "outer", "inner", "visible", "pair", "pairs",
     "panel", "panels", "protrusion", "lid", "fascia", "fasciae",
     "housing", "housings", "view", "and", "or", "volume", "object", "group",
+    "slope", "sloped", "recessed", "curved", "angled", "round", "flat",
 }
 _COUNTS = {"two": 2, "three": 3, "four": 4, "five": 5, "six": 6}
+_DIRECTION = {"front", "rear", "left", "right", "upper", "lower", "side", "top", "bottom"}
 
 
 def _words(value: str) -> set[str]:
@@ -54,18 +56,26 @@ def evaluate_required_component_coverage(blueprint, requirements: list[str]) -> 
         )
         if paired:
             first, second = paired.groups()
-            core = terms - {first, second}
+            core = terms - _DIRECTION
             matches = [
                 part for part, tokens in zip(blueprint.parts, descriptions, strict=True)
-                if core.issubset(tokens) and (first in tokens or second in tokens)
+                if core and core.issubset(tokens) and (first in tokens or second in tokens)
             ]
             paired_satisfied = (
                 any(core.issubset(tokens) and first in tokens for tokens in descriptions)
                 and any(core.issubset(tokens) and second in tokens for tokens in descriptions)
             )
         else:
-            matches = [part for part, tokens in zip(blueprint.parts, descriptions, strict=True)
-                       if terms.issubset(tokens)]
+            # Orientation, shape and visual modifiers aren't identity. A
+            # single "hood" part can satisfy "front hood plane", for example.
+            # Keep hard, non-directional tokens so unrelated parts don't match.
+            core = terms - _DIRECTION
+            if not core:
+                core = terms
+            matches = [
+                part for part, tokens in zip(blueprint.parts, descriptions, strict=True)
+                if core.issubset(tokens)
+            ]
             paired_satisfied = True
         count_match = re.search(r"\b([2-6])\b", low)
         named = next((n for word, n in _COUNTS.items()

@@ -264,6 +264,7 @@ def build_cad(blueprint: CadBlueprint, output_dir: Path) -> dict:
         "units": "mm",
         "part_count": len(part_evidence),
         "parts": part_evidence,
+        "part_bounds_mm": evaluated_bounds,
         "step_reimport_valid": valid,
         "assembly_qa": assembly_qa,
         "renders": render_files,

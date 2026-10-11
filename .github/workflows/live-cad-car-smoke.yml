@@ -41,7 +41,20 @@ jobs:
           test -n "$THREED_API_TOKEN"
           mkdir -p smoke-artifacts
           BASE="https://$THREED_HOSTNAME"
-          curl --fail --silent --show-error --max-time 20 "$BASE/health" | tee smoke-artifacts/health.json
+          healthy=0
+          for probe in $(seq 1 10); do
+            echo "Public API health attempt $probe/10"
+            if curl --fail --silent --show-error --connect-timeout 10 --max-time 35 \
+              "$BASE/health" -o smoke-artifacts/health.json && \
+              jq -e '.ok == true' smoke-artifacts/health.json >/dev/null; then
+              healthy=1
+              break
+            fi
+            getent ahostsv4 "$THREED_HOSTNAME" | head -n 2 || true
+            sleep 12
+          done
+          test "$healthy" = 1
+          cat smoke-artifacts/health.json
           BODY=$(jq -n --arg prompt "Make a recognizable simple four-wheel passenger sedan car as separate editable CAD solids. Include a wide long body with a hood and trunk, a visibly raised roof/passenger cabin, and four circular wheels in their correct positions: two at the front axle and two at the rear axle, one on each side. Wheel axes run across the vehicle width. Place each wheel at a realistic height beneath the body so tires meet the ground and do not float. Make the cabin rest on the body; make the car front and rear visibly distinct. Choose all proportions and placements yourself, use supported generic primitives, no hard-coded shape template or placeholder text. Return all four wheels as individually named parts." '{prompt:$prompt,intended_use:"rendering"}')
           CREATED=$(curl --fail --silent --show-error --max-time 30 -X POST \
             -H "Authorization: Bearer $THREED_API_TOKEN" \

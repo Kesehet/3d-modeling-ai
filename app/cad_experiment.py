@@ -352,7 +352,10 @@ async def generate_cad(
                 last_export = (blueprint, report, attempt_dir)
             previous_evidence = {
                 "blueprint": blueprint.model_dump(exclude_none=True),
-                "assembly_qa": graph,
+                # Exact point pairs serve deterministic repair, not LLM context.
+                # Keep the bounded group/gap summary rather than O(parts^2) pairs.
+                "assembly_qa": {key: value for key, value in graph.items()
+                                if key != "attachment_candidates"},
                 "visual_qa": review,
             }
             faults = list(graph["failures"])

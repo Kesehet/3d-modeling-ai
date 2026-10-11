@@ -139,3 +139,20 @@ loft and profile parts but a vertical cabin panel and disconnected geometry,
 so assembly or reference QA correctly rejected it. Both numerical and visual
 failure evidence now enter the next bounded attempt; no subject-specific hardcoding
 is accepted. A good export is **not** a finished or recognizable object.
+
+### Exact-surface island repair
+
+Disconnected groups now carry measured OpenCascade nearest-point pairs. Repair
+uses those actual surface points, including their transformed target positions
+when attaching a chain of groups, rather than the empty volume inside combined
+bounding boxes. Each original connected group moves rigidly, the largest-solid
+group stays fixed, and total displacement remains bounded to 20% of the original
+assembly diagonal. Missing exact evidence never falls back to bounding-box moves.
+The candidate is rebuilt and retained only when the number of disconnected groups
+decreases. Independent visual QA remains mandatory: nearest contact can still be
+the wrong semantic attachment and is not proof of mechanical fit.
+
+Regression coverage includes diagonal spheres with overlapping boxes, a solid
+inside a hollow part, rigid multi-part islands, cumulative chain translations,
+and refusal to move remote parts. These synthetic geometry checks do not establish
+real reference-photo reconstruction quality; the unmocked gate remains required.

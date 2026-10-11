@@ -283,10 +283,15 @@ def build_cad(blueprint: CadBlueprint, output_dir: Path) -> dict:
         part_stl = output_dir / f".part-{len(solids)}.stl"
         export_stl(solid, str(part_stl))
         mesh = trimesh.load_mesh(str(part_stl), force="mesh")
+        # STL vertex welding can collapse pole/seam triangles on valid curved
+        # BReps. Drop only zero-area/repeated-index faces, never fill real holes.
+        mesh.update_faces(mesh.nondegenerate_faces(height=1e-12))
+        mesh.remove_unreferenced_vertices()
         if mesh.is_empty or not mesh.is_watertight:
             raise ValueError(f"Non-watertight tessellation: {part.name}")
         scene.add_geometry(mesh, geom_name=part.name, node_name=part.name)
-        evaluated_bounds[part.name] = mesh.bounds.tolist()
+        bounds = solid.bounding_box()
+        evaluated_bounds[part.name] = [list(bounds.min), list(bounds.max)]
         part_stl.unlink(missing_ok=True)
         part_evidence.append({"name": part.name, "kind": part.kind, "volume_mm3": volume,
                               "mesh_watertight": bool(mesh.is_watertight)})
@@ -296,7 +301,9 @@ def build_cad(blueprint: CadBlueprint, output_dir: Path) -> dict:
     stl = output_dir / "assembly.stl"
     glb = output_dir / "assembly.glb"
     export_step(assembly, str(step))
-    export_stl(assembly, str(stl))
+    # Use the same validated triangulations in both mesh formats; re-tessellating
+    # the compound would reintroduce the collapsed pole triangles removed above.
+    trimesh.util.concatenate(list(scene.geometry.values())).export(str(stl))
     glb.write_bytes(scene.export(file_type="glb"))
 
     imported = import_step(str(step))

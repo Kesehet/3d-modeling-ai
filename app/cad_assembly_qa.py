@@ -107,6 +107,9 @@ def evaluate_assembly_solids(
     names = list(part_bounds)
     if set(names) != set(solids):
         raise ValueError("CAD evaluated solids and bounds have different part identities")
+    if not names:
+        return {**bounding, "measurement": "brep_closest_solid_distance",
+                "attachment_candidates": []}
     low = [min(part_bounds[name][0][i] for name in names) for i in range(3)]
     high = [max(part_bounds[name][1][i] for name in names) for i in range(3)]
     diagonal = math.dist(low, high)
@@ -167,6 +170,37 @@ def evaluate_assembly_solids(
                 f"({nearest['first']} / {nearest['second']})"
             )
 
+    # Keep one exact nearest-surface bridge per pair of disconnected islands.
+    # Bounding-box gaps only order/prune the search; they never choose a move.
+    # Unlike a union AABB this cannot attract parts into empty space or cavities.
+    attachments = []
+    if assembly_mode == "single" and len(groups) > 1:
+        for index, first_group in enumerate(groups):
+            for second_group in groups[index + 1:]:
+                best = None
+                candidates = sorted(
+                    (_gap(part_bounds[a], part_bounds[b]), a, b)
+                    for a in first_group for b in second_group
+                )
+                for lower_bound, first, second in candidates:
+                    if best is not None and lower_bound > best["gap_mm"]:
+                        break
+                    try:
+                        gap, point_a, point_b = solids[first].distance_to_with_closest_points(solids[second])
+                        points = [list(point_a), list(point_b)]
+                        gap = float(gap)
+                        if (not math.isfinite(gap) or gap < 0
+                                or any(len(p) != 3 or not all(math.isfinite(v) for v in p) for p in points)
+                                or not math.isclose(math.dist(*points), gap, rel_tol=1e-5, abs_tol=1e-5)):
+                            raise ValueError("Invalid nearest-surface evidence")
+                    except (AttributeError, TypeError, RuntimeError, ValueError) as exc:
+                        raise ValueError(f"BRep attachment measurement failed: {first} / {second}") from exc
+                    if best is None or gap < best["gap_mm"]:
+                        best = {"first": first, "second": second, "gap_mm": gap,
+                                "first_point_mm": points[0], "second_point_mm": points[1]}
+                if best is not None:
+                    attachments.append(best)
+
     return {
         **bounding,
         "pass": not failures,
@@ -178,4 +212,5 @@ def evaluate_assembly_solids(
         "groups": groups,
         "failures": failures,
         "nearest_noncontact_pairs": sorted(measurements, key=lambda pair: pair["gap_mm"])[:12],
+        "attachment_candidates": attachments,
     }

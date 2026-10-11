@@ -32,55 +32,49 @@ def suggest_group_attachment(blueprint, report: dict, *, max_fraction: float = 0
     high = [max(bounds[name][1][axis] for name in bounds) for axis in range(3)]
     diagonal = math.dist(low, high)
     limit_mm = diagonal * max_fraction
-    overlap_mm = max(0.5, min(3.0, diagonal * 0.0003))
+    candidates = qa.get("attachment_candidates") or []
+    if qa.get("measurement") != "brep_closest_solid_distance" or not candidates:
+        return {"changed": False, "moves": [], "reason": "missing exact attachment evidence"}
 
-    def group_box(group: list[str]) -> list[list[float]]:
-        return [
-            [min(bounds[name][0][axis] for name in group) for axis in range(3)],
-            [max(bounds[name][1][axis] for name in group) for axis in range(3)],
-        ]
-
-    anchor_box = group_box(anchor_group)
     shifts: dict[str, tuple[float, float, float]] = {}
     moves: list[dict] = []
+    connected = set(anchor_group)
     pending = [group for group in groups if group is not anchor_group]
 
     while pending:
-        # Attach nearest island first; then expand the connected anchor bounds.
-        def gap_score(group):
-            box = group_box(group)
-            return math.sqrt(sum(
-                max(0.0, box[0][axis] - anchor_box[1][axis],
-                    anchor_box[0][axis] - box[1][axis]) ** 2
-                for axis in range(3)
-            ))
-        group = min(pending, key=gap_score)
-        pending.remove(group)
-        group_bounds = group_box(group)
-        motion = []
-        for axis in range(3):
-            if group_bounds[0][axis] > anchor_box[1][axis]:
-                motion.append(anchor_box[1][axis] - group_bounds[0][axis] - overlap_mm)
-            elif group_bounds[1][axis] < anchor_box[0][axis]:
-                motion.append(anchor_box[0][axis] - group_bounds[1][axis] + overlap_mm)
-            else:
-                motion.append(0.0)
-        magnitude = math.sqrt(sum(delta**2 for delta in motion))
-        if not 0 < magnitude <= limit_mm:
-            moves.append({
-                "parts": group, "status": "not_moved",
-                "reason": "overlapping AABBs or correction exceeds bounded limit",
-                "distance_mm": round(magnitude, 3),
-            })
-            continue
-        delta = tuple(motion)
+        proposals = []
+        for index, group in enumerate(pending):
+            for pair in candidates:
+                first, second = pair["first"], pair["second"]
+                if first in connected and second in group:
+                    target, moving = first, second
+                    target_point, moving_point = pair["first_point_mm"], pair["second_point_mm"]
+                elif second in connected and first in group:
+                    target, moving = second, first
+                    target_point, moving_point = pair["second_point_mm"], pair["first_point_mm"]
+                else:
+                    continue
+                target_shift = shifts.get(target, (0.0, 0.0, 0.0))
+                # Points were measured before any moves. Account for the target
+                # island's translation, and bound the TOTAL move from the original.
+                delta = tuple(target_point[axis] + target_shift[axis] - moving_point[axis]
+                              for axis in range(3))
+                magnitude = math.sqrt(sum(value**2 for value in delta))
+                if 0 < magnitude <= limit_mm:
+                    proposals.append((magnitude, index, target, moving, delta))
+        if not proposals:
+            moves.extend({"parts": group, "status": "not_moved",
+                          "reason": "no measured attachment within bounded total displacement"}
+                         for group in pending)
+            break
+        magnitude, index, target, moving, delta = min(proposals)
+        group = pending.pop(index)
         for name in group:
             shifts[name] = delta
+        connected.update(group)
         moves.append({"parts": group, "status": "proposed", "offset_mm": list(delta),
-                      "distance_mm": round(magnitude, 3)})
-        for axis in range(3):
-            anchor_box[0][axis] = min(anchor_box[0][axis], group_bounds[0][axis] + delta[axis])
-            anchor_box[1][axis] = max(anchor_box[1][axis], group_bounds[1][axis] + delta[axis])
+                      "distance_mm": round(magnitude, 3), "target_part": target,
+                      "source_part": moving, "measurement": "brep_closest_points"})
 
     if not shifts:
         return {"changed": False, "moves": moves, "reason": "no safe corrections"}

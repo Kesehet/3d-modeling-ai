@@ -560,3 +560,52 @@ def test_llm_blueprint_schema_requires_correct_shape_fields_not_null_everywhere(
         by_kind["profile_extrusion"]["required"]
     )
     assert "loft_sections_mm" in by_kind["section_loft"]["required"]
+
+
+@pytest.mark.parametrize('anchor,island', [
+    ({'name': 'anchor', 'kind': 'sphere', 'radius_mm': 10},
+     {'name': 'island', 'kind': 'sphere', 'radius_mm': 10, 'position_mm': [18, 18, 0]}),
+    ({'name': 'anchor', 'kind': 'tube', 'radius_mm': 20, 'inner_radius_mm': 14, 'height_mm': 20},
+     {'name': 'island', 'kind': 'sphere', 'radius_mm': 6}),
+])
+def test_exact_surface_attachment_repairs_overlapping_bounds(tmp_path, anchor, island):
+    from app.cad_assembly_repair import suggest_group_attachment
+
+    blueprint = CadBlueprint.model_validate({'title': 'Surface attachment', 'parts': [anchor, island]})
+    before = build_cad(blueprint, tmp_path / 'before')
+    assert not before['assembly_qa']['pass']
+    assert before['assembly_qa']['nearest_noncontact_pairs'][0]['gap_mm'] > 1
+    proposal = suggest_group_attachment(blueprint, before)
+    assert proposal['changed']
+    assert proposal['blueprint'].parts[0] == blueprint.parts[0]
+    assert proposal['blueprint'].parts[1].rotation_deg == blueprint.parts[1].rotation_deg
+    assert proposal['moves'][0]['measurement'] == 'brep_closest_points'
+    after = build_cad(proposal['blueprint'], tmp_path / 'after')
+    assert after['assembly_qa']['pass']
+    assert not after['assembly_qa']['physical_fit_verified']
+
+
+def test_exact_attachment_preserves_rigid_group_and_accounts_for_moved_target(tmp_path):
+    from app.cad_assembly_repair import suggest_group_attachment
+
+    blueprint = CadBlueprint.model_validate({'title': 'Island chain', 'parts': [
+        {'name': 'anchor', 'kind': 'box', 'dimensions_mm': [100, 30, 30]},
+        {'name': 'middle_a', 'kind': 'box', 'dimensions_mm': [10, 10, 10], 'position_mm': [60, 0, 0]},
+        {'name': 'middle_b', 'kind': 'box', 'dimensions_mm': [10, 10, 10], 'position_mm': [70, 0, 0]},
+        {'name': 'end', 'kind': 'box', 'dimensions_mm': [10, 10, 10], 'position_mm': [86, 0, 0]},
+    ]})
+    before = build_cad(blueprint, tmp_path / 'before')
+    assert len(before['assembly_qa']['groups']) == 3
+    proposal = suggest_group_attachment(blueprint, before)
+    fixed = {p.name: p for p in proposal['blueprint'].parts}
+    assert fixed['anchor'] == blueprint.parts[0]
+    assert fixed['middle_b'].position_mm[0] - fixed['middle_a'].position_mm[0] == 10
+    assert fixed['end'].position_mm[0] == pytest.approx(75)
+    after = build_cad(proposal['blueprint'], tmp_path / 'after')
+    assert after['assembly_qa']['pass']
+
+
+def test_empty_solid_evidence_is_failed_not_exception():
+    verdict = evaluate_assembly_solids({}, {})
+    assert not verdict['pass']
+    assert verdict['attachment_candidates'] == []

@@ -12,7 +12,6 @@ import pytest
 from app.cad_engine import CadBlueprint
 from app.cad_spatial import evaluate_spatial_contract
 
-
 # General radial mechanism with an upright centered shaft and independently
 # positioned arms. This is a benchmark fixture, never a generation recipe.
 ASSEMBLY = {

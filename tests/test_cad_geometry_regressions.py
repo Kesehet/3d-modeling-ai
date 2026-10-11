@@ -10,10 +10,10 @@ import json
 import math
 
 import pytest
+from test_cad_spatial_regressions import ASSEMBLY, CONTRACT
 
 from app.cad_engine import CadBlueprint, build_cad
 from app.cad_spatial import evaluate_spatial_contract
-from test_cad_spatial_regressions import ASSEMBLY, CONTRACT
 
 build123d = pytest.importorskip("build123d")
 trimesh = pytest.importorskip("trimesh")
@@ -45,7 +45,8 @@ def test_full_mechanism_preserves_real_world_poses_and_part_volume(tmp_path):
     assert scene.bounds[1, 2] > 210  # elevated support survives STEP -> GLB
     assert scene.extents[0] > 400 and scene.extents[1] > 400  # radially substantial
     assert result["part_count"] == len(ASSEMBLY["parts"])
-    assert manifest["blueprint"]["parts"] == CadBlueprint.model_validate(ASSEMBLY).model_dump(mode="json")["parts"]
+    original_parts = CadBlueprint.model_validate(ASSEMBLY).model_dump(mode="json")["parts"]
+    assert manifest["blueprint"]["parts"] == original_parts
 
 
 def test_hollow_bore_survives_true_cad_step_and_glb_round_trip(tmp_path):
@@ -55,7 +56,7 @@ def test_hollow_bore_survives_true_cad_step_and_glb_round_trip(tmp_path):
     result, scene, step, _ = _geometry(plan, tmp_path)
     expected_volume = math.pi * (r_outer ** 2 - r_inner ** 2) * height
     assert step.volume == pytest.approx(expected_volume, rel=0.01)
-    mesh = list(scene.dump())[0]
+    mesh = next(iter(scene.dump()))
     assert mesh.is_watertight
     assert abs(mesh.volume - expected_volume) / expected_volume < 0.035
     assert result["parts"][0]["volume_mm3"] == pytest.approx(expected_volume, rel=0.01)

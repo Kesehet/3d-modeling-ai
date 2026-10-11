@@ -137,6 +137,10 @@ def test_real_cpu_geometry_flows_through_standard_job_exports(tmp_path, monkeypa
         ],
     })
     report = build_cad(blueprint, worker_dir)
+    (worker_dir / "repair-history.json").write_text(
+        json.dumps({"attempts": [{"attempt": 1, "status": "geometry_reviewed",
+                                  "blueprint": blueprint.model_dump()}]})
+    )
 
     class LocalWorkerTransport:
         def __init__(self, **kwargs):
@@ -158,7 +162,8 @@ def test_real_cpu_geometry_flows_through_standard_job_exports(tmp_path, monkeypa
         async def get(self, url, **kwargs):
             suffix = url.rsplit("/", 1)[-1]
             filename = {"step": "assembly.step", "stl": "assembly.stl",
-                        "glb": "assembly.glb", "json": "manifest.json"}[suffix]
+                        "glb": "assembly.glb", "json": "manifest.json",
+                            "history": "repair-history.json"}[suffix]
             return httpx.Response(200, request=httpx.Request("GET", url),
                                   content=(worker_dir / filename).read_bytes())
 

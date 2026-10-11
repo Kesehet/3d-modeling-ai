@@ -9,6 +9,7 @@ from app.feature_tasks import (
     mark_component_ready,
     normalize_feature_plan_payload,
     record_feature_progress,
+    requeue_failed_structural_feature_as_component,
     retry_feature,
     save_feature_plan,
 )
@@ -554,3 +555,75 @@ def test_retry_feature_reopens_failed_dependency_chain(tmp_path):
     assert wheels.status == "pending"
     assert windows.status == "pending"
     assert retried.active_feature_id is None
+
+
+
+def test_exhausted_structural_part_gets_one_isolated_fallback(tmp_path):
+    plan = _car_plan()
+    body, wheels, windows = plan.features
+    body.status = "accepted"
+    body.acceptance_verified = True
+    body.accepted_version = 1
+    wheels.status = "failed"
+    wheels.attempts = 3
+    wheels.last_error = "The wheel geometry is missing."
+    windows.status = "blocked"
+    save_feature_plan(tmp_path, plan)
+
+    recovered = requeue_failed_structural_feature_as_component(tmp_path)
+    assert recovered is not None
+    assert recovered.id == "wheels"
+    assert recovered.build_mode == "component_job"
+    assert recovered.component_fallback_attempted is True
+    assert recovered.attempts == 0
+    assert recovered.status == "retry"
+
+    state = load_feature_plan(tmp_path)
+    assert state is not None
+    assert state.features[0].status == "accepted"
+    assert state.features[0].accepted_version == 1
+    assert state.features[2].status == "ready"
+    assert active_or_next_feature(state).id == "wheels"
+
+    # A failed isolated retry must not trigger a second new child forever.
+    state.features[1].status = "failed"
+    state.features[1].attempts = 3
+    save_feature_plan(tmp_path, state)
+    assert requeue_failed_structural_feature_as_component(tmp_path) is None
+
+
+def test_fallback_does_not_convert_primary_shell_or_subtractive_features(tmp_path):
+    plan = _car_plan()
+    plan.features[0].status = "failed"
+    plan.features[0].attempts = 3
+    plan.features[1].status = "blocked"
+    plan.features[2].status = "blocked"
+    save_feature_plan(tmp_path, plan)
+    assert requeue_failed_structural_feature_as_component(tmp_path) is None
+
+    plan.features[0].status = "accepted"
+    plan.features[0].acceptance_verified = True
+    plan.features[0].accepted_version = 1
+    plan.features[1].status = "accepted"
+    plan.features[1].acceptance_verified = True
+    plan.features[1].accepted_version = 2
+    plan.features[2].status = "failed"
+    plan.features[2].attempts = 3
+    save_feature_plan(tmp_path, plan)
+    assert requeue_failed_structural_feature_as_component(tmp_path) is None
+
+
+def test_fallback_respects_unresolved_deps_and_attempt_budget(tmp_path):
+    plan = _car_plan()
+    plan.features[0].status = "accepted"
+    plan.features[0].acceptance_verified = True
+    plan.features[0].accepted_version = 1
+    plan.features[1].status = "failed"
+    plan.features[1].attempts = 2
+    save_feature_plan(tmp_path, plan)
+    assert requeue_failed_structural_feature_as_component(tmp_path) is None
+
+    plan.features[1].attempts = 3
+    plan.features[1].depends_on = ["windows"]
+    save_feature_plan(tmp_path, plan)
+    assert requeue_failed_structural_feature_as_component(tmp_path) is None

@@ -465,20 +465,22 @@ header{display:flex;align-items:center;justify-content:space-between;gap:16px;ma
     <div class="field"><label for="jobEngine">Modeling engine</label><select id="jobEngine"><option value="cpu_cad">CPU CAD · fast parametric STEP/STL/GLB</option><option value="blender">Blender AI · iterative visual modeling</option></select></div>
     <div class="field"><label for="jobUse">Use</label><select id="jobUse"><option value="rendering">Rendering</option><option value="3d_printing">3D printing</option><option value="game_asset">Game asset</option></select></div>
     <div class="field"><label for="jobWidth">Width in mm (optional)</label><input id="jobWidth" type="number" min="0.01" max="10000" step="0.1"></div>
+    <div class="field"><label for="jobReferences">Reference images (up to 3)</label><input id="jobReferences" type="file" accept="image/png,image/jpeg,image/webp" multiple><small>Upload product photos or front/side/top references to guide generation and comparison.</small></div>
+    <div class="field"><label for="jobReferenceMode">Reference behavior</label><select id="jobReferenceMode"><option value="shape_guidance">Shape guidance</option><option value="exact_match">Exact geometry match</option><option value="inspiration">Inspiration only</option></select></div>
     <div class="actions"><button class="btn" id="cancelNew">Cancel</button><button class="btn primary" id="createModel">Create model</button></div>
     <div class="notice" id="newNotice"></div>
   </div>
 </div>
 
 <script>
-const CLIENT_UI_VERSION="live-model-viewer-cpu-cad-v3";
+const CLIENT_UI_VERSION="reference-aware-cad-v4";
 const byId=id=>document.getElementById(id);
 const esc=value=>String(value??"").replace(/[&<>"']/g,ch=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[ch]));
 const els={
   home:byId("homeView"),detail:byId("detailView"),gallery:byId("jobGallery"),
   title:byId("detailTitle"),meta:byId("detailMeta"),quality:byId("qualityBanner"),viewer:byId("liveModelViewer"),viewerEmpty:byId("viewerEmpty"),viewerLabel:byId("viewerLabel"),modelDownload:byId("modelDownload"),featurePanel:byId("featurePanel"),featureProgress:byId("featureProgress"),featureGrid:byId("featureGrid"),renders:byId("renderGrid"),references:byId("referenceGrid"),files:byId("fileList"),json:byId("detailJson"),
   newBtn:byId("newJobBtn"),dialog:byId("newJobDialog"),cancel:byId("cancelNew"),create:byId("createModel"),
-  prompt:byId("jobPrompt"),engine:byId("jobEngine"),use:byId("jobUse"),width:byId("jobWidth"),notice:byId("newNotice"),
+  prompt:byId("jobPrompt"),engine:byId("jobEngine"),use:byId("jobUse"),width:byId("jobWidth"),refs:byId("jobReferences"),refMode:byId("jobReferenceMode"),notice:byId("newNotice"),
   back:byId("backBtn"),improve:byId("improveBtn"),deleteBtn:byId("deleteBtn")
 };
 let data=null;
@@ -553,7 +555,7 @@ function renderDetail(job){
   const improvingMesh=job.stage==="adaptive_mesh_needs_refinement";
   const retryingQuality=job.stage==="generic_quality_unverified";
   if(isCad){
-    els.quality.innerHTML=job.stage==="cad_failed"?("<strong>CPU CAD generation failed.</strong>"+esc(job.error||"See job history for the underlying error.")):(job.state==="running"?"<strong>CPU CAD is building.</strong>Ollama is planning parts and the CPU worker will export STEP, STL and GLB.":"<strong>CAD model ready for visual review.</strong>STEP/mesh integrity passed; appearance, part connections and mechanical correctness need review.");
+    els.quality.innerHTML=job.stage==="cad_failed"?("<strong>CPU CAD generation failed.</strong>"+esc(job.error||"See job history for the underlying error.")):(job.state==="running"?"<strong>CPU CAD is building.</strong>Ollama is planning parts and the CPU worker will export STEP, STL and GLB.":job.stage==="cad_needs_assembly_repair"?"<strong>CAD assembly QA failed.</strong>"+esc(job.quality_gate?.summary||"Some generated parts are disconnected. Inspect the QA manifest."):job.stage==="cad_needs_reference_repair"?"<strong>CAD reference comparison failed.</strong>"+esc(job.quality_gate?.summary||"The model does not match the reference images."):"<strong>CAD model exported for review.</strong>"+esc(job.quality_gate?.summary||"STEP/mesh integrity passed; visual and physical correctness remain to be checked."));
     els.quality.classList.add("show");
   }else if(job.stage==="waiting_for_references"||job.stage==="researching_references"){
     const gate=job.reference_gate||{};
@@ -648,11 +650,20 @@ async function createModel(){
     let response=await fetch("/dashboard/jobs",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
     if(!response.ok)throw new Error(await response.text());
     created=await response.json();
+    const referenceFiles=Array.from(els.refs.files||[]);
+    if(referenceFiles.length>3)throw new Error("Select no more than 3 reference images.");
+    if(referenceFiles.length){
+      els.notice.textContent="Uploading and checking reference images...";
+      const form=new FormData();
+      referenceFiles.forEach(file=>form.append("files",file));
+      const uploaded=await fetch("/dashboard/jobs/"+encodeURIComponent(created.job_id)+"/references",{method:"POST",body:form});
+      if(!uploaded.ok)throw new Error("Reference upload failed: "+await uploaded.text());
+    }
     els.dialog.classList.remove("show");
     await refresh();
     openJob(created.job_id);
     const cad=els.engine.value==="cpu_cad";
-    response=await fetch("/dashboard/jobs/"+encodeURIComponent(created.job_id)+(cad?"/cad":"/generate"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(cad?{}:{auto_research:true,auto_improve_rounds:30})});
+    response=await fetch("/dashboard/jobs/"+encodeURIComponent(created.job_id)+(cad?"/cad":"/generate"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(cad?{reference_mode:els.refMode.value}:{auto_research:true,auto_improve_rounds:30})});
     if(!response.ok){
       await refresh();
       return;

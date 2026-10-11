@@ -202,17 +202,17 @@ async def generate_cad(
                 shutil.rmtree(attempt_dir, ignore_errors=True)
                 continue
             last_export = (blueprint, report, attempt_dir)
-            if not report["assembly_qa"]["pass"]:
-                error = "; ".join(report["assembly_qa"]["failures"])
-                continue
+            # Run visual critique even if physical attachment QA failed. Otherwise
+            # the next planner only repairs gap measurements, not shape.
             review = await _review_reference_match(
                 client, prompt, reference_images, attempt_dir, reference_mode
             )
             report["reference_visual_qa"] = review
+            faults = list(report["assembly_qa"]["failures"])
             if review["status"] == "failed":
-                error = "Reference visual review: " + "; ".join(review.get("findings") or [
-                    "Shape/subject does not sufficiently match reference"
-                ])
+                faults.extend(review.get("findings") or ["Reference subject mismatch"])
+            if faults:
+                error = "; ".join(faults)
                 continue
             break
 

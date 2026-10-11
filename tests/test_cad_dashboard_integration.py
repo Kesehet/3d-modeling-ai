@@ -48,7 +48,7 @@ def test_cpu_cad_job_status_and_viewer_exports(tmp_path, monkeypatch):
 
         async def get(self, url, **kwargs):
             suffix = url.rsplit("/", 1)[-1]
-            assert suffix in ("step", "stl", "glb", "json")
+            assert suffix in ("step", "stl", "glb", "json", "history")
             return httpx.Response(200, content=b"x" * 220, request=httpx.Request("GET", url))
 
         async def delete(self, url, **kwargs):
@@ -74,7 +74,7 @@ def test_cpu_cad_job_status_and_viewer_exports(tmp_path, monkeypatch):
     assert status["generic_model"]["version"] == 1
     assert status["cad"]["part_count"] == 3
     assert status["quality_gate"]["recognizable"] is None
-    for suffix in (".step", ".stl", ".glb", "-cad.json", "-qa.json"):
+    for suffix in (".step", ".stl", ".glb", "-cad.json", "-cad-history.json", "-qa.json"):
         assert (root / "exports" / f"model-v1{suffix}").is_file()
 
 

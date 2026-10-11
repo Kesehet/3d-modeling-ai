@@ -25,7 +25,9 @@ router = APIRouter(prefix="/v1/cad-experiments", tags=["cad-experiments"],
 CAD_SEMAPHORE = asyncio.Semaphore(1)
 EXPORTS = {"step": "assembly.step", "stl": "assembly.stl",
            "glb": "assembly.glb", "json": "manifest.json",
-           "front-left": "assembly-front-left.png", "top": "assembly-top.png"}
+           "front-left": "assembly-front-left.png", "back-right": "assembly-back-right.png",
+           "left": "assembly-left.png", "right": "assembly-right.png",
+           "top": "assembly-top.png"}
 
 
 class CadRequest(BaseModel):
@@ -91,12 +93,18 @@ async def _review_reference_match(
         return {"status": "not_run_no_reference", "passed": None}
     previews = [
         base64.b64encode((render_dir / filename).read_bytes()).decode("ascii")
-        for filename in ("assembly-front-left.png", "assembly-top.png")
+        for filename in (
+            "assembly-front-left.png", "assembly-back-right.png",
+            "assembly-left.png", "assembly-right.png", "assembly-top.png"
+        )
     ]
     instructions = (
         f"User request: {prompt}\nComparison policy: {mode}.\n"
         f"The FIRST {len(references)} images are original reference photographs. "
-        "The FINAL TWO are actual CAD isometric and top renders, respectively. "
+        "The FINAL FIVE are actual CAD front-left, back-right, left-side, "
+        "right-side and top renders, respectively. Some components are hidden "
+        "behind other solids in particular views; assess their presence across "
+        "all views, not a single projection. "
         "Do not confuse them. Judge geometry, part count, silhouette, attachments "
         "and proportions. Do not use the label or prompt as evidence that a "
         "visually unrecognizable model is correct. For inspiration mode ignore "

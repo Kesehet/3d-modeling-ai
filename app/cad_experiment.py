@@ -172,7 +172,7 @@ async def generate_cad(
                      "fillet", "profile", "bevel", "swept", "wedge")
     )
     last_export: tuple[CadBlueprint, dict, Path] | None = None
-    best_grade: tuple[float, float, float] = (-1.0, -999.0, -1.0)
+    best_grade: tuple[float, float, float, float, float] = (-1.0, -1.0, -1.0, -1.0, -1.0)
     previous_evidence: dict | None = None
     repair_history: list[dict] = []
     try:
@@ -286,9 +286,11 @@ async def generate_cad(
             report["reference_visual_qa"] = review
             graph = report["assembly_qa"]
             grade = (
-                float(graph["pass"]),
-                -float(len(graph["groups"])),
+                float(review.get("status") == "passed"),
                 float(review.get("reference_match_score") or 0.0),
+                float(graph["pass"]),
+                float(coverage.get("matched") or 0) / max(1.0, float(coverage.get("checked") or 0)),
+                min(1.0, len(blueprint.parts) / 12.0),
             )
             if last_export is None or grade > best_grade:
                 best_grade = grade

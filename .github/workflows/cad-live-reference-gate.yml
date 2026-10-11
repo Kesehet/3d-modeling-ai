@@ -46,9 +46,9 @@ jobs:
           from PIL import Image
           from app import cad_experiment
 
-          # CC0 Wikimedia Commons photo, independent of this project's own renders.
-          # https://commons.wikimedia.org/wiki/File:1998_Toyota_Camry_CSi_(SXV20R)_4-door_sedan,_Virginia_Gardens_2024-01-11.jpg
-          filename = "1998 Toyota Camry CSi (SXV20R) 4-door sedan, Virginia Gardens 2024-01-11.jpg"
+          # Public-domain side view by OSX: fuller silhouette evidence than a rear shot.
+          # https://commons.wikimedia.org/wiki/File:1998_Toyota_Camry_(SXV20R)_CSX_sedan.jpg
+          filename = "1998 Toyota Camry (SXV20R) CSX sedan.jpg"
           url = "https://commons.wikimedia.org/wiki/Special:Redirect/file/" + urllib.parse.quote(filename) + "?width=640"
           req = urllib.request.Request(url, headers={"User-Agent": "3DModelingAI-Reference-QA/1.0 (CAD test)"})
           with urllib.request.urlopen(req, timeout=30) as response:

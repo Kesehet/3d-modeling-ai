@@ -434,3 +434,42 @@ def test_reference_component_coverage_rejects_simplified_missing_subject_feature
         ],
     })
     assert evaluate_required_component_coverage(comprehensive, requested)["pass"]
+
+
+def test_generic_assembly_group_correction_reverifies_actual_brep(tmp_path):
+    from app.cad_assembly_repair import suggest_group_attachment
+
+    blueprint = CadBlueprint.model_validate({
+        "title": "Abstract two-island assembly",
+        "parts": [
+            {"name": "base_A", "kind": "box", "dimensions_mm": [1000, 500, 80]},
+            {"name": "protruding_B", "kind": "box", "dimensions_mm": [30, 40, 40],
+             "position_mm": [530, 0, 0]},
+        ],
+    })
+    previous = build_cad(blueprint, tmp_path / "before")
+    assert not previous["assembly_qa"]["pass"]
+    correction = suggest_group_attachment(blueprint, previous)
+    assert correction["changed"]
+    assert correction["moves"][0]["distance_mm"] < 40
+    assert correction["blueprint"].parts[0].position_mm == (0, 0, 0)
+    actual = build_cad(correction["blueprint"], tmp_path / "after")
+    assert actual["assembly_qa"]["pass"]
+    assert actual["assembly_qa"]["measurement"] == "brep_closest_solid_distance"
+
+
+def test_generic_assembly_correction_does_not_drag_remote_parts(tmp_path):
+    from app.cad_assembly_repair import suggest_group_attachment
+
+    blueprint = CadBlueprint.model_validate({
+        "title": "Remote islands",
+        "parts": [
+            {"name": "anchor", "kind": "box", "dimensions_mm": [50, 30, 20]},
+            {"name": "island", "kind": "box", "dimensions_mm": [50, 30, 20],
+             "position_mm": [2000, 0, 0]},
+        ],
+    })
+    verdict = build_cad(blueprint, tmp_path)
+    proposal = suggest_group_attachment(blueprint, verdict)
+    assert not proposal["changed"]
+    assert "no safe corrections" in proposal["reason"]

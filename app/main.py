@@ -2614,6 +2614,33 @@ def _last_rejected_component_assembly(
                 "assembly": payload["assembly"],
             }
     if latest:
+        # Bind the measured geometry to the exact rejected child and parent.
+        record = _read_json_if_present(root / f"component-assembly-v{latest_version}.json")
+        qa = _read_json_if_present(root / "exports" / f"model-v{latest_version}-qa.json")
+        child_id = str(record.get("child_job_id") or "")
+        child_version = record.get("child_version")
+        baseline = record.get("baseline_version")
+        source_child = (
+            str(_job_dir(child_id) / "scene" / f"model-v{child_version}.blend")
+            if child_id and isinstance(child_version, int) else None
+        )
+        if (
+            isinstance(baseline, int)
+            and qa.get("parent_source_blend") == str(root / "scene" / f"model-v{baseline}.blend")
+            and qa.get("component_source_blend") == source_child
+            and qa.get("parent_geometry_preserved") is True
+            and qa.get("installed_instances") == len(latest["assembly"].get("instances") or [])
+            and isinstance(qa.get("component_geometry_evidence"), dict)
+            and isinstance(qa.get("component_instance_spatial_evidence"), list)
+        ):
+            latest["geometry_evidence"] = {
+                "frozen_child": qa["component_geometry_evidence"],
+                "installed_instances": qa["component_instance_spatial_evidence"][:8],
+                "warning": (
+                    "AABB proximity is NOT mesh contact; projected triangle coverage is NOT a "
+                    "semantic pass. Compare all measured geometry against reference renders."
+                ),
+            }
         latest["measured_sections"] = _verified_repeated_component_profile(
             root, feature_id, accepted_parent_version, latest_version
         )
@@ -2745,6 +2772,14 @@ async def _plan_component_assembly(
         "Explicitly compare the previous rejected component dimensions and instance scales against the visible defect. "
         "When the failure names width, length, thickness, or proportions, change the relevant LOCAL AXIS scale "
         "and explain the calculated new dimensions rather than shrinking every axis or repeating failed placement. "
+        "The rejected installation may include Blender-measured source geometry and installed world bounds. "
+        "Use source_bounds_min/max to account for offsets from the child global origin; location is the "
+        "transformed ORIGIN, not the child bounding-box center. Inspect world_geometry_center_xyz, "
+        "world_dimensions_xyz, and nearest_parent_aabb_contacts before selecting translation or axis scale. "
+        "AABB separation/overlap is approximate, not proof of contact. Projected triangle-area ratios can "
+        "help distinguish full sheets from open structures, but are NOT semantic acceptance criteria. "
+        "If the frozen child itself lacks required structural parts, moving or scaling cannot create them: "
+        "explain the geometric incompatibility; do not claim a transform alone completes the feature. "
         "A visible component must have plausible volume/surface area in the assembled object, not just correct symmetry. "
         "A QA complaint that a component looks like a needle, wire, thin line, spike, sliver, or lacks surface "
         "area is a CROSS-SECTION/SILHOUETTE failure. Correct width (and, if appropriate, thickness) along the "
@@ -2787,7 +2822,7 @@ async def _plan_component_assembly(
         f"ASSEMBLY REPAIR CONTEXT: {json.dumps(repair_context, ensure_ascii=False)[:10000]}\n"
         f"FEATURE RETRY QA (previous rejected installation): {feature_task.last_summary[:2400]}\n"
         f"PERSISTED REJECTION QA (survives manual reset): {rejected_installation.get('rejection_reason', '')}\n"
-        f"PREVIOUS REJECTED INSTALLATION (do not repeat): {json.dumps(rejected_installation, ensure_ascii=False)[:6000]}\n"
+        f"PREVIOUS REJECTED INSTALLATION (do not repeat): {json.dumps(rejected_installation, ensure_ascii=False)[:10000]}\n"
         f"Previous transform for this feature: "
         f"{json.dumps((repair_context.get('previous_assemblies') or {}).get(feature_task.id) or {}, ensure_ascii=False)}\n"
         f"Image labels: {labels}\n"

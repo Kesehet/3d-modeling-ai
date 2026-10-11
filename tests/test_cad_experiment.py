@@ -11,6 +11,7 @@ from app import cad_experiment
 from app.cad_engine import CadBlueprint, build_cad
 from app.cad_service import app
 from app.cad_spatial import evaluate_spatial_contract
+from app.cad_assembly_qa import evaluate_assembly_solids
 
 # Base CI installs only [dev]; the dedicated CAD workflow installs [cad,dev].
 pytest.importorskip("build123d")
@@ -282,3 +283,36 @@ def test_nonprimitive_generic_shapes_export_true_cad(kind, details, tmp_path):
 def test_nonprimitive_shapes_reject_degenerate_profiles(bad):
     with pytest.raises(ValueError):
         CadBlueprint.model_validate({"title": "Bad", "parts": [{"name": "bad", **bad}]})
+
+
+def test_brep_distance_rejects_false_aabb_contact():
+    """Two spheres can have overlapping AABBs while remaining physically apart."""
+    from build123d import Pos, Sphere
+
+    first = Sphere(10)
+    second = Pos(18, 18, 0) * Sphere(10)
+    report = evaluate_assembly_solids(
+        {"first": first, "second": second},
+        {"first": [[-10, -10, -10], [10, 10, 10]],
+         "second": [[8, 8, -10], [28, 28, 10]]},
+    )
+    assert report["measurement"] == "brep_closest_solid_distance"
+    assert not report["pass"]
+    assert len(report["groups"]) == 2
+    assert not report["contact_verified"]
+    assert report["nearest_noncontact_pairs"][0]["gap_mm"] > 5
+
+
+def test_brep_distance_accepts_true_contact_for_unrelated_solids():
+    from build123d import Box, Pos
+
+    a = Box(20, 20, 20)
+    b = Pos(15, 0, 0) * Box(20, 20, 20)
+    report = evaluate_assembly_solids(
+        {"a": a, "b": b},
+        {"a": [[-10, -10, -10], [10, 10, 10]],
+         "b": [[5, -10, -10], [25, 10, 10]]},
+    )
+    assert report["pass"]
+    assert report["solid_proximity_verified"] is True
+    assert report["physical_fit_verified"] is False

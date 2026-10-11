@@ -51,8 +51,9 @@ experiment branch. Ordinary pushes and pull requests never use Ollama secrets.
 
 ## Limitations / promotion criteria
 
-* Supported primitives: box, cylinder, cone, sphere, tube. No splines,
-  lofts, fillets, constraints, gears, threads or freeform meshes yet.
+* Supported primitives: box, cylinder, cone, sphere, tube, plus generic polygon
+  profile extrusions and multi-section rectangular lofts. No splines, fillets,
+  mechanical constraints, gears, threads, booleans from AI, or freeform meshes yet.
 * A successful STEP re-import demonstrates geometrical integrity, **not**
   correct proportions, connected mechanical design, fan recognizability,
   collision-free joins, physical feasibility, or printable assembly.
@@ -127,3 +128,12 @@ verified quality. Existing Blender generation is separate and unchanged.
 Before claiming a broadly reliable general model maker, add real narrow-phase
 contact/penetration checks, photo-to-geometry multi-view registration, and
 fresh independent visual reviews across unrelated unseen objects.
+
+### Live model-quality findings (not an acceptance claim)
+
+An unmocked reference-photo sedan test on the experimental branch identified a
+serious geometry/recognition gap despite validated STEP. The model generated
+loft and profile parts but a vertical cabin panel and disconnected geometry,
+so assembly or reference QA correctly rejected it. Both numerical and visual
+failure evidence now enter the next bounded attempt; no subject-specific hardcoding
+is accepted. A good export is **not** a finished or recognizable object.

@@ -238,4 +238,6 @@ def test_dashboard_reference_route_and_input_are_present():
     assert 'id="jobReferences"' in html
     assert 'id="jobReferenceMode"' in html
     assert 'id="jobAssemblyMode"' in html
+    assert 'id="cadComparisonPanel"' in html
+    assert 'reference_match_score' in html
     assert "/references" in html

@@ -24,7 +24,7 @@ EXPORTS = {"step": "assembly.step", "stl": "assembly.stl",
 
 
 class CadRequest(BaseModel):
-    prompt: str = Field(min_length=10, max_length=4000)
+    prompt: str = Field(min_length=1, max_length=4000)
     model: str | None = Field(default=None, min_length=2, max_length=120)
 
 
@@ -82,6 +82,8 @@ async def generate_cad(prompt: str, model: str, *, client: OllamaProxyClient | N
 @router.post("")
 async def create_experiment(payload: CadRequest) -> dict:
     _enabled()
+    if not payload.prompt.strip():
+        raise HTTPException(422, "CAD prompt cannot be blank")
     if CAD_SEMAPHORE.locked():
         raise HTTPException(429, "CPU CAD worker busy; retry later")
     async with CAD_SEMAPHORE:

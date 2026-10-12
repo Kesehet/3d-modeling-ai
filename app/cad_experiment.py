@@ -229,7 +229,11 @@ async def generate_cad(
                     + json.dumps(previous_evidence, separators=(",", ":"), ensure_ascii=False)[:16000]
                     + "\nPreserve correctly placed parts and already accepted geometry where "
                     "possible. Change only the failed attachments, silhouette and proportions. "
-                    "Explain corrections through changed numeric sizes, profiles and transforms."
+                    "Explain corrections through changed numeric sizes, profiles and transforms. "
+                    "Part visibility counts are measured from the five real CAD view "
+                    "depth buffers. Check components that SHOULD appear in the reference "
+                    "but are hidden or tiny, without forcing intentionally internal "
+                    "components to become externally visible."
                 )
             if reference_images:
                 query += (
@@ -373,6 +377,7 @@ async def generate_cad(
                 "assembly_qa": {key: value for key, value in graph.items()
                                 if key != "attachment_candidates"},
                 "visual_qa": review,
+                "part_visibility_qa": report.get("part_visibility_qa", {}).get("parts", {}),
             }
             faults = list(graph["failures"])
             if review["status"] == "failed":
@@ -384,6 +389,7 @@ async def generate_cad(
                 "assembly_qa": graph,
                 "assembly_autorepair": report.get("assembly_autorepair"),
                 "reference_visual_qa": review,
+                "part_visibility_qa": report.get("part_visibility_qa", {}).get("parts", {}),
                 "issues": faults,
             })
             if faults:

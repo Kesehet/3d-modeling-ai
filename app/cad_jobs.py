@@ -148,6 +148,7 @@ async def run_cad_job(job_id: str, version: int, *, model: str | None = None,
             "assembly_qa": assembly_qa,
             "semantic_component_qa": component_qa,
             "reference_visual_qa": reference_qa,
+            "part_visibility_qa": payload.get("part_visibility_qa") or {},
             "note": payload.get("quality_scope"),
         }
         (export_dir / f"model-v{version}-qa.json").write_text(

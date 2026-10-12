@@ -77,6 +77,7 @@ jobs:
               "attempts": report["attempts"],
               "assembly_qa": report["assembly_qa"],
               "reference_visual_qa": report["reference_visual_qa"],
+              "part_visibility_qa": report.get("part_visibility_qa", {}).get("parts", {}),
               "repair_exhausted": report["repair_exhausted"],
               "location": str(location),
           }, indent=2))

@@ -325,7 +325,8 @@ def build_cad(blueprint: CadBlueprint, output_dir: Path) -> dict:
         evaluated_bounds,
         assembly_mode=blueprint.assembly_mode,
     )
-    render_files = render_cad_views(scene, output_dir)
+    visibility_qa: dict = {}
+    render_files = render_cad_views(scene, output_dir, visibility_out=visibility_qa)
     result = {
         "ok": True,
         "title": blueprint.title,
@@ -336,6 +337,7 @@ def build_cad(blueprint: CadBlueprint, output_dir: Path) -> dict:
         "step_reimport_valid": valid,
         "assembly_qa": assembly_qa,
         "renders": render_files,
+        "part_visibility_qa": visibility_qa,
         "exports": sizes,
         "quality_scope": "STEP integrity and BRep solid-distance screening; actual mating contact, visual similarity and print fit require independent review",
     }

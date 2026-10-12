@@ -6,7 +6,7 @@ import pytest
 trimesh = pytest.importorskip("trimesh")
 pytest.importorskip("numpy")
 
-from app.cad_preview import CAMERAS, render_cad_views  # noqa: E402
+from app.cad_preview import CAMERAS, render_cad_views
 
 
 def _scene(parts):

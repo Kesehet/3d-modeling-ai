@@ -33,7 +33,7 @@ def search_subject(prompt: str) -> str:
             value = re.sub(pattern, "", value, flags=re.IGNORECASE)
         if original == value:
             break
-    value = re.sub(r"(?:\s+(?:as a|in)\s+(?:3d\s+)?model)\s*$", "", value, flags=re.I)
+    value = re.sub(r"(?:\s+(?:as a|in)\s+(?:3d\s+)?model)\s*$", "", value, flags=re.IGNORECASE)
     return value.strip(" .,:;!?-")[:140]
 
 
@@ -81,7 +81,7 @@ def rank_catalog_result(subject: str, record: dict[str, Any]) -> dict | None:
     if isinstance(publish, str):
         try:
             recency = max(0.0, datetime.fromisoformat(
-                publish.replace("Z", "+00:00")
+                publish
             ).year - 2020) * .15
         except ValueError:
             pass
@@ -122,7 +122,7 @@ async def search_licensed_models(
         payload = response.json()
         raw = payload.get("results") if isinstance(payload, dict) else None
         if not isinstance(raw, list):
-            raise ValueError("Unexpected model catalog response")
+            raise TypeError("Unexpected model catalog response")
         candidates: dict[str, dict] = {}
         for entry in raw:
             if isinstance(entry, dict):

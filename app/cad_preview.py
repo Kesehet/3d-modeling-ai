@@ -33,6 +33,9 @@ def _rasterize_mesh(
     color: np.ndarray,
     *,
     epsilon: float,
+    owner_buffer: np.ndarray | None = None,
+    owner_index: int = -1,
+    footprint: np.ndarray | None = None,
 ) -> None:
     """Rasterize every triangle using barycentric interpolation and z-buffer."""
     size_y, size_x = zbuffer.shape
@@ -58,6 +61,8 @@ def _rasterize_mesh(
         inside = (a >= -1e-5) & (b >= -1e-5) & (c >= -1e-5)
         if not inside.any():
             continue
+        if footprint is not None:
+            footprint[top:bottom + 1, left:right + 1] |= inside
         depth = a * z0 + b * z1 + c * z2
         buffer = zbuffer[top:bottom + 1, left:right + 1]
         # A small world-space bias makes near-coplanar mating surfaces stable
@@ -66,6 +71,8 @@ def _rasterize_mesh(
         if not write.any():
             continue
         buffer[write] = depth[write]
+        if owner_buffer is not None:
+            owner_buffer[top:bottom + 1, left:right + 1][write] = owner_index
         screen_normal = np.cross(p1 - p0, p2 - p0)
         length = float(np.linalg.norm(screen_normal))
         shade = 0.68 + 0.28 * abs(screen_normal[2]) / length if length > 1e-9 else 0.68
@@ -74,8 +81,15 @@ def _rasterize_mesh(
         ).astype(np.uint8)
 
 
-def render_cad_views(scene, output_dir: Path) -> dict[str, str]:
-    """Orthographic CPU PNGs of every evaluated triangle and every requested view."""
+def render_cad_views(
+    scene, output_dir: Path, *, visibility_out: dict | None = None,
+) -> dict[str, str]:
+    """Render evaluated geometry; optionally measure screen-space visibility.
+
+    The same software z-buffer used for preview pixels supplies per-part
+    visibility evidence. This is NOT semantic validation: some internal
+    parts are intentionally hidden and should not be moved automatically.
+    """
     output_dir.mkdir(parents=True, exist_ok=True)
     meshes = [(name, mesh) for name, mesh in scene.geometry.items() if len(mesh.faces)]
     if not meshes:
@@ -86,6 +100,7 @@ def render_cad_views(scene, output_dir: Path) -> dict[str, str]:
     epsilon = min(0.25, max(0.001, diagonal * 0.00002))
     size = 700
     results: dict[str, str] = {}
+    view_visibility: dict[str, dict] = {}
 
     for name, vector in CAMERAS.items():
         eye = np.asarray(vector, dtype=float)
@@ -102,18 +117,62 @@ def render_cad_views(scene, output_dir: Path) -> dict[str, str]:
 
         pixels = np.full((size, size, 3), BACKGROUND, dtype=np.uint8)
         zbuffer = np.full((size, size), -np.inf, dtype=np.float32)
+        owner_buffer = (
+            np.full((size, size), -1, dtype=np.int16)
+            if visibility_out is not None else None
+        )
+        footprint_areas: list[int] = []
         for index, (_, mesh) in enumerate(meshes):
             projected = (mesh.vertices - mid) @ basis
             vertices = np.empty_like(projected)
             vertices[:, 0] = size / 2 + projected[:, 0] * scale
             vertices[:, 1] = size / 2 - projected[:, 1] * scale
             vertices[:, 2] = projected[:, 2]
+            footprint = (
+                np.zeros((size, size), dtype=bool)
+                if visibility_out is not None else None
+            )
             _rasterize_mesh(
                 pixels, zbuffer, vertices, mesh.faces,
                 np.asarray(PALETTE[index % len(PALETTE)], dtype=float),
                 epsilon=epsilon,
+                owner_buffer=owner_buffer,
+                owner_index=index,
+                footprint=footprint,
             )
+            if footprint is not None:
+                footprint_areas.append(int(np.count_nonzero(footprint)))
+        if owner_buffer is not None:
+            view_visibility[name] = {
+                part_name: {
+                    "projected_pixels": footprint_areas[index],
+                    "visible_pixels": int(np.count_nonzero(owner_buffer == index)),
+                }
+                for index, (part_name, _) in enumerate(meshes)
+            }
         destination = output_dir / f"assembly-{name}.png"
         Image.fromarray(pixels).save(destination, optimize=True)
         results[name] = destination.name
+    if visibility_out is not None:
+        summary = {}
+        for part_name, _ in meshes:
+            views = [item[part_name] for item in view_visibility.values()]
+            summary[part_name] = {
+                "max_projected_pixels": max(v["projected_pixels"] for v in views),
+                "max_visible_pixels": max(v["visible_pixels"] for v in views),
+                "max_visible_fraction": round(max(
+                    v["visible_pixels"] / v["projected_pixels"]
+                    if v["projected_pixels"] else 0.0 for v in views
+                ), 4),
+                "views_visible": sum(v["visible_pixels"] > 0 for v in views),
+            }
+        visibility_out.update({
+            "measurement": "five_view_software_zbuffer",
+            "limitations": (
+                "Screen-space visibility is not semantic presence, intended "
+                "exposure, correct shape, or a verified mechanical contact."
+            ),
+            "parts": summary,
+            "views": view_visibility,
+        })
     return results

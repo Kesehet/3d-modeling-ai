@@ -133,8 +133,8 @@ async def start_cad_generation(job_id: str, request: CadGenerateRequest) -> dict
     if status.get("state") == "running":
         raise HTTPException(status_code=409, detail="Job already running another model-generation action")
     source_request = json.loads((root / "request.json").read_text(encoding="utf-8"))
-    if not 10 <= len(str(source_request.get("prompt") or "")) <= 4000:
-        raise HTTPException(status_code=422, detail="CPU CAD requires a 10-4000 character text prompt")
+    if not 1 <= len(str(source_request.get("prompt") or "").strip()) <= 4000:
+        raise HTTPException(status_code=422, detail="CPU CAD requires a 1-4000 character text prompt")
     version = reserve_model_version(root)
     api._write_status(root, state="running", stage="cad_queued",
                       modeling_strategy="cpu_cad", error=None)
@@ -154,3 +154,29 @@ async def dashboard_generate_cad(job_id: str, request: CadGenerateRequest) -> di
 @router.post("/v1/jobs/{job_id}/cad", dependencies=[Depends(require_api_token)])
 async def api_generate_cad(job_id: str, request: CadGenerateRequest) -> dict:
     return await start_cad_generation(job_id, request)
+
+
+async def find_reusable_model_candidates(job_id: str) -> dict:
+    """Discover catalog candidates without importing, accepting or scraping one."""
+    from . import main as api
+    from .model_catalog import search_licensed_models
+
+    root = api._require_job(job_id)
+    request = json.loads((root / "request.json").read_text(encoding="utf-8"))
+    try:
+        result = await search_licensed_models(str(request["prompt"]))
+    except (httpx.HTTPError, ValueError, KeyError, TypeError) as exc:
+        raise HTTPException(
+            status_code=502, detail=f"Licensed-model catalog unavailable: {str(exc)[:150]}"
+        ) from exc
+    return {"job_id": job_id, **result}
+
+
+@router.get("/dashboard/jobs/{job_id}/asset-candidates", include_in_schema=False)
+async def dashboard_asset_candidates(job_id: str) -> dict:
+    return await find_reusable_model_candidates(job_id)
+
+
+@router.get("/v1/jobs/{job_id}/asset-candidates", dependencies=[Depends(require_api_token)])
+async def api_asset_candidates(job_id: str) -> dict:
+    return await find_reusable_model_candidates(job_id)

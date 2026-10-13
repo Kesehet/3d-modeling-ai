@@ -147,7 +147,7 @@ def cad_generation_schema() -> dict:
                 **properties,
             },
             "required": ["name", "kind", *(
-                name for name in properties if name != "profile_plane"
+                name for name in properties if name not in ("profile_plane", "section_axis")
             )],
         }
         for kind, properties in variants.items()

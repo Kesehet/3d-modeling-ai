@@ -280,6 +280,50 @@ def test_photo_slope_requires_nonprimitive_outline(tmp_path, monkeypatch):
     assert "nonrectangular" in fake.calls[2]["prompt"].lower()
 
 
+def test_independent_visual_review_escalates_blocky_silhouette(tmp_path, monkeypatch):
+    """A visual failure must change the next shape vocabulary, not re-export boxes."""
+    monkeypatch.setattr(cad_experiment, "JOBS_ROOT", tmp_path)
+    brief = {
+        "subject_description": "Generic object with a visibly contoured exterior",
+        "silhouette_geometry": ["one major main mass, with visible upper detail"],
+        "required_components": [],
+        "spatial_relationships": [],
+        "relative_proportions": [],
+        "uncertain_details": [],
+    }
+    primitive = {
+        "title": "Incorrectly boxed form",
+        "parts": [{"name": "body", "kind": "box", "dimensions_mm": [90, 35, 28]}],
+    }
+    contoured = {
+        "title": "Rebuilt visible profile",
+        "parts": [{
+            "name": "body", "kind": "profile_extrusion", "profile_plane": "xz",
+            "profile_points_mm": [[-45, -14], [45, -14], [25, 14], [-30, 14]],
+            "height_mm": 35,
+        }],
+    }
+    fake = FakeOllama([
+        brief, primitive,
+        {"passed": False, "subject_recognizable": False,
+         "reference_match_score": 0.12, "findings": [
+             "Object is a collection of primitive blocks, not a recognizable silhouette"
+         ]},
+        primitive, contoured,
+        {"passed": True, "subject_recognizable": True,
+         "reference_match_score": 0.88, "findings": []},
+    ])
+    plan, report, _ = asyncio.run(cad_experiment.generate_cad(
+        "Make this object with a distinctive exterior", "mock", client=fake,
+        reference_images=["mock-original-pixels"],
+    ))
+    assert report["attempts"] == 3
+    assert report["reference_visual_qa"]["status"] == "passed"
+    assert plan.parts[0].kind == "profile_extrusion"
+    assert "Replace the main visible" in fake.calls[3]["prompt"]
+    assert "nonrectangular" in fake.calls[4]["prompt"].lower()
+
+
 def test_exhausted_disconnected_model_is_never_certified(tmp_path, monkeypatch):
     monkeypatch.setattr(cad_experiment, "JOBS_ROOT", tmp_path)
     disconnected = {

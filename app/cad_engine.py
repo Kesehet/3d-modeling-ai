@@ -28,6 +28,7 @@ class CadPart(BaseModel):
     loft_sections_mm: list[tuple[float, float, float, float, float]] | None = Field(
         default=None, max_length=12
     )
+    section_axis: Literal["x", "y", "z"] = "z"
 
     @model_validator(mode="after")
     def check_geometry(self) -> CadPart:
@@ -106,7 +107,9 @@ def cad_generation_schema() -> dict:
     The true source of validation remains CadBlueprint/Pydantic after inference.
     """
     number = {"type": "number"}
+    positive = {"type": "number", "exclusiveMinimum": 0, "maximum": 20000}
     triple = {"type": "array", "items": number, "minItems": 3, "maxItems": 3}
+    sizes = {"type": "array", "items": positive, "minItems": 3, "maxItems": 3}
     pair = {"type": "array", "items": number, "minItems": 2, "maxItems": 2}
     loft_section = {"type": "array", "items": number, "minItems": 5, "maxItems": 5}
     common = {
@@ -115,19 +118,20 @@ def cad_generation_schema() -> dict:
         "rotation_deg": triple,
     }
     variants = {
-        "box": {"dimensions_mm": triple},
-        "cylinder": {"radius_mm": number, "height_mm": number},
-        "cone": {"radius_mm": number, "top_radius_mm": number, "height_mm": number},
-        "sphere": {"radius_mm": number},
-        "tube": {"radius_mm": number, "inner_radius_mm": number, "height_mm": number},
+        "box": {"dimensions_mm": sizes},
+        "cylinder": {"radius_mm": positive, "height_mm": positive},
+        "cone": {"radius_mm": positive, "top_radius_mm": positive, "height_mm": positive},
+        "sphere": {"radius_mm": positive},
+        "tube": {"radius_mm": positive, "inner_radius_mm": positive, "height_mm": positive},
         "profile_extrusion": {
             "profile_plane": {"type": "string", "enum": ["xy", "xz", "yz"]},
             "profile_points_mm": {
                 "type": "array", "items": pair, "minItems": 3, "maxItems": 24,
             },
-            "height_mm": number,
+            "height_mm": positive,
         },
         "section_loft": {
+            "section_axis": {"type": "string", "enum": ["x", "y", "z"]},
             "loft_sections_mm": {
                 "type": "array", "items": loft_section, "minItems": 2, "maxItems": 12,
             },
@@ -181,9 +185,16 @@ Extrusion is centered about the sketch plane. Points describe actual outer
 contour with sloped sides, not a rectangular bounding box.
 Use this for angled/trapezoidal/curved-like polygon silhouettes; use
 rotation_deg only when the 3 named profile planes cannot represent the outline.
-section_loft: loft_sections_mm=[[z,width,depth,offset_x,offset_y], ...] at 2-12
-ordered stations along local Z. Adjacent rectangular sections are joined by
-smoothly varying surfaces to form tapered or offset solids.
+section_loft: loft_sections_mm=[[station,width,depth,offset_u,offset_v], ...]
+at 2-12 strictly increasing stations along section_axis="x", "y" or "z".
+- section_axis="x": station along local X; width along Y, depth along Z;
+  offsets are Y and Z. Suitable for long tapered horizontal silhouettes.
+- section_axis="y": station along local Y; width along Z, depth along X;
+  offsets are Z and X.
+- section_axis="z" (default): station along local Z; width along X,
+  depth along Y; offsets are X and Y.
+Rectangular cross-sections form smooth lofts without hand-computed Euler
+rotations. Use position_mm and rotation_deg only for the final whole solid.
 Prefer these general profile tools when plain boxes/cylinders cannot reproduce
 the requested silhouette. Avoid stacks of blocky rectangles as a substitute
 for a coherent profile. All sections/points are explicitly chosen from prompt
@@ -194,8 +205,8 @@ with plane=xz is the MOST DIRECT way to make a sloping roof or tall
 side elevation without confusing local coordinates: [x,z] coordinates,
 depth along world Y. Do not substitute a full-height box when the
 reference visibly has a trapezoidal/sloping outline.
-A section_loft uses LOCAL Z for stations and LOCAL XY for width
-and depth; rotate it if a horizontal or diagonal longitudinal shape is needed.
+A section_loft can run along any LOCAL section_axis. Choose the axis that
+matches the long dimension before choosing station widths, depths and offsets.
 Think through final world-space bounds after all rotations and translations.
 Every part may have position_mm=[x,y,z] and rotation_deg=[rx,ry,rz].
 Critical axis math for ALL solids: cylinders and tubes initially point along Z.
@@ -267,10 +278,20 @@ def build_cad(blueprint: CadBlueprint, output_dir: Path) -> dict:
             sketch = plane * base
             solid = extrude(sketch, amount=part.height_mm / 2, both=True)
         elif part.kind == "section_loft":
-            sections = [
-                Pos(x, y, z) * Rectangle(width, depth)
-                for z, width, depth, x, y in part.loft_sections_mm
-            ]
+            sections = []
+            for station, width, depth, offset_u, offset_v in part.loft_sections_mm:
+                if part.section_axis == "x":
+                    # Local section X/Y axes become assembly Y/Z respectively.
+                    plane = Plane(origin=(station, offset_u, offset_v),
+                                  x_dir=(0, 1, 0), z_dir=(1, 0, 0))
+                elif part.section_axis == "y":
+                    # Local section X/Y axes become assembly Z/X respectively.
+                    plane = Plane(origin=(offset_v, station, offset_u),
+                                  x_dir=(0, 0, 1), z_dir=(0, 1, 0))
+                else:
+                    plane = Plane(origin=(offset_u, offset_v, station),
+                                  x_dir=(1, 0, 0), z_dir=(0, 0, 1))
+                sections.append(plane * Rectangle(width, depth))
             solid = loft(sections)
         else:
             solid = Sphere(part.radius_mm)

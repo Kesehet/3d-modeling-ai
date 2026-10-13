@@ -199,8 +199,9 @@ async def start_cad_generation(job_id: str, request: CadGenerateRequest) -> dict
     if status.get("state") == "running":
         raise HTTPException(status_code=409, detail="Job already running another model-generation action")
     source_request = json.loads((root / "request.json").read_text(encoding="utf-8"))
-    if not 10 <= len(str(source_request.get("prompt") or "")) <= 4000:
-        raise HTTPException(status_code=422, detail="CPU CAD requires a 10-4000 character text prompt")
+    prompt = str(source_request.get("prompt") or "").strip()
+    if not 1 <= len(prompt) <= 4000:
+        raise HTTPException(status_code=422, detail="CPU CAD requires a nonempty, 1-4000 character text prompt")
     version = reserve_model_version(root)
     api._write_status(root, state="running", stage="cad_queued",
                       modeling_strategy="cpu_cad", error=None)

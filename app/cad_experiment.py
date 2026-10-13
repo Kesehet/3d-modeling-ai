@@ -208,6 +208,7 @@ async def generate_cad(
     last_export: tuple[CadBlueprint, dict, Path] | None = None
     best_grade: tuple[float, float, float, float, float] = (-1.0, -1.0, -1.0, -1.0, -1.0)
     previous_evidence: dict | None = None
+    invalid_response: dict | None = None
     repair_history: list[dict] = []
     try:
         for attempt in range(1, 4):
@@ -215,6 +216,12 @@ async def generate_cad(
                 f"{prompt}\n\nPrevious attempt failed independent QA. "
                 f"Return an improved complete JSON blueprint fixing measured issues: {error[:1600]}"
             )
+            if invalid_response is not None:
+                # A rejected shape is a repairable draft, not a reason to start over.
+                # Keep the actual invalid dimensions/contour in the next model call.
+                query += ("\nPrevious rejected JSON blueprint (fix invalid fields, preserve "
+                          "correct components):\n"
+                          + json.dumps(invalid_response, ensure_ascii=False)[:12000])
             if outline_complex:
                 query += (
                     "\nShape coverage contract: source image contains tapered/sloped/"
@@ -261,9 +268,11 @@ async def generate_cad(
             )
             try:
                 blueprint = CadBlueprint.model_validate(_prune_omitted_optional_fields(response.data))
+                invalid_response = None
                 # The caller, not the LLM, chooses whether separation is intentional.
                 blueprint = blueprint.model_copy(update={"assembly_mode": assembly_mode})
             except (ValidationError, ValueError, TypeError) as exc:
+                invalid_response = response.data if isinstance(response.data, dict) else None
                 error = (
                     "Blueprint schema: " + str(exc)[:1400]
                     + ". For EVERY profile_extrusion part supply profile_plane as xy/xz/yz, "

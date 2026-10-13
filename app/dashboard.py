@@ -419,6 +419,7 @@ header{display:flex;align-items:center;justify-content:space-between;gap:16px;ma
 .quality-banner{display:none;margin:0 0 18px;padding:12px 14px;border-radius:10px;border:1px solid #fed7aa;background:#fff7ed;color:#9a3412}.quality-banner.show{display:block}.quality-banner strong{display:block;margin-bottom:3px}
 .feature-panel{display:none;margin:0 0 18px;background:#fff;border:1px solid var(--line);border-radius:12px;padding:16px}.feature-panel.show{display:block}.feature-head{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin-bottom:12px}.feature-head h3{margin:0 0 3px}.feature-progress{color:var(--muted);font-size:12px}.feature-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:9px}.feature-card{border:1px solid var(--line);border-radius:9px;padding:10px;background:#fafafa}.feature-card.running{border-color:#fdba74;background:#fff7ed}.feature-card.accepted{border-color:#bbf7d0;background:#f0fdf4}.feature-card.retry{border-color:#fde68a;background:#fffbeb}.feature-card.blocked,.feature-card.failed{border-color:#fecaca;background:#fff5f5}.feature-name{font-weight:750}.feature-meta{font-size:11px;color:var(--muted);margin-top:3px}.feature-state{font-size:10px;text-transform:uppercase;letter-spacing:.04em;font-weight:800}.feature-criteria{margin-top:6px;font-size:11px;color:#475467}
 .render-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}.render{background:#fff;border:1px solid var(--line);border-radius:12px;overflow:hidden}.render img{width:100%;aspect-ratio:1;object-fit:cover;display:block}.render-name{padding:9px 11px;color:var(--muted);font-size:12px}
+.comparison-panel{margin:18px 0;background:#fff;border:1px solid var(--line);border-radius:12px;padding:16px}.comparison-panel h3{margin:0 0 4px}.comparison-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.comparison-view{border:1px solid var(--line);border-radius:10px;overflow:hidden;background:#f8fafc}.comparison-view img{display:block;width:100%;aspect-ratio:5/3;object-fit:contain}.comparison-view strong{display:block;padding:8px 10px}.comparison-summary{margin:10px 0 0;color:var(--muted);font-size:12px}
 .reference-panel{margin-top:22px;background:#fff;border:1px solid var(--line);border-radius:12px;padding:16px}.reference-panel h3{margin:0 0 4px}.reference-help{color:var(--muted);font-size:12px;margin:0 0 12px}.reference-grid{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:12px}.reference-card{border:1px solid var(--line);border-radius:10px;overflow:hidden;background:#fafafa}.reference-card img{display:block;width:100%;aspect-ratio:1;object-fit:cover}.reference-info{padding:8px 9px;font-size:11px;color:var(--muted)}.reference-info strong{display:block;color:var(--text);font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.reference-used{display:inline-block;margin-top:5px;padding:2px 6px;border-radius:999px;background:#dcfce7;color:#166534;font-weight:700;font-size:10px}
 .downloads{margin-top:22px;background:#fff;border:1px solid var(--line);border-radius:12px;padding:16px}.downloads h3{margin:0 0 10px}.file-list{display:flex;gap:8px;flex-wrap:wrap}.file{display:inline-flex;text-decoration:none;color:var(--text);border:1px solid var(--line);border-radius:8px;padding:8px 10px;background:#fafafa}.file b{margin-right:6px}
 .details{margin-top:16px;background:#fff;border:1px solid var(--line);border-radius:12px;padding:14px}.details summary{cursor:pointer;font-weight:700}.details pre{white-space:pre-wrap;word-break:break-word;background:#f8fafc;padding:12px;border-radius:8px;max-height:320px;overflow:auto}
@@ -450,6 +451,7 @@ header{display:flex;align-items:center;justify-content:space-between;gap:16px;ma
     </div>
     <div class="viewer-foot"><span>Drag to rotate · pinch to zoom · the active model updates automatically with the job.</span><a class="file" id="modelDownload" href="#" download hidden><b>↓</b>Download active GLB</a></div>
   </section>
+  <section class="comparison-panel" id="cadComparisonPanel" hidden><h3>Reference vs. generated CAD</h3><p class="reference-help">Source photograph and the actual exported geometry. This comparison does not certify physical assembly or reference fidelity.</p><div class="comparison-grid" id="cadComparisonGrid"></div><p class="comparison-summary" id="cadComparisonSummary"></p></section>
   <section class="feature-panel show" id="featurePanel"><div class="feature-head"><div><h3>AI feature sub-jobs</h3><div class="feature-progress" id="featureProgress"></div></div></div><div class="feature-grid" id="featureGrid"></div></section>
   <details class="details render-details"><summary>QA renders & checkpoints</summary><div class="render-grid" id="renderGrid"></div></details>
   <section class="reference-panel"><h3>Reference images used</h3><p class="reference-help">These are the saved reference images attached to this job. Images included in the latest vision pass are marked below.</p><div class="reference-grid" id="referenceGrid"></div></section>
@@ -465,20 +467,23 @@ header{display:flex;align-items:center;justify-content:space-between;gap:16px;ma
     <div class="field"><label for="jobEngine">Modeling engine</label><select id="jobEngine"><option value="cpu_cad">CPU CAD · fast parametric STEP/STL/GLB</option><option value="blender">Blender AI · iterative visual modeling</option></select></div>
     <div class="field"><label for="jobUse">Use</label><select id="jobUse"><option value="rendering">Rendering</option><option value="3d_printing">3D printing</option><option value="game_asset">Game asset</option></select></div>
     <div class="field"><label for="jobWidth">Width in mm (optional)</label><input id="jobWidth" type="number" min="0.01" max="10000" step="0.1"></div>
+    <div class="field"><label for="jobReferences">Reference images (up to 3)</label><input id="jobReferences" type="file" accept="image/png,image/jpeg,image/webp" multiple><small>Upload product photos or front/side/top references to guide generation and comparison.</small></div>
+    <div class="field"><label for="jobReferenceMode">Reference behavior</label><select id="jobReferenceMode"><option value="shape_guidance">Shape guidance</option><option value="exact_match">Exact geometry match</option><option value="inspiration">Inspiration only</option></select></div>
+    <div class="field"><label for="jobAssemblyMode">Geometry relationship</label><select id="jobAssemblyMode"><option value="single">One connected assembly</option><option value="independent">Intentionally independent parts</option></select></div>
     <div class="actions"><button class="btn" id="cancelNew">Cancel</button><button class="btn primary" id="createModel">Create model</button></div>
     <div class="notice" id="newNotice"></div>
   </div>
 </div>
 
 <script>
-const CLIENT_UI_VERSION="live-model-viewer-cpu-cad-v3";
+const CLIENT_UI_VERSION="reference-aware-cad-v4";
 const byId=id=>document.getElementById(id);
 const esc=value=>String(value??"").replace(/[&<>"']/g,ch=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[ch]));
 const els={
   home:byId("homeView"),detail:byId("detailView"),gallery:byId("jobGallery"),
-  title:byId("detailTitle"),meta:byId("detailMeta"),quality:byId("qualityBanner"),viewer:byId("liveModelViewer"),viewerEmpty:byId("viewerEmpty"),viewerLabel:byId("viewerLabel"),modelDownload:byId("modelDownload"),featurePanel:byId("featurePanel"),featureProgress:byId("featureProgress"),featureGrid:byId("featureGrid"),renders:byId("renderGrid"),references:byId("referenceGrid"),files:byId("fileList"),json:byId("detailJson"),
+  title:byId("detailTitle"),meta:byId("detailMeta"),quality:byId("qualityBanner"),comparisonPanel:byId("cadComparisonPanel"),comparisonGrid:byId("cadComparisonGrid"),comparisonSummary:byId("cadComparisonSummary"),viewer:byId("liveModelViewer"),viewerEmpty:byId("viewerEmpty"),viewerLabel:byId("viewerLabel"),modelDownload:byId("modelDownload"),featurePanel:byId("featurePanel"),featureProgress:byId("featureProgress"),featureGrid:byId("featureGrid"),renders:byId("renderGrid"),references:byId("referenceGrid"),files:byId("fileList"),json:byId("detailJson"),
   newBtn:byId("newJobBtn"),dialog:byId("newJobDialog"),cancel:byId("cancelNew"),create:byId("createModel"),
-  prompt:byId("jobPrompt"),engine:byId("jobEngine"),use:byId("jobUse"),width:byId("jobWidth"),notice:byId("newNotice"),
+  prompt:byId("jobPrompt"),engine:byId("jobEngine"),use:byId("jobUse"),width:byId("jobWidth"),refs:byId("jobReferences"),refMode:byId("jobReferenceMode"),assemblyMode:byId("jobAssemblyMode"),notice:byId("newNotice"),
   back:byId("backBtn"),improve:byId("improveBtn"),deleteBtn:byId("deleteBtn")
 };
 let data=null;
@@ -553,7 +558,7 @@ function renderDetail(job){
   const improvingMesh=job.stage==="adaptive_mesh_needs_refinement";
   const retryingQuality=job.stage==="generic_quality_unverified";
   if(isCad){
-    els.quality.innerHTML=job.stage==="cad_failed"?("<strong>CPU CAD generation failed.</strong>"+esc(job.error||"See job history for the underlying error.")):(job.state==="running"?"<strong>CPU CAD is building.</strong>Ollama is planning parts and the CPU worker will export STEP, STL and GLB.":"<strong>CAD model ready for visual review.</strong>STEP/mesh integrity passed; appearance, part connections and mechanical correctness need review.");
+    els.quality.innerHTML=job.stage==="cad_failed"?("<strong>CPU CAD generation failed.</strong>"+esc(job.error||"See job history for the underlying error.")):(job.state==="running"?"<strong>CPU CAD is building.</strong>Ollama is planning parts and the CPU worker will export STEP, STL and GLB.":job.stage==="cad_needs_assembly_repair"?"<strong>CAD assembly QA failed.</strong>"+esc(job.quality_gate?.summary||"Some generated parts are disconnected. Inspect the QA manifest."):job.stage==="cad_needs_reference_repair"?"<strong>CAD reference comparison failed.</strong>"+esc(job.quality_gate?.summary||"The model does not match the reference images."):"<strong>CAD model exported for review.</strong>"+esc(job.quality_gate?.summary||"STEP/mesh integrity passed; visual and physical correctness remain to be checked."));
     els.quality.classList.add("show");
   }else if(job.stage==="waiting_for_references"||job.stage==="researching_references"){
     const gate=job.reference_gate||{};
@@ -599,6 +604,18 @@ function renderDetail(job){
   els.renders.innerHTML=(job.renders||[]).length
     ? job.renders.map(image=>'<div class="render"><a target="_blank" href="'+renderUrl(job.job_id,image.name,image.mtime)+'"><img loading="lazy" src="'+renderUrl(job.job_id,image.name,image.mtime)+'"></a><div class="render-name">'+esc(image.name)+'</div></div>').join("")
     : '<div class="empty-state" style="grid-column:1/-1">No renders yet. This page refreshes automatically while the job runs.</div>';
+  const currentRender=(job.renders||[]).find(image=>job.cad?.version&&image.name==="model-v"+job.cad.version+"-front-left.png");
+  const sourceReference=(job.references||[]).find(image=>image.uploaded_at)||null;
+  const visual=job.cad?.reference_visual_qa||{};
+  const assembly=job.cad?.assembly_qa||{};
+  if(isCad&&sourceReference&&currentRender){
+    els.comparisonPanel.hidden=false;
+    els.comparisonGrid.innerHTML='<div class="comparison-view"><a target="_blank" href="'+fileUrl(job.job_id,"references",sourceReference.name)+'"><img loading="lazy" src="'+fileUrl(job.job_id,"references",sourceReference.name)+'" alt="Original uploaded reference"></a><strong>Original reference</strong></div><div class="comparison-view"><a target="_blank" href="'+renderUrl(job.job_id,currentRender.name,currentRender.mtime)+'"><img loading="lazy" src="'+renderUrl(job.job_id,currentRender.name,currentRender.mtime)+'" alt="Actual CAD model diagnostic render"></a><strong>Generated CAD · v'+esc(job.cad.version)+'</strong></div>';
+    els.comparisonSummary.textContent="Visual review: "+(visual.status||"not run")+(Number.isFinite(visual.reference_match_score)?" · similarity "+Math.round(visual.reference_match_score*100)+"%":"")+" · assembly: "+(assembly.pass===true?"bounds connected":assembly.pass===false?"disconnected parts detected":"not checked")+" · attempts "+(job.cad.attempts||"?")+"/3";
+  }else{
+    els.comparisonPanel.hidden=true;
+    els.comparisonGrid.innerHTML="";
+  }
   const latestVision=new Set(job.latest_vision_images||[]);
   els.references.innerHTML=(job.references||[]).length
     ? job.references.map(ref=>{
@@ -648,11 +665,20 @@ async function createModel(){
     let response=await fetch("/dashboard/jobs",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
     if(!response.ok)throw new Error(await response.text());
     created=await response.json();
+    const referenceFiles=Array.from(els.refs.files||[]);
+    if(referenceFiles.length>3)throw new Error("Select no more than 3 reference images.");
+    if(referenceFiles.length){
+      els.notice.textContent="Uploading and checking reference images...";
+      const form=new FormData();
+      referenceFiles.forEach(file=>form.append("files",file));
+      const uploaded=await fetch("/dashboard/jobs/"+encodeURIComponent(created.job_id)+"/references",{method:"POST",body:form});
+      if(!uploaded.ok)throw new Error("Reference upload failed: "+await uploaded.text());
+    }
     els.dialog.classList.remove("show");
     await refresh();
     openJob(created.job_id);
     const cad=els.engine.value==="cpu_cad";
-    response=await fetch("/dashboard/jobs/"+encodeURIComponent(created.job_id)+(cad?"/cad":"/generate"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(cad?{}:{auto_research:true,auto_improve_rounds:30})});
+    response=await fetch("/dashboard/jobs/"+encodeURIComponent(created.job_id)+(cad?"/cad":"/generate"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(cad?{reference_mode:els.refMode.value,assembly_mode:els.assemblyMode.value}:{auto_research:true,auto_improve_rounds:30})});
     if(!response.ok){
       await refresh();
       return;

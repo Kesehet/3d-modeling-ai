@@ -4935,6 +4935,15 @@ async def upload_references(
     return {"job_id": job_id, "added": added, "references": index, "status": status}
 
 
+@app.post("/dashboard/jobs/{job_id}/references", include_in_schema=False)
+async def dashboard_upload_references(
+    job_id: str,
+    files: Annotated[list[UploadFile], File()],
+) -> dict:
+    """Reuse the existing validated reference ingestion path from the dashboard."""
+    return await upload_references(job_id, files)
+
+
 @app.get("/v1/jobs/{job_id}/artifacts", dependencies=[Depends(require_api_token)])
 async def list_artifacts(job_id: str) -> dict:
     root = _require_job(job_id)

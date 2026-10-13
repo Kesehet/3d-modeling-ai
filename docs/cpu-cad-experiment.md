@@ -51,8 +51,9 @@ experiment branch. Ordinary pushes and pull requests never use Ollama secrets.
 
 ## Limitations / promotion criteria
 
-* Supported primitives: box, cylinder, cone, sphere, tube. No splines,
-  lofts, fillets, constraints, gears, threads or freeform meshes yet.
+* Supported primitives: box, cylinder, cone, sphere, tube, plus generic polygon
+  profile extrusions and multi-section rectangular lofts. No splines, fillets,
+  mechanical constraints, gears, threads, booleans from AI, or freeform meshes yet.
 * A successful STEP re-import demonstrates geometrical integrity, **not**
   correct proportions, connected mechanical design, fan recognizability,
   collision-free joins, physical feasibility, or printable assembly.
@@ -86,3 +87,72 @@ network. It uses its **own** volume so the CAD engine doesn't need access to
 Blender worker files. The main API receives exports over internal HTTP,
 stores them atomically in the standard job workspace, and cleans up the
 sidecar's temporary run. The existing Blender worker continues unchanged.
+
+
+## Reference-aware CPU CAD and reliable state reporting (PR #145)
+
+The existing **New Job** dialog supports up to three PNG/JPEG/WebP reference images.
+They are ingested through the same validated `/v1/jobs/{id}/references`
+endpoint as Blender jobs before CAD generation starts. The CPU CAD adapter
+selects previously uploaded or verified reference files, downsamples them to
+JPEG, and passes the bounded base64 images over the private Docker network to
+the Ollama-driven CAD sidecar.
+
+`POST /v1/jobs/{id}/cad` and the dashboard support:
+- `reference_mode`: `exact_match`, `shape_guidance` (default), or `inspiration`.
+- `assembly_mode`: `single` (default) or `independent` for truly separate deliverables.
+  **The caller sets this mode.** The LLM cannot silently opt out of connected-part QA.
+
+Every successful geometry export also produces headless CPU render evidence:
+`renders/model-vN-front-left.png` and `renders/model-vN-top.png`. When references
+are supplied, an independent vision-model call receives the original reference
+images FIRST and the rendered evidence LAST. The review records
+`reference_match_score`, `passed`, `subject_recognizable`, and specific findings.
+A failed review is fed back to the planner for up to three bounded corrective
+attempts; unavailable/invalid visual review is **unverified**, not a pass.
+
+`assembly_qa` is measured on actual generated CAD solids and rejects disconnected
+parts with mm gap evidence, except explicitly independent requests.
+It never uses keywords such as "wheel" or "blade" to determine placements.
+It combines broad-phase AABB separation with OpenCascade narrow-phase exact
+BRep closest-solid distance, resolving false proximity when bounding boxes overlap.
+**Limitation:** mm-scale surface proximity is NOT proof of exact mating contact,
+interference-free parts, watertight combined assembly, dimensional fidelity, or
+mechanical feasibility. This first-stage QA is conservative rather than final.
+
+When structural or reference visual checks still fail, the job status is
+`state=failed`, stage `cad_needs_assembly_repair` or `cad_needs_reference_repair`,
+and the last valid STEP/GLB/STL and render evidence remain available. Export
+integrity and subject quality never share the same pass flag. A job with no
+reference images remains `cad_needs_visual_review`; it cannot claim visually
+verified quality. Existing Blender generation is separate and unchanged.
+
+Before claiming a broadly reliable general model maker, add real narrow-phase
+contact/penetration checks, photo-to-geometry multi-view registration, and
+fresh independent visual reviews across unrelated unseen objects.
+
+### Live model-quality findings (not an acceptance claim)
+
+An unmocked reference-photo sedan test on the experimental branch identified a
+serious geometry/recognition gap despite validated STEP. The model generated
+loft and profile parts but a vertical cabin panel and disconnected geometry,
+so assembly or reference QA correctly rejected it. Both numerical and visual
+failure evidence now enter the next bounded attempt; no subject-specific hardcoding
+is accepted. A good export is **not** a finished or recognizable object.
+
+### Exact-surface island repair
+
+Disconnected groups now carry measured OpenCascade nearest-point pairs. Repair
+uses those actual surface points, including their transformed target positions
+when attaching a chain of groups, rather than the empty volume inside combined
+bounding boxes. Each original connected group moves rigidly, the largest-solid
+group stays fixed, and total displacement remains bounded to 20% of the original
+assembly diagonal. Missing exact evidence never falls back to bounding-box moves.
+The candidate is rebuilt and retained only when the number of disconnected groups
+decreases. Independent visual QA remains mandatory: nearest contact can still be
+the wrong semantic attachment and is not proof of mechanical fit.
+
+Regression coverage includes diagonal spheres with overlapping boxes, a solid
+inside a hollow part, rigid multi-part islands, cumulative chain translations,
+and refusal to move remote parts. These synthetic geometry checks do not establish
+real reference-photo reconstruction quality; the unmocked gate remains required.

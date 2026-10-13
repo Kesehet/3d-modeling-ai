@@ -1,5 +1,23 @@
 name: CPU CAD Experiment (no GPU)
 on:
+  push:
+    branches:
+      - experiment/cpu-cad-ollama-20261011
+    paths:
+      - "app/cad_*.py"
+      - "scripts/cad_ci_benchmark.py"
+      - "tests/test_cad_experiment.py"
+      - "tests/test_cad_spatial_regressions.py"
+      - "tests/test_cad_geometry_regressions.py"
+      - "tests/test_cad_visibility.py"
+      - "tests/test_cad_dashboard_integration.py"
+      - "app/main.py"
+      - "app/dashboard.py"
+      - "compose.hostinger.yaml"
+      - "Dockerfile.cad"
+      - "compose.cad-experiment.yaml"
+      - "pyproject.toml"
+      - ".github/workflows/cad-cpu-experiment.yml"
   pull_request:
     paths:
       - "app/cad_*.py"
@@ -7,6 +25,7 @@ on:
       - "tests/test_cad_experiment.py"
       - "tests/test_cad_spatial_regressions.py"
       - "tests/test_cad_geometry_regressions.py"
+      - "tests/test_cad_visibility.py"
       - "Dockerfile.cad"
       - "compose.cad-experiment.yaml"
       - "pyproject.toml"
@@ -35,10 +54,10 @@ jobs:
           python -m pip install ".[cad,dev]"
       - name: Static checks
         run: |
-          ruff check app/cad_engine.py app/cad_experiment.py app/cad_service.py app/cad_jobs.py app/cad_spatial.py tests/test_cad_experiment.py tests/test_cad_dashboard_integration.py tests/test_cad_spatial_regressions.py tests/test_cad_geometry_regressions.py scripts/cad_ci_benchmark.py
+          ruff check app/cad_engine.py app/cad_assembly_repair.py app/cad_assembly_qa.py app/cad_semantic_qa.py app/cad_preview.py app/cad_experiment.py app/cad_service.py app/cad_jobs.py app/cad_spatial.py tests/test_cad_spatial_regressions.py tests/test_cad_geometry_regressions.py tests/test_cad_assembly_qa.py tests/test_cad_visibility.py tests/test_cad_experiment.py tests/test_cad_dashboard_integration.py scripts/cad_ci_benchmark.py
           python -m compileall -q app/cad_engine.py app/cad_experiment.py app/cad_service.py
       - name: End-to-end CAD API and real BRep export tests (fake LLM)
-        run: pytest -q tests/test_cad_experiment.py tests/test_cad_dashboard_integration.py tests/test_cad_spatial_regressions.py tests/test_cad_geometry_regressions.py
+        run: pytest -q tests/test_cad_assembly_qa.py tests/test_cad_visibility.py tests/test_cad_experiment.py tests/test_cad_dashboard_integration.py tests/test_cad_spatial_regressions.py tests/test_cad_geometry_regressions.py
       - name: Produce independent inspectable CPU CAD outputs
         run: python scripts/cad_ci_benchmark.py --output cad-artifacts
       - name: Upload STEP/STL/GLB and validation evidence

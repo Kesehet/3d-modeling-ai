@@ -8,6 +8,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app import cad_experiment
+from app.cad_assembly_qa import evaluate_assembly_solids
 from app.cad_engine import CadBlueprint, build_cad
 from app.cad_service import app
 from app.cad_spatial import evaluate_spatial_contract
@@ -124,6 +125,10 @@ def test_llm_schema_retry_then_geometry(tmp_path, monkeypatch):
     assert report["attempts"] == 2
     assert out.is_dir()
     assert "Previous attempt failed" in fake.calls[1]["prompt"]
+    # Repair is grounded in the actual rejected draft, not a free-form restart.
+    assert "Previous rejected JSON blueprint" in fake.calls[1]["prompt"]
+    assert '"title": "Invalid"' in fake.calls[1]["prompt"]
+
     assert fake.calls[0]["schema"]["type"] == "object"
 
 
@@ -139,9 +144,18 @@ def test_api_end_to_end_with_fake_ollama(tmp_path, monkeypatch):
         assert resp.status_code == 200, resp.text
         body = resp.json()
         assert body["part_count"] == 3 and body["step_reimport_valid"]
-        for suffix in ("step", "stl", "glb", "json"):
+        for suffix in ("step", "stl", "glb", "json", "history"):
             reply = client.get(body["files"][suffix])
             assert reply.status_code == 200 and len(reply.content) > 100
+
+
+def test_short_named_object_prompt_is_accepted_but_whitespace_is_not():
+    from pydantic import ValidationError
+
+    assert cad_experiment.CadRequest(prompt="Prius").prompt == "Prius"
+    assert cad_experiment.CadRequest(prompt="  Maserati  ").prompt == "Maserati"
+    with pytest.raises(ValidationError):
+        cad_experiment.CadRequest(prompt="     ")
 
 
 def test_disabled_by_default(monkeypatch):
@@ -159,3 +173,598 @@ def test_failed_blueprint_cleans_temp_dir(tmp_path, monkeypatch):
         ))
     root = tmp_path / ".cad-experiments"
     assert list(root.iterdir()) == []
+
+
+def test_measured_disconnection_retries_and_preserves_good_export(tmp_path, monkeypatch):
+    monkeypatch.setattr(cad_experiment, "JOBS_ROOT", tmp_path)
+    floating = {
+        "title": "Bad candidate",
+        "parts": [
+            {"name": "object_A", "kind": "box", "dimensions_mm": [10, 10, 10]},
+            {"name": "object_B", "kind": "box", "dimensions_mm": [10, 10, 10],
+             "position_mm": [130, 0, 0]},
+        ],
+    }
+    repaired = {
+        **floating,
+        "title": "Repaired candidate",
+        "parts": [
+            floating["parts"][0],
+            {**floating["parts"][1], "position_mm": [9, 0, 0]},
+        ],
+    }
+    fake = FakeOllama([floating, repaired])
+    plan, report, out = asyncio.run(cad_experiment.generate_cad(
+        "Two parts that must touch", "mock", client=fake,
+    ))
+    assert report["attempts"] == 2
+    assert report["assembly_qa"]["pass"]
+    assert "Disconnected solid group" in fake.calls[1]["prompt"]
+    assert plan.title == "Repaired candidate"
+    assert (out / "assembly-front-left.png").stat().st_size > 100
+    assert (out / "assembly-top.png").stat().st_size > 100
+
+
+def test_multimodal_reference_compares_real_render_with_original(tmp_path, monkeypatch):
+    monkeypatch.setattr(cad_experiment, "JOBS_ROOT", tmp_path)
+    brief = {
+        "subject_description": "Solid mechanical object with radial arms",
+        "silhouette_geometry": ["long horizontal pieces"],
+        "required_components": ["cylinder", "two arms"],
+        "spatial_relationships": ["arms attach to core"],
+        "relative_proportions": ["arm length exceeds core diameter"],
+        "uncertain_details": [],
+    }
+    fake = FakeOllama([
+        brief,
+        BLUEPRINT,
+        {"passed": False, "subject_recognizable": False,
+         "reference_match_score": 0.1, "findings": ["wrong silhouette"]},
+        BLUEPRINT,
+        {"passed": True, "subject_recognizable": True,
+         "reference_match_score": 0.92, "findings": []},
+    ])
+    _, report, out = asyncio.run(cad_experiment.generate_cad(
+        "A spindle with two long arms", "mock", client=fake,
+        reference_images=["sample-original-b64"], reference_mode="exact_match",
+    ))
+    assert len(fake.calls) == 5
+    assert fake.calls[0]["images"] == ["sample-original-b64"]
+    assert fake.calls[0]["model"] == cad_experiment.VISION_MODEL
+    assert fake.calls[1]["images"] is None
+    assert fake.calls[1]["model"] == "mock"
+    assert "Independently inspected" in fake.calls[1]["prompt"]
+    assert len(fake.calls[2]["images"]) == 6
+    assert fake.calls[2]["images"][0] == "sample-original-b64"
+    assert "wrong silhouette" in fake.calls[3]["prompt"]
+    assert report["reference_visual_qa"]["status"] == "passed"
+    assert report["reference_geometry_brief"]["status"] == "verified"
+    assert not report["repair_exhausted"]
+    assert (out / "manifest.json").is_file()
+    assert (out / "repair-history.json").is_file()
+
+
+def test_photo_slope_requires_nonprimitive_outline(tmp_path, monkeypatch):
+    monkeypatch.setattr(cad_experiment, "JOBS_ROOT", tmp_path)
+    simple_brief = {
+        "subject_description": "A tapered multi-part structure",
+        "silhouette_geometry": ["Trapezoidal roof with sloped side edges"],
+        "required_components": ["roof"],
+        "spatial_relationships": ["roof rests on base"],
+        "relative_proportions": ["roof narrower at top"],
+        "uncertain_details": [],
+    }
+    box_only = {
+        "title": "Bad simplification",
+        "parts": [{"name": "roof", "kind": "box", "dimensions_mm": [80, 20, 20]}],
+    }
+    profiled = {
+        "title": "Reference silhouette respected",
+        "parts": [{
+            "name": "roof", "kind": "profile_extrusion", "profile_plane": "xz",
+            "profile_points_mm": [[-40, 0], [40, 0], [24, 25], [-20, 25]],
+            "height_mm": 20,
+        }],
+    }
+    fake = FakeOllama([
+        simple_brief, box_only, profiled,
+        {"passed": True, "subject_recognizable": True,
+         "reference_match_score": 0.9, "findings": []},
+    ])
+    _, report, _ = asyncio.run(cad_experiment.generate_cad(
+        "Tapered structural form", "mock", client=fake,
+        reference_images=["mock-reference"], reference_mode="shape_guidance",
+    ))
+    assert report["attempts"] == 2
+    assert report["parts"][0]["kind"] == "profile_extrusion"
+    assert "nonrectangular" in fake.calls[2]["prompt"].lower()
+
+
+def test_independent_visual_review_escalates_blocky_silhouette(tmp_path, monkeypatch):
+    """A visual failure must change the next shape vocabulary, not re-export boxes."""
+    monkeypatch.setattr(cad_experiment, "JOBS_ROOT", tmp_path)
+    brief = {
+        "subject_description": "Generic object with a visibly contoured exterior",
+        "silhouette_geometry": ["one major main mass, with visible upper detail"],
+        "required_components": [],
+        "spatial_relationships": [],
+        "relative_proportions": [],
+        "uncertain_details": [],
+    }
+    primitive = {
+        "title": "Incorrectly boxed form",
+        "parts": [{"name": "body", "kind": "box", "dimensions_mm": [90, 35, 28]}],
+    }
+    contoured = {
+        "title": "Rebuilt visible profile",
+        "parts": [{
+            "name": "body", "kind": "profile_extrusion", "profile_plane": "xz",
+            "profile_points_mm": [[-45, -14], [45, -14], [25, 14], [-30, 14]],
+            "height_mm": 35,
+        }],
+    }
+    fake = FakeOllama([
+        brief, primitive,
+        {"passed": False, "subject_recognizable": False,
+         "reference_match_score": 0.12, "findings": [
+             "Object is a collection of primitive blocks, not a recognizable silhouette"
+         ]},
+        primitive, contoured,
+        {"passed": True, "subject_recognizable": True,
+         "reference_match_score": 0.88, "findings": []},
+    ])
+    plan, report, _ = asyncio.run(cad_experiment.generate_cad(
+        "Make this object with a distinctive exterior", "mock", client=fake,
+        reference_images=["mock-original-pixels"],
+    ))
+    assert report["attempts"] == 3
+    assert report["reference_visual_qa"]["status"] == "passed"
+    assert plan.parts[0].kind == "profile_extrusion"
+    assert "Replace the main visible" in fake.calls[3]["prompt"]
+    assert "nonrectangular" in fake.calls[4]["prompt"].lower()
+
+
+def test_exhausted_disconnected_model_is_never_certified(tmp_path, monkeypatch):
+    monkeypatch.setattr(cad_experiment, "JOBS_ROOT", tmp_path)
+    disconnected = {
+        "title": "Disconnected",
+        "parts": [
+            {"name": "first", "kind": "box", "dimensions_mm": [10, 10, 10]},
+            {"name": "second", "kind": "box", "dimensions_mm": [10, 10, 10],
+             "position_mm": [300, 0, 0]},
+        ],
+    }
+    _, report, out = asyncio.run(cad_experiment.generate_cad(
+        "Two touching spheres", "mock", client=FakeOllama([disconnected]),
+    ))
+    assert report["attempts"] == 3
+    assert report["repair_exhausted"]
+    assert not report["assembly_qa"]["pass"]
+    assert (out / "assembly.step").is_file()
+
+
+@pytest.mark.parametrize("kind,details", [
+    ("profile_extrusion", {
+        "profile_points_mm": [[-20, -10], [30, -10], [20, 8], [0, 15], [-15, 12]],
+        "height_mm": 15,
+    }),
+    ("profile_extrusion", {
+        "profile_points_mm": [[-45, 0], [45, 0], [30, 28], [-22, 35]],
+        "profile_plane": "xz",
+        "height_mm": 30,
+    }),
+    ("section_loft", {
+        "loft_sections_mm": [
+            [-30, 50, 28, 0, 0],
+            [0, 60, 32, 8, 0],
+            [35, 28, 16, 0, 0],
+        ],
+    }),
+])
+def test_nonprimitive_generic_shapes_export_true_cad(kind, details, tmp_path):
+    blueprint = CadBlueprint.model_validate({
+        "title": "Independent shape", "parts": [
+            {"name": "model", "kind": kind, **details}
+        ],
+    })
+    report = build_cad(blueprint, tmp_path)
+    assert report["step_reimport_valid"]
+    assert report["assembly_qa"]["pass"]
+    assert report["renders"]["top"] == "assembly-top.png"
+    assert report["renders"]["left"] == "assembly-left.png"
+    assert report["renders"]["back-right"] == "assembly-back-right.png"
+    assert (tmp_path / "assembly.glb").stat().st_size > 100
+
+
+@pytest.mark.parametrize(("axis", "expected"), [
+    ("x", (100, 40, 20)),
+    ("y", (20, 100, 40)),
+    ("z", (40, 20, 100)),
+])
+def test_loft_station_axis_follows_requested_local_direction(axis, expected, tmp_path):
+    """Measure real exported geometry, not merely the LLM schema."""
+    plan = CadBlueprint.model_validate({
+        "title": "Tapered generic loft", "parts": [{
+            "name": "tapered_body", "kind": "section_loft", "section_axis": axis,
+            "loft_sections_mm": [[0, 40, 20, 0, 0], [100, 20, 10, 0, 0]],
+        }],
+    })
+    report = build_cad(plan, tmp_path)
+    assert report["step_reimport_valid"]
+    actual = trimesh.load(tmp_path / "assembly.glb", force="scene").extents
+    assert tuple(actual) == pytest.approx(expected, abs=0.6)
+    assert report["parts"][0]["volume_mm3"] > 0
+
+
+@pytest.mark.parametrize("bad", [
+    {"kind": "profile_extrusion", "height_mm": 20, "profile_points_mm": [[0, 0], [2, 2], [4, 4]]},
+    {"kind": "section_loft", "loft_sections_mm": [[2, 5, 6, 0, 0], [1, 5, 6, 0, 0]]},
+    {"kind": "section_loft", "loft_sections_mm": [[0, 5, 6, 0, 0], [1, -5, 6, 0, 0]]},
+])
+def test_nonprimitive_shapes_reject_degenerate_profiles(bad):
+    with pytest.raises(ValueError):
+        CadBlueprint.model_validate({"title": "Bad", "parts": [{"name": "bad", **bad}]})
+
+
+def test_brep_distance_rejects_false_aabb_contact():
+    """Two spheres can have overlapping AABBs while remaining physically apart."""
+    from build123d import Pos, Sphere
+
+    first = Sphere(10)
+    second = Pos(18, 18, 0) * Sphere(10)
+    report = evaluate_assembly_solids(
+        {"first": first, "second": second},
+        {"first": [[-10, -10, -10], [10, 10, 10]],
+         "second": [[8, 8, -10], [28, 28, 10]]},
+    )
+    assert report["measurement"] == "brep_closest_solid_distance"
+    assert not report["pass"]
+    assert len(report["groups"]) == 2
+    assert not report["contact_verified"]
+    assert report["nearest_noncontact_pairs"][0]["gap_mm"] > 5
+
+
+def test_brep_distance_accepts_true_contact_for_unrelated_solids():
+    from build123d import Box, Pos
+
+    a = Box(20, 20, 20)
+    b = Pos(15, 0, 0) * Box(20, 20, 20)
+    report = evaluate_assembly_solids(
+        {"a": a, "b": b},
+        {"a": [[-10, -10, -10], [10, 10, 10]],
+         "b": [[5, -10, -10], [25, 10, 10]]},
+    )
+    assert report["pass"]
+    assert report["solid_proximity_verified"] is True
+    assert report["physical_fit_verified"] is False
+
+
+def test_dense_reference_preview_has_no_triangle_sampling_holes(tmp_path):
+    """The old renderer skipped most of a dense solid and drew fake mesh gaps."""
+    import numpy as np
+    from PIL import Image
+
+    from app.cad_preview import BACKGROUND, render_cad_views
+
+    mesh = trimesh.creation.box(extents=[180, 120, 85])
+    for _ in range(5):
+        mesh = mesh.subdivide()
+    assert len(mesh.faces) > 4500
+    scene = trimesh.Scene()
+    scene.add_geometry(mesh, geom_name="generic_dense_solid")
+    images = render_cad_views(scene, tmp_path)
+    assert set(images) == {"front-left", "back-right", "left", "right", "top"}
+    rendered = np.asarray(Image.open(tmp_path / images["front-left"]).convert("RGB"))
+    central = rendered[320:380, 320:380]
+    foreground = np.any(central != np.asarray(BACKGROUND), axis=2)
+    assert float(foreground.mean()) > 0.95
+
+
+def test_profile_plane_is_geometrically_world_aligned(tmp_path):
+    plan = CadBlueprint.model_validate({
+        "title": "Abstract sloped roof",
+        "parts": [{
+            "name": "tilted_roof", "kind": "profile_extrusion",
+            "profile_plane": "xz",
+            "profile_points_mm": [[-45, 0], [45, 0], [30, 35], [-20, 35]],
+            "height_mm": 22,
+        }],
+    })
+    build_cad(plan, tmp_path)
+    actual = trimesh.load(tmp_path / "assembly.glb", force="scene").bounds
+    span = actual[1] - actual[0]
+    assert abs(span[0] - 90) < 0.5
+    assert abs(span[1] - 22) < 0.5
+    assert abs(span[2] - 35) < 0.5
+
+
+def test_reference_component_coverage_rejects_simplified_missing_subject_features():
+    from app.cad_semantic_qa import evaluate_required_component_coverage
+
+    requested = [
+        "Front hood surface", "Windshield plane", "Roof plane",
+        "Rear window plane", "Trunk lid surface", "Rear bumper fascia",
+        "Side door panels", "Four wheel assemblies", "Side mirror protrusions",
+    ]
+    trivial = CadBlueprint.model_validate({
+        "title": "Over-simplified", "parts": [
+            {"name": "Body", "kind": "box", "dimensions_mm": [70, 30, 20]},
+            *[{"name": f"wheel_{n}", "kind": "cylinder", "radius_mm": 3,
+               "height_mm": 2} for n in range(4)],
+        ],
+    })
+    score = evaluate_required_component_coverage(trivial, requested)
+    assert not score["pass"]
+    assert score["matched"] == 1  # Four wheel parts only.
+    assert any("hood" in item["required"].lower() for item in score["missing"])
+    comprehensive = CadBlueprint.model_validate({
+        "title": "Features", "parts": [
+            {"name": name, "kind": "box", "dimensions_mm": [40, 12, 6]}
+            for name in (
+                "front_hood", "windshield", "cabin_roof", "rear_window",
+                "rear_trunk", "rear_bumper", "side_door_left",
+                "side_mirror_left",
+            )
+        ] + [
+            {"name": f"wheel_{i}", "kind": "cylinder", "radius_mm": 3, "height_mm": 2}
+            for i in range(4)
+        ],
+    })
+    assert evaluate_required_component_coverage(comprehensive, requested)["pass"]
+
+
+def test_generic_assembly_group_correction_reverifies_actual_brep(tmp_path):
+    from app.cad_assembly_repair import suggest_group_attachment
+
+    blueprint = CadBlueprint.model_validate({
+        "title": "Abstract two-island assembly",
+        "parts": [
+            {"name": "base_A", "kind": "box", "dimensions_mm": [1000, 500, 80]},
+            {"name": "protruding_B", "kind": "box", "dimensions_mm": [30, 40, 40],
+             "position_mm": [530, 0, 0]},
+        ],
+    })
+    previous = build_cad(blueprint, tmp_path / "before")
+    assert not previous["assembly_qa"]["pass"]
+    correction = suggest_group_attachment(blueprint, previous)
+    assert correction["changed"]
+    assert correction["moves"][0]["distance_mm"] < 40
+    assert correction["blueprint"].parts[0].position_mm == (0, 0, 0)
+    actual = build_cad(correction["blueprint"], tmp_path / "after")
+    assert actual["assembly_qa"]["pass"]
+    assert actual["assembly_qa"]["measurement"] == "brep_closest_solid_distance"
+
+
+def test_generic_assembly_correction_does_not_drag_remote_parts(tmp_path):
+    from app.cad_assembly_repair import suggest_group_attachment
+
+    blueprint = CadBlueprint.model_validate({
+        "title": "Remote islands",
+        "parts": [
+            {"name": "anchor", "kind": "box", "dimensions_mm": [50, 30, 20]},
+            {"name": "island", "kind": "box", "dimensions_mm": [50, 30, 20],
+             "position_mm": [2000, 0, 0]},
+        ],
+    })
+    verdict = build_cad(blueprint, tmp_path)
+    proposal = suggest_group_attachment(blueprint, verdict)
+    assert not proposal["changed"]
+    assert "no safe corrections" in proposal["reason"]
+
+
+def test_component_coverage_handles_paired_positions_and_generic_descriptors():
+    from app.cad_semantic_qa import evaluate_required_component_coverage
+
+    plan = CadBlueprint.model_validate({
+        "title": "Four generic attachments",
+        "parts": [
+            {"name": name, "kind": "box", "dimensions_mm": [20, 15, 8]}
+            for name in (
+                "front_bumper", "rear_bumper", "side_mirror_left", "side_mirror_right"
+            )
+        ],
+    })
+    verdict = evaluate_required_component_coverage(plan, [
+        "Front and rear bumper fasciae",
+        "Two side-view mirror housings",
+    ])
+    assert verdict["pass"]
+    assert verdict["matched"] == 2
+
+
+def test_component_coverage_matches_identity_not_surface_descriptors():
+    from app.cad_semantic_qa import evaluate_required_component_coverage
+
+    plan = CadBlueprint.model_validate({
+        "title": "All semantic parts",
+        "parts": [
+            {"name": label, "kind": "box", "dimensions_mm": [20, 15, 8]}
+            for label in (
+                "hood", "windshield", "cabin_roof", "rear_window",
+                "front_bumper", "headlight", "side_mirror", "door",
+            )
+        ],
+    })
+    verdict = evaluate_required_component_coverage(plan, [
+        "Front hood plane", "Windshield slope", "Roof plane",
+        "Rear window slope", "Side door panels", "Front bumper fascia",
+        "Headlight recessed volumes", "Side mirror protrusions",
+    ])
+    assert verdict["pass"]
+    assert verdict["matched"] == verdict["checked"]
+
+
+def test_optional_null_schema_fields_removed_without_weakening_geometry():
+    source = {
+        "title": "Valid structural piece", "units": None, "assembly_mode": None,
+        "parts": [{
+            "name": "member", "kind": "box",
+            "dimensions_mm": [50, 10, 20],
+            "profile_plane": None, "profile_points_mm": None,
+            "radius_mm": None, "height_mm": None,
+        }],
+    }
+    normalized = cad_experiment._prune_omitted_optional_fields(source)
+    plan = CadBlueprint.model_validate(normalized)
+    assert plan.parts[0].profile_plane == "xy"
+    assert plan.units == "mm"
+    broken = {
+        "title": "Bad geometry",
+        "parts": [{"name": "member", "kind": "profile_extrusion",
+                   "height_mm": 10, "profile_points_mm": None}],
+    }
+    with pytest.raises(ValueError, match="profile_extrusion requires"):
+        CadBlueprint.model_validate(cad_experiment._prune_omitted_optional_fields(broken))
+
+
+def test_llm_blueprint_schema_requires_correct_shape_fields_not_null_everywhere():
+    from app.cad_engine import cad_generation_schema
+
+    schema = cad_generation_schema()
+    assert schema["type"] == "object"
+    assert schema["required"] == ["title", "parts"]
+    shapes = schema["properties"]["parts"]["items"]["oneOf"]
+    by_kind = {item["properties"]["kind"]["enum"][0]: item for item in shapes}
+    assert len(by_kind) == 7
+    for kind, spec in by_kind.items():
+        assert set(spec["required"]).issubset(spec["properties"])
+        assert "kind" in spec["required"] and "name" in spec["required"]
+        assert "position_mm" not in spec["required"]  # implicit origin permitted
+        assert spec["properties"]["kind"]["enum"] == [kind]
+        if kind != "profile_extrusion":
+            assert "profile_points_mm" not in spec["properties"]
+    assert {"profile_points_mm", "height_mm"}.issubset(
+        by_kind["profile_extrusion"]["required"]
+    )
+    assert "loft_sections_mm" in by_kind["section_loft"]["required"]
+    # Positive dimensions are expressed at the constrained-generation boundary,
+    # so negative size hallucinations should be rejected before BRep construction.
+    assert by_kind["box"]["properties"]["dimensions_mm"]["items"]["exclusiveMinimum"] == 0
+    assert by_kind["cylinder"]["properties"]["height_mm"]["exclusiveMinimum"] == 0
+    assert by_kind["profile_extrusion"]["properties"]["height_mm"]["exclusiveMinimum"] == 0
+    assert by_kind["section_loft"]["properties"]["section_axis"]["enum"] == ["x", "y", "z"]
+    assert "section_axis" not in by_kind["section_loft"]["required"]
+
+
+
+@pytest.mark.parametrize('anchor,island', [
+    ({'name': 'anchor', 'kind': 'sphere', 'radius_mm': 10},
+     {'name': 'island', 'kind': 'sphere', 'radius_mm': 10, 'position_mm': [18, 18, 0]}),
+    ({'name': 'anchor', 'kind': 'tube', 'radius_mm': 20, 'inner_radius_mm': 14, 'height_mm': 20},
+     {'name': 'island', 'kind': 'sphere', 'radius_mm': 6}),
+])
+def test_exact_surface_attachment_repairs_overlapping_bounds(tmp_path, anchor, island):
+    from app.cad_assembly_repair import suggest_group_attachment
+
+    blueprint = CadBlueprint.model_validate({'title': 'Surface attachment', 'parts': [anchor, island]})
+    before = build_cad(blueprint, tmp_path / 'before')
+    assert not before['assembly_qa']['pass']
+    assert before['assembly_qa']['nearest_noncontact_pairs'][0]['gap_mm'] > 1
+    proposal = suggest_group_attachment(blueprint, before)
+    assert proposal['changed']
+    assert proposal['blueprint'].parts[0] == blueprint.parts[0]
+    assert proposal['blueprint'].parts[1].rotation_deg == blueprint.parts[1].rotation_deg
+    assert proposal['moves'][0]['measurement'] == 'brep_closest_points'
+    after = build_cad(proposal['blueprint'], tmp_path / 'after')
+    assert after['assembly_qa']['pass']
+    assert not after['assembly_qa']['physical_fit_verified']
+
+
+def test_exact_attachment_preserves_rigid_group_and_accounts_for_moved_target(tmp_path):
+    from app.cad_assembly_repair import suggest_group_attachment
+
+    blueprint = CadBlueprint.model_validate({'title': 'Island chain', 'parts': [
+        {'name': 'anchor', 'kind': 'box', 'dimensions_mm': [100, 30, 30]},
+        {'name': 'middle_a', 'kind': 'box', 'dimensions_mm': [10, 10, 10], 'position_mm': [60, 0, 0]},
+        {'name': 'middle_b', 'kind': 'box', 'dimensions_mm': [10, 10, 10], 'position_mm': [70, 0, 0]},
+        {'name': 'end', 'kind': 'box', 'dimensions_mm': [10, 10, 10], 'position_mm': [86, 0, 0]},
+    ]})
+    before = build_cad(blueprint, tmp_path / 'before')
+    assert len(before['assembly_qa']['groups']) == 3
+    proposal = suggest_group_attachment(blueprint, before)
+    fixed = {p.name: p for p in proposal['blueprint'].parts}
+    assert fixed['anchor'] == blueprint.parts[0]
+    assert fixed['middle_b'].position_mm[0] - fixed['middle_a'].position_mm[0] == 10
+    assert fixed['end'].position_mm[0] == pytest.approx(75)
+    after = build_cad(proposal['blueprint'], tmp_path / 'after')
+    assert after['assembly_qa']['pass']
+
+
+def test_empty_solid_evidence_is_failed_not_exception():
+    verdict = evaluate_assembly_solids({}, {})
+    assert not verdict['pass']
+    assert verdict['attachment_candidates'] == []
+
+
+def test_accepted_assembly_beats_higher_visual_score_with_disconnected_parts(tmp_path, monkeypatch):
+    monkeypatch.setattr(cad_experiment, 'JOBS_ROOT', tmp_path)
+    disconnected = {'title': 'Visually plausible but broken', 'parts': [
+        {'name': 'first', 'kind': 'box', 'dimensions_mm': [10, 10, 10]},
+        {'name': 'second', 'kind': 'box', 'dimensions_mm': [10, 10, 10], 'position_mm': [300, 0, 0]},
+    ]}
+    fake = FakeOllama([
+        {'subject_description': 'A connected geometric structure'},
+        disconnected,
+        {'passed': True, 'subject_recognizable': True, 'reference_match_score': .98, 'findings': []},
+        BLUEPRINT,
+        {'passed': True, 'subject_recognizable': True, 'reference_match_score': .90, 'findings': []},
+    ])
+    plan, report, _ = asyncio.run(cad_experiment.generate_cad(
+        'A connected geometric structure', 'mock', client=fake, reference_images=['reference'],
+    ))
+    assert plan.title == BLUEPRINT['title']
+    assert report['assembly_qa']['pass']
+    assert report['reference_visual_qa']['reference_match_score'] == .90
+    assert not report['repair_exhausted']
+    assert 'attachment_candidates' not in fake.calls[3]['prompt']
+
+
+def test_reference_transport_failure_retains_export_without_certifying_quality(tmp_path, monkeypatch):
+    import httpx
+
+    monkeypatch.setattr(cad_experiment, 'JOBS_ROOT', tmp_path)
+
+    class ReviewOutage(FakeOllama):
+        async def chat_json(self, **kwargs):
+            if len(self.calls) == 2:
+                raise httpx.ReadTimeout('independent judge unavailable')
+            return await super().chat_json(**kwargs)
+
+    fake = ReviewOutage([{'subject_description': 'A connected geometric structure'}, BLUEPRINT])
+    _, report, output = asyncio.run(cad_experiment.generate_cad(
+        'A connected geometric structure', 'mock', client=fake, reference_images=['reference'],
+    ))
+    assert report['reference_visual_qa']['status'] == 'unverified'
+    assert report['reference_visual_qa']['passed'] is None
+    assert (output / 'assembly.step').stat().st_size > 100
+    assert (output / 'assembly.glb').stat().st_size > 100
+
+
+def test_structured_component_identity_separates_visual_detail_and_enforces_count():
+    from app.cad_semantic_qa import evaluate_required_component_coverage
+
+    requirement = {'identity': 'support', 'minimum_count': 2,
+                   'geometry_notes': 'Slight convex curvature with longitudinal arch and integrated recesses'}
+    plan = CadBlueprint.model_validate({'title': 'Generic supports', 'parts': [
+        {'name': name, 'kind': 'box', 'dimensions_mm': [30, 10, 5]}
+        for name in ('left_support', 'right_support')
+    ]})
+    assert evaluate_required_component_coverage(plan, [requirement])['pass']
+    one = plan.model_copy(update={'parts': plan.parts[:1]})
+    assert not evaluate_required_component_coverage(one, [requirement])['pass']
+    unrelated = plan.model_copy(update={'parts': [
+        p.model_copy(update={'name': f'other_{i}'}) for i, p in enumerate(plan.parts)
+    ]})
+    assert not evaluate_required_component_coverage(unrelated, [requirement])['pass']
+
+
+def test_reference_brief_requests_structured_component_contract():
+    fake = FakeOllama([{'subject_description': 'Abstract support structure', 'required_components': [
+        {'identity': 'support', 'minimum_count': 2, 'geometry_notes': 'sloping top surface'},
+    ]}])
+    brief = asyncio.run(cad_experiment._reference_geometry_brief(fake, 'Abstract supports', ['reference']))
+    assert brief['status'] == 'verified'
+    assert brief['required_components'][0]['minimum_count'] == 2
+    assert fake.calls[0]['schema']['properties']['required_components']['items'] == {
+        '$ref': '#/$defs/CadRequiredComponent',
+    }

@@ -9,11 +9,3 @@ jobs/
 *.blend1
 *.blend2
 .DS_Store
-
-# Local quality checks and generated model artifacts
-.ruff_cache/
-.mypy_cache/
-.coverage
-htmlcov/
-blender-artifacts/
-cad-artifacts/

@@ -30,7 +30,7 @@ def test_dashboard_has_cpu_cad_choice_and_step_download():
     assert 'value="cpu_cad"' in html
     assert '/cad' in html
     assert 'glb|obj|stl|step' in html
-    assert 'CAD model ready for visual review' in html
+    assert 'CAD model exported for review' in html
 
 
 def test_cpu_cad_job_status_and_viewer_exports(tmp_path, monkeypatch):
@@ -48,7 +48,7 @@ def test_cpu_cad_job_status_and_viewer_exports(tmp_path, monkeypatch):
 
         async def get(self, url, **kwargs):
             suffix = url.rsplit("/", 1)[-1]
-            assert suffix in ("step", "stl", "glb", "json")
+            assert suffix in ("step", "stl", "glb", "json", "history")
             return httpx.Response(200, content=b"x" * 220, request=httpx.Request("GET", url))
 
         async def delete(self, url, **kwargs):
@@ -74,7 +74,7 @@ def test_cpu_cad_job_status_and_viewer_exports(tmp_path, monkeypatch):
     assert status["generic_model"]["version"] == 1
     assert status["cad"]["part_count"] == 3
     assert status["quality_gate"]["recognizable"] is None
-    for suffix in (".step", ".stl", ".glb", "-cad.json", "-qa.json"):
+    for suffix in (".step", ".stl", ".glb", "-cad.json", "-cad-history.json", "-qa.json"):
         assert (root / "exports" / f"model-v1{suffix}").is_file()
 
 
@@ -137,6 +137,10 @@ def test_real_cpu_geometry_flows_through_standard_job_exports(tmp_path, monkeypa
         ],
     })
     report = build_cad(blueprint, worker_dir)
+    (worker_dir / "repair-history.json").write_text(
+        json.dumps({"attempts": [{"attempt": 1, "status": "geometry_reviewed",
+                                  "blueprint": blueprint.model_dump()}]})
+    )
 
     class LocalWorkerTransport:
         def __init__(self, **kwargs):
@@ -158,7 +162,8 @@ def test_real_cpu_geometry_flows_through_standard_job_exports(tmp_path, monkeypa
         async def get(self, url, **kwargs):
             suffix = url.rsplit("/", 1)[-1]
             filename = {"step": "assembly.step", "stl": "assembly.stl",
-                        "glb": "assembly.glb", "json": "manifest.json"}[suffix]
+                        "glb": "assembly.glb", "json": "manifest.json",
+                            "history": "repair-history.json"}[suffix]
             return httpx.Response(200, request=httpx.Request("GET", url),
                                   content=(worker_dir / filename).read_bytes())
 
@@ -178,9 +183,12 @@ def test_real_cpu_geometry_flows_through_standard_job_exports(tmp_path, monkeypa
 
 def test_dashboard_cad_route_creates_trackable_job(tmp_path, monkeypatch):
     ident, root = create_job_in_root(tmp_path, monkeypatch)
+    # Named real-world objects must not be blocked by an arbitrary ten-character gate.
+    (root / "request.json").write_text(json.dumps({"prompt": "Prius", "intended_use": "rendering"}))
     invocations = []
 
-    async def fake_cad_runner(job_id, version, *, model=None):
+    async def fake_cad_runner(job_id, version, *, model=None, reference_mode="shape_guidance",
+                              assembly_mode="single"):
         invocations.append((job_id, version))
 
     monkeypatch.setattr(cad_jobs, "run_cad_job", fake_cad_runner)
@@ -212,3 +220,31 @@ def test_cad_sidecar_has_internal_api_and_external_ollama_networks():
     assert cad["environment"]["CAD_EXPERIMENT_ENABLED"] == "1"
     assert compose["networks"]["worker-net"]["internal"] is True
     assert cad["mem_limit"]
+
+
+def test_cad_reads_uploaded_images_and_normalizes_for_proxy(tmp_path, monkeypatch):
+    import base64
+
+    from PIL import Image
+
+    _ident, root = create_job_in_root(tmp_path, monkeypatch)
+    source = root / "references" / "a-test.png"
+    Image.new("RGB", (1300, 750), "navy").save(source)
+    (root / "references.json").write_text(json.dumps([
+        {"stored_name": "a-test.png", "uploaded_at": "2026-10-11T00:00:00Z"}
+    ]))
+    refs = cad_jobs._load_reference_images(root)
+    assert len(refs) == 1
+    raw = base64.b64decode(refs[0])
+    assert raw[:2] == bytes.fromhex("ffd8")
+    assert len(raw) < 425_000
+
+
+def test_dashboard_reference_route_and_input_are_present():
+    html = dashboard_page().body.decode()
+    assert 'id="jobReferences"' in html
+    assert 'id="jobReferenceMode"' in html
+    assert 'id="jobAssemblyMode"' in html
+    assert 'id="cadComparisonPanel"' in html
+    assert 'reference_match_score' in html
+    assert "/references" in html

@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field, model_validator
 
 class CadPart(BaseModel):
     name: str = Field(min_length=1, max_length=60, pattern=r"^[A-Za-z][A-Za-z0-9_.-]*$")
-    kind: Literal["box", "cylinder", "cone", "sphere", "tube"]
+    kind: Literal["box", "cylinder", "cone", "sphere", "tube", "profile_extrusion", "section_loft"]
     position_mm: tuple[float, float, float] = (0, 0, 0)
     rotation_deg: tuple[float, float, float] = (0, 0, 0)
     dimensions_mm: tuple[float, float, float] | None = None
@@ -23,6 +23,12 @@ class CadPart(BaseModel):
     top_radius_mm: float | None = None
     inner_radius_mm: float | None = None
     height_mm: float | None = None
+    profile_points_mm: list[tuple[float, float]] | None = Field(default=None, max_length=24)
+    profile_plane: Literal["xy", "xz", "yz"] = "xy"
+    loft_sections_mm: list[tuple[float, float, float, float, float]] | None = Field(
+        default=None, max_length=12
+    )
+    section_axis: Literal["x", "y", "z"] = "z"
 
     @model_validator(mode="after")
     def check_geometry(self) -> CadPart:
@@ -33,6 +39,34 @@ class CadPart(BaseModel):
             raise ValueError("Position exceeds 10000 mm")
         if any(abs(v) > 360 for v in self.rotation_deg):
             raise ValueError("Rotation exceeds 360 degrees")
+        if self.kind == "profile_extrusion":
+            pts = self.profile_points_mm or []
+            if not 3 <= len(pts) <= 24:
+                raise ValueError("profile_extrusion requires 3 to 24 2D profile points")
+            if self.height_mm is None or not math.isfinite(self.height_mm) or not 0 < self.height_mm <= 20000:
+                raise ValueError("profile_extrusion requires positive extrusion height_mm")
+            if any(not math.isfinite(v) or abs(v) > 20000 for point in pts for v in point):
+                raise ValueError("Profile contains nonfinite/out-of-range coordinates")
+            signed_area = sum(
+                pts[i][0] * pts[(i + 1) % len(pts)][1]
+                - pts[(i + 1) % len(pts)][0] * pts[i][1]
+                for i in range(len(pts))
+            ) / 2
+            if abs(signed_area) < 1e-3:
+                raise ValueError("Profile has zero/tiny planar area")
+            return self
+        if self.kind == "section_loft":
+            stations = self.loft_sections_mm or []
+            if not 2 <= len(stations) <= 12:
+                raise ValueError("section_loft requires 2 to 12 stations")
+            if any(not math.isfinite(v) or abs(v) > 20000 for entry in stations for v in entry):
+                raise ValueError("Loft stations contain nonfinite/out-of-range coordinates")
+            if any(entry[1] <= 0 or entry[2] <= 0 for entry in stations):
+                raise ValueError("Loft station widths/depths must be positive")
+            if any(stations[i + 1][0] - stations[i][0] <= 0.01
+                   for i in range(len(stations) - 1)):
+                raise ValueError("Loft station Z coordinates must be strictly increasing")
+            return self
         if self.kind == "box":
             if self.dimensions_mm is None:
                 raise ValueError("Box requires dimensions_mm")
@@ -57,6 +91,7 @@ class CadBlueprint(BaseModel):
     title: str = Field(min_length=1, max_length=160)
     units: Literal["mm"] = "mm"
     parts: list[CadPart] = Field(min_length=1, max_length=32)
+    assembly_mode: Literal["single", "independent"] = "single"
 
     @model_validator(mode="after")
     def unique_part_names(self) -> CadBlueprint:
@@ -66,18 +101,120 @@ class CadBlueprint(BaseModel):
         return self
 
 
+def cad_generation_schema() -> dict:
+    """Minimal per-shape LLM schema. Avoid forcing irrelevant nullable fields.
+
+    The true source of validation remains CadBlueprint/Pydantic after inference.
+    """
+    number = {"type": "number"}
+    positive = {"type": "number", "exclusiveMinimum": 0, "maximum": 20000}
+    triple = {"type": "array", "items": number, "minItems": 3, "maxItems": 3}
+    sizes = {"type": "array", "items": positive, "minItems": 3, "maxItems": 3}
+    pair = {"type": "array", "items": number, "minItems": 2, "maxItems": 2}
+    loft_section = {"type": "array", "items": number, "minItems": 5, "maxItems": 5}
+    common = {
+        "name": {"type": "string", "minLength": 1},
+        "position_mm": triple,
+        "rotation_deg": triple,
+    }
+    variants = {
+        "box": {"dimensions_mm": sizes},
+        "cylinder": {"radius_mm": positive, "height_mm": positive},
+        "cone": {"radius_mm": positive, "top_radius_mm": positive, "height_mm": positive},
+        "sphere": {"radius_mm": positive},
+        "tube": {"radius_mm": positive, "inner_radius_mm": positive, "height_mm": positive},
+        "profile_extrusion": {
+            "profile_plane": {"type": "string", "enum": ["xy", "xz", "yz"]},
+            "profile_points_mm": {
+                "type": "array", "items": pair, "minItems": 3, "maxItems": 24,
+            },
+            "height_mm": positive,
+        },
+        "section_loft": {
+            "section_axis": {"type": "string", "enum": ["x", "y", "z"]},
+            "loft_sections_mm": {
+                "type": "array", "items": loft_section, "minItems": 2, "maxItems": 12,
+            },
+        },
+    }
+    shapes = [
+        {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                **common,
+                "kind": {"type": "string", "enum": [kind]},
+                **properties,
+            },
+            "required": ["name", "kind", *(
+                name for name in properties if name not in ("profile_plane", "section_axis")
+            )],
+        }
+        for kind, properties in variants.items()
+    ]
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "title": {"type": "string", "minLength": 1},
+            "units": {"type": "string", "enum": ["mm"]},
+            "parts": {"type": "array", "items": {"oneOf": shapes},
+                      "minItems": 1, "maxItems": 32},
+        },
+        "required": ["title", "parts"],
+    }
+
+
 CAD_SYSTEM_PROMPT = """
 You are a parametric CAD designer. Return ONLY the requested JSON blueprint.
 Create physically plausible, separately named, correctly positioned components.
 Choose geometry from the user's description; NEVER omit major requested components.
 Units are millimetres. Coordinate system is Z-up. Origin should be around assembly centre.
-Allowed part kinds: box, cylinder, cone, sphere, tube.
+Allowed part kinds: box, cylinder, cone, sphere, tube, profile_extrusion, section_loft.
 box: dimensions_mm=[x,y,z] are full sizes.
 cylinder: radius_mm and height_mm (along local Z).
 cone: radius_mm (bottom), top_radius_mm (top), height_mm (local Z).
 sphere: radius_mm.
 tube: radius_mm outer, inner_radius_mm inner, height_mm (local Z).
+profile_extrusion: profile_points_mm=[[u,v],...] in the selected
+profile_plane (xy, xz or yz), height_mm = symmetric SOLID EXTRUSION DEPTH
+normal to that plane. For a side silhouette needing vertical roof slopes,
+choose profile_plane="xz": [u,v]=[horizontal X, vertical Z], then give
+height_mm the WIDTH along Y. For front silhouettes choose "yz".
+Extrusion is centered about the sketch plane. Points describe actual outer
+contour with sloped sides, not a rectangular bounding box.
+Use this for angled/trapezoidal/curved-like polygon silhouettes; use
+rotation_deg only when the 3 named profile planes cannot represent the outline.
+section_loft: loft_sections_mm=[[station,width,depth,offset_u,offset_v], ...]
+at 2-12 strictly increasing stations along section_axis="x", "y" or "z".
+- section_axis="x": station along local X; width along Y, depth along Z;
+  offsets are Y and Z. Suitable for long tapered horizontal silhouettes.
+- section_axis="y": station along local Y; width along Z, depth along X;
+  offsets are Z and X.
+- section_axis="z" (default): station along local Z; width along X,
+  depth along Y; offsets are X and Y.
+Rectangular cross-sections form smooth lofts without hand-computed Euler
+rotations. Use position_mm and rotation_deg only for the final whole solid.
+Prefer these general profile tools when plain boxes/cylinders cannot reproduce
+the requested silhouette. Avoid stacks of blocky rectangles as a substitute
+for a coherent profile. All sections/points are explicitly chosen from prompt
+and reference understanding; never use object-name templates.
+Coordinate contract: WORLD Z is vertical, WORLD X is longitudinal,
+WORLD Y is lateral, subject to the reference. A profile_extrusion
+with plane=xz is the MOST DIRECT way to make a sloping roof or tall
+side elevation without confusing local coordinates: [x,z] coordinates,
+depth along world Y. Do not substitute a full-height box when the
+reference visibly has a trapezoidal/sloping outline.
+A section_loft can run along any LOCAL section_axis. Choose the axis that
+matches the long dimension before choosing station widths, depths and offsets.
+Think through final world-space bounds after all rotations and translations.
 Every part may have position_mm=[x,y,z] and rotation_deg=[rx,ry,rz].
+Critical axis math for ALL solids: cylinders and tubes initially point along Z.
+To align their AXIS to world Y, use rotation_deg=[90,0,0], NOT [0,90,0].
+To align their AXIS to world X, use rotation_deg=[0,90,0].
+To keep axial orientation vertical, use rotation_deg=[0,0,0].
+Reason explicitly about full world-space rotated dimensions before claiming
+parts are mounted, co-axial, radial or attached.
 Compose separate components with sane proportions and correct contact/overlap at joints.
 Think in physical assembly relationships BEFORE choosing numeric positions:
 - Z is UP. For hanging objects, the support must extend toward the ceiling.
@@ -89,7 +226,7 @@ Think in physical assembly relationships BEFORE choosing numeric positions:
 - Ensure every requested part is present; do not replace a part with a text label.
 - Return separate editable parts, not one undifferentiated mesh.
 Do not emit code, macros, loops, copies, material-only objects, or unsupported kinds.
-Do not use fan-specific, lamp-specific or any object templates.
+For single assembled objects use assembly_mode=single and ensure all named parts form one physically connected assembly.\nFor intentionally separated independent objects ONLY use assembly_mode=independent.\nDo not use fan-specific, lamp-specific or any object templates.
 """
 
 
@@ -103,18 +240,24 @@ def build_cad(blueprint: CadBlueprint, output_dir: Path) -> dict:
         Compound,
         Cone,
         Cylinder,
+        Plane,
+        Polygon,
         Pos,
+        Rectangle,
         Rot,
         Sphere,
         export_step,
         export_stl,
+        extrude,
         import_step,
+        loft,
     )
 
     output_dir.mkdir(parents=True, exist_ok=True)
     solids = []
     scene = trimesh.Scene()
     part_evidence = []
+    evaluated_bounds: dict[str, list[list[float]]] = {}
     for part in blueprint.parts:
         if part.kind == "box":
             solid = Box(*part.dimensions_mm)
@@ -127,6 +270,29 @@ def build_cad(blueprint: CadBlueprint, output_dir: Path) -> dict:
             outer = Cylinder(part.radius_mm, part.height_mm)
             bore = Cylinder(part.inner_radius_mm, part.height_mm + 2)
             solid = outer - bore
+        elif part.kind == "profile_extrusion":
+            # World-aligned sketch planes remove local/world orientation ambiguity.
+            # Both-sided extrusion keeps position_mm at the profile's centre.
+            base = Polygon(*part.profile_points_mm, align=None)
+            plane = {"xy": Plane.XY, "xz": Plane.XZ, "yz": Plane.YZ}[part.profile_plane]
+            sketch = plane * base
+            solid = extrude(sketch, amount=part.height_mm / 2, both=True)
+        elif part.kind == "section_loft":
+            sections = []
+            for station, width, depth, offset_u, offset_v in part.loft_sections_mm:
+                if part.section_axis == "x":
+                    # Local section X/Y axes become assembly Y/Z respectively.
+                    plane = Plane(origin=(station, offset_u, offset_v),
+                                  x_dir=(0, 1, 0), z_dir=(1, 0, 0))
+                elif part.section_axis == "y":
+                    # Local section X/Y axes become assembly Z/X respectively.
+                    plane = Plane(origin=(offset_v, station, offset_u),
+                                  x_dir=(0, 0, 1), z_dir=(0, 1, 0))
+                else:
+                    plane = Plane(origin=(offset_u, offset_v, station),
+                                  x_dir=(1, 0, 0), z_dir=(0, 0, 1))
+                sections.append(plane * Rectangle(width, depth))
+            solid = loft(sections)
         else:
             solid = Sphere(part.radius_mm)
         solid = Pos(*part.position_mm) * Rot(*part.rotation_deg) * solid
@@ -138,9 +304,15 @@ def build_cad(blueprint: CadBlueprint, output_dir: Path) -> dict:
         part_stl = output_dir / f".part-{len(solids)}.stl"
         export_stl(solid, str(part_stl))
         mesh = trimesh.load_mesh(str(part_stl), force="mesh")
+        # STL vertex welding can collapse pole/seam triangles on valid curved
+        # BReps. Drop only zero-area/repeated-index faces, never fill real holes.
+        mesh.update_faces(mesh.nondegenerate_faces(height=1e-12))
+        mesh.remove_unreferenced_vertices()
         if mesh.is_empty or not mesh.is_watertight:
             raise ValueError(f"Non-watertight tessellation: {part.name}")
         scene.add_geometry(mesh, geom_name=part.name, node_name=part.name)
+        bounds = solid.bounding_box()
+        evaluated_bounds[part.name] = [list(bounds.min), list(bounds.max)]
         part_stl.unlink(missing_ok=True)
         part_evidence.append({"name": part.name, "kind": part.kind, "volume_mm3": volume,
                               "mesh_watertight": bool(mesh.is_watertight)})
@@ -150,7 +322,9 @@ def build_cad(blueprint: CadBlueprint, output_dir: Path) -> dict:
     stl = output_dir / "assembly.stl"
     glb = output_dir / "assembly.glb"
     export_step(assembly, str(step))
-    export_stl(assembly, str(stl))
+    # Use the same validated triangulations in both mesh formats; re-tessellating
+    # the compound would reintroduce the collapsed pole triangles removed above.
+    trimesh.util.concatenate(list(scene.geometry.values())).export(str(stl))
     glb.write_bytes(scene.export(file_type="glb"))
 
     imported = import_step(str(step))
@@ -164,15 +338,29 @@ def build_cad(blueprint: CadBlueprint, output_dir: Path) -> dict:
     sizes = {fmt: (output_dir / f"assembly.{fmt}").stat().st_size for fmt in ("step", "stl", "glb")}
     if min(sizes.values()) < 100:
         raise ValueError("CAD export unexpectedly small")
+    from .cad_assembly_qa import evaluate_assembly_solids
+    from .cad_preview import render_cad_views
+
+    assembly_qa = evaluate_assembly_solids(
+        {part.name: solid for part, solid in zip(blueprint.parts, solids, strict=True)},
+        evaluated_bounds,
+        assembly_mode=blueprint.assembly_mode,
+    )
+    visibility_qa: dict = {}
+    render_files = render_cad_views(scene, output_dir, visibility_out=visibility_qa)
     result = {
         "ok": True,
         "title": blueprint.title,
         "units": "mm",
         "part_count": len(part_evidence),
         "parts": part_evidence,
+        "part_bounds_mm": evaluated_bounds,
         "step_reimport_valid": valid,
+        "assembly_qa": assembly_qa,
+        "renders": render_files,
+        "part_visibility_qa": visibility_qa,
         "exports": sizes,
-        "quality_scope": "geometric integrity only; not visual/semantic correctness or print assembly",
+        "quality_scope": "STEP integrity and BRep solid-distance screening; actual mating contact, visual similarity and print fit require independent review",
     }
     (output_dir / "manifest.json").write_text(
         json.dumps({"blueprint": blueprint.model_dump(), "validation": result}, indent=2),

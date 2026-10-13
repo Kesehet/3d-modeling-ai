@@ -125,6 +125,10 @@ def test_llm_schema_retry_then_geometry(tmp_path, monkeypatch):
     assert report["attempts"] == 2
     assert out.is_dir()
     assert "Previous attempt failed" in fake.calls[1]["prompt"]
+    # Repair is grounded in the actual rejected draft, not a free-form restart.
+    assert "Previous rejected JSON blueprint" in fake.calls[1]["prompt"]
+    assert '"title": "Invalid"' in fake.calls[1]["prompt"]
+
     assert fake.calls[0]["schema"]["type"] == "object"
 
 

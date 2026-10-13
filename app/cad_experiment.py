@@ -218,6 +218,8 @@ async def generate_cad(
     best_grade: tuple[float, float, float, float, float] = (-1.0, -1.0, -1.0, -1.0, -1.0)
     previous_evidence: dict | None = None
     invalid_response: dict | None = None
+    # Visual feedback can demand a nonprimitive silhouette on the next attempt.
+    needs_surface_refinement = False
     repair_history: list[dict] = []
     try:
         for attempt in range(1, 4):
@@ -231,7 +233,15 @@ async def generate_cad(
                 query += ("\nPrevious rejected JSON blueprint (fix invalid fields, preserve "
                           "correct components):\n"
                           + json.dumps(invalid_response, ensure_ascii=False)[:12000])
-            if outline_complex:
+            if needs_surface_refinement:
+                query += (
+                    "\nIndependent real-render vision found the current outer shape "
+                    "visually primitive or unrecognizable. Replace the main visible "
+                    "outer silhouette with a measurable profile_extrusion or section_loft "
+                    "derived from the reference geometry brief, retaining verified "
+                    "component layout. Do not merely attach cosmetic extra boxes."
+                )
+            if outline_complex or needs_surface_refinement:
                 query += (
                     "\nShape coverage contract: source image contains tapered/sloped/"
                     "nonorthogonal silhouette. At least one main OUTER component MUST "
@@ -314,7 +324,7 @@ async def generate_cad(
                     "error": error,
                 })
                 continue
-            if outline_complex and not any(
+            if (outline_complex or needs_surface_refinement) and not any(
                 part.kind in ("profile_extrusion", "section_loft") for part in blueprint.parts
             ):
                 error = (
@@ -400,6 +410,18 @@ async def generate_cad(
             faults = list(graph["failures"])
             if review["status"] == "failed":
                 faults.extend(review.get("findings") or ["Reference subject mismatch"])
+                # Detect the semantic cause of a failed rendered silhouette and
+                # escalate the *next* blueprint's geometric vocabulary. This is
+                # subject-agnostic and uses independent visual evidence only.
+                critique = " ".join(review.get("findings") or []).lower()
+                if reference_brief["status"] == "verified" and any(
+                    phrase in critique for phrase in (
+                        "primitive blocks", "blocky", "too simplified",
+                        "overly simplified", "primitive abstraction",
+                        "flat silhouette", "wrong outer profile",
+                    )
+                ):
+                    needs_surface_refinement = True
             repair_history.append({
                 "attempt": attempt,
                 "status": "rejected" if faults else "geometry_reviewed",

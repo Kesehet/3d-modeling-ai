@@ -183,6 +183,8 @@ def test_real_cpu_geometry_flows_through_standard_job_exports(tmp_path, monkeypa
 
 def test_dashboard_cad_route_creates_trackable_job(tmp_path, monkeypatch):
     ident, root = create_job_in_root(tmp_path, monkeypatch)
+    # Named real-world objects must not be blocked by an arbitrary ten-character gate.
+    (root / "request.json").write_text(json.dumps({"prompt": "Prius", "intended_use": "rendering"}))
     invocations = []
 
     async def fake_cad_runner(job_id, version, *, model=None, reference_mode="shape_guidance",

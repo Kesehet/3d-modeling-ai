@@ -28,7 +28,7 @@ jobs:
           sudo apt-get update >/dev/null
           sudo apt-get install -y libgl1 libglu1-mesa libxrender1 libxext6 libsm6 >/dev/null
           python -m pip install ".[cad]"
-      # Explicit Oct 13 unmocked retest of axis-aware loft geometry and numeric bounds.
+      # Explicit Oct 13 retest of failed-vision-driven silhouette repair and axis-aware lofts.
       # Retain strict independent silhouette/contact gates; a failure is evidence, not success.
       # Verify structured component identities, exact surface repair and independent visual quality.
       - name: Unmocked reference-driven geometry/visual repair benchmark

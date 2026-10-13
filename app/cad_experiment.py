@@ -13,7 +13,7 @@ from typing import Literal
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from .cad_assembly_repair import suggest_group_attachment
 from .cad_engine import CAD_SYSTEM_PROMPT, CadBlueprint, build_cad, cad_generation_schema
@@ -33,11 +33,20 @@ EXPORTS = {"step": "assembly.step", "stl": "assembly.stl",
 
 
 class CadRequest(BaseModel):
-    prompt: str = Field(min_length=10, max_length=4000)
+    prompt: str = Field(min_length=1, max_length=4000)
     model: str | None = Field(default=None, min_length=2, max_length=120)
     reference_images: list[str] = Field(default_factory=list, max_length=3)
     reference_mode: str = Field(default="shape_guidance", pattern="^(exact_match|shape_guidance|inspiration)$")
     assembly_mode: Literal["single", "independent"] = "single"
+ 
+    @field_validator("prompt")
+    @classmethod
+    def nonempty_description(cls, value: str) -> str:
+        prompt = value.strip()
+        if not prompt:
+            raise ValueError("Enter an object or modeling description")
+        return prompt
+
 
 
 class CadRequiredComponent(BaseModel):

@@ -149,6 +149,15 @@ def test_api_end_to_end_with_fake_ollama(tmp_path, monkeypatch):
             assert reply.status_code == 200 and len(reply.content) > 100
 
 
+def test_short_named_object_prompt_is_accepted_but_whitespace_is_not():
+    from pydantic import ValidationError
+
+    assert cad_experiment.CadRequest(prompt="Prius").prompt == "Prius"
+    assert cad_experiment.CadRequest(prompt="  Maserati  ").prompt == "Maserati"
+    with pytest.raises(ValidationError):
+        cad_experiment.CadRequest(prompt="     ")
+
+
 def test_disabled_by_default(monkeypatch):
     monkeypatch.delenv("CAD_EXPERIMENT_ENABLED", raising=False)
     with TestClient(app) as client:

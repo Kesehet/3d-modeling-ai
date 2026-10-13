@@ -319,6 +319,26 @@ def test_nonprimitive_generic_shapes_export_true_cad(kind, details, tmp_path):
     assert (tmp_path / "assembly.glb").stat().st_size > 100
 
 
+@pytest.mark.parametrize(("axis", "expected"), [
+    ("x", (100, 40, 20)),
+    ("y", (20, 100, 40)),
+    ("z", (40, 20, 100)),
+])
+def test_loft_station_axis_follows_requested_local_direction(axis, expected, tmp_path):
+    """Measure real exported geometry, not merely the LLM schema."""
+    plan = CadBlueprint.model_validate({
+        "title": "Tapered generic loft", "parts": [{
+            "name": "tapered_body", "kind": "section_loft", "section_axis": axis,
+            "loft_sections_mm": [[0, 40, 20, 0, 0], [100, 20, 10, 0, 0]],
+        }],
+    })
+    report = build_cad(plan, tmp_path)
+    assert report["step_reimport_valid"]
+    actual = trimesh.load(tmp_path / "assembly.glb", force="scene").extents
+    assert tuple(actual) == pytest.approx(expected, abs=0.6)
+    assert report["parts"][0]["volume_mm3"] > 0
+
+
 @pytest.mark.parametrize("bad", [
     {"kind": "profile_extrusion", "height_mm": 20, "profile_points_mm": [[0, 0], [2, 2], [4, 4]]},
     {"kind": "section_loft", "loft_sections_mm": [[2, 5, 6, 0, 0], [1, 5, 6, 0, 0]]},
@@ -560,6 +580,14 @@ def test_llm_blueprint_schema_requires_correct_shape_fields_not_null_everywhere(
         by_kind["profile_extrusion"]["required"]
     )
     assert "loft_sections_mm" in by_kind["section_loft"]["required"]
+    # Positive dimensions are expressed at the constrained-generation boundary,
+    # so negative size hallucinations should be rejected before BRep construction.
+    assert by_kind["box"]["properties"]["dimensions_mm"]["items"]["exclusiveMinimum"] == 0
+    assert by_kind["cylinder"]["properties"]["height_mm"]["exclusiveMinimum"] == 0
+    assert by_kind["profile_extrusion"]["properties"]["height_mm"]["exclusiveMinimum"] == 0
+    assert by_kind["section_loft"]["properties"]["section_axis"]["enum"] == ["x", "y", "z"]
+    assert "section_axis" not in by_kind["section_loft"]["required"]
+
 
 
 @pytest.mark.parametrize('anchor,island', [

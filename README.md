@@ -109,3 +109,29 @@ The same declarative part vocabulary is available to scene generation and loft/c
 The AI chooses profiles, paths, dimensions and placement from the request and references. These operations
 contain no subject-specific geometry. Generated candidates still require visual comparison and strict feature
 review; successful export alone does not certify a finished model.
+
+## Experimental research-first multi-agent CAD
+
+The optional CPU CAD sidecar can run a **research -> design -> component agents ->
+assembly measurement -> targeted repair** workflow instead of one-shot primitives.
+Set `CAD_AGENT_WORKFLOW_ENABLED=1` **only inside the CAD service** to enable it.
+The existing Ollama-backed CAD implementation is unchanged when the flag is absent.
+
+- The research stage uses the existing Wikimedia candidate-fetcher and a **vision-model
+  pixel check**; if no image is visually verified, it stops instead of guessing.
+- One chief planner emits a bounded, generic design brief containing global millimetre
+  coordinates, component dependencies and intended attachment relationships.
+- Up to three independent component jobs run concurrently; dependency edges form a
+  DAG. Each specialist can create at most eight named primitive parts.
+- An independent world-space AABB screening measures unexpected gaps at declared
+  attachments. At most two failing subassemblies are rebuilt with the measured
+  defect and existing successful parts preserved.
+- The workflow persists `research.json`, `design-plan.json`, `agent-report.json`,
+  `manifest.json`, STEP, STL and GLB. Missing references and bad assembly geometry
+  do not pass the quality gate.
+
+**Not yet production-ready:** This is coarse, conservative attachment screening,
+not exact surface distance or subject recognizability. Its CAD vocabulary is
+still box/cylinder/cone/sphere/tube, not the lofted surfaces in the manually
+directed Prius prototype. A real unmocked prompt-to-model benchmark and
+independent visual QA are required before promoting the feature.

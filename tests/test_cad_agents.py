@@ -160,7 +160,7 @@ def test_research_precedes_component_agents_and_repair_preserves_other_work(tmp_
             else:
                 parts = [{"name": "aux_body", "kind": "box",
                           "dimensions_mm": [20, 20, 20],
-                          "position_mm": [110 if correction else 300, 0, 0]}]
+                          "position_mm": [110 if correction else 220, 0, 0]}]
             return SimpleNamespace(data={"title": task, "parts": parts})
 
     async def fake_inspect_candidate(**kwargs):

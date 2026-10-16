@@ -13,7 +13,6 @@ from io import BytesIO
 from pathlib import Path
 
 from PIL import Image
-
 from pydantic import BaseModel, Field, model_validator
 
 from .cad_engine import CAD_SYSTEM_PROMPT, CadBlueprint, CadPart, build_cad

@@ -9,7 +9,6 @@ import asyncio
 import base64
 import json
 import math
-import uuid
 from pathlib import Path
 
 from pydantic import BaseModel, Field, model_validator
@@ -155,7 +154,10 @@ def _reference_image(path: Path) -> str:
 
 async def gather_research(prompt: str, root: Path, client: OllamaProxyClient) -> dict:
     """Research first; only vision-confirmed images become subject evidence."""
-    pack = await research_web_references(prompt, root / "reference-candidates", max_images=2)
+    try:
+        pack = await research_web_references(prompt, root / "reference-candidates", max_images=2)
+    except Exception as exc:
+        raise ValueError(f"Reference research unavailable: {type(exc).__name__}") from exc
     validated = []
     for ref in pack["references"][:4]:
         try:
@@ -261,6 +263,7 @@ async def generate_agent_cad(prompt: str, model: str = REASONING_MODEL,
 
     verdict = assembly_report(plan, groups)
     # Bound cost and scope: repair at most two failed attachments; preserve good groups.
+    repairs = 0
     for failure in verdict["measurements"][:]:
         if failure["gap_mm"] <= next(
             r.tolerance_mm for r in plan.relationships
@@ -268,7 +271,7 @@ async def generate_agent_cad(prompt: str, model: str = REASONING_MODEL,
         ):
             continue
         target = failure["b"]
-        if sum(1 for group in groups if group.startswith("_repaired_")) >= 2:
+        if repairs >= 2:
             break
         original = groups[target]
         try:
@@ -281,8 +284,7 @@ async def generate_agent_cad(prompt: str, model: str = REASONING_MODEL,
             )
         except (ValueError, RuntimeError):
             groups[target] = original
-        groups[f"_repaired_{target}"] = []
-    groups = {k: v for k, v in groups.items() if not k.startswith("_repaired_")}
+        repairs += 1
     verdict = assembly_report(plan, groups)
     parts = [part for task in plan.components for part in groups[task.id]]
     if len(parts) > 32:
@@ -299,4 +301,13 @@ async def generate_agent_cad(prompt: str, model: str = REASONING_MODEL,
     # Fail closed for downstream promotion without destroying evidence.
     result["ok"] = bool(result["ok"] and verdict["pass"])
     (root / "agent-report.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
+    manifest_file = root / "manifest.json"
+    manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
+    manifest["agent_assessment"] = {
+        "assembly": verdict,
+        "research_verified": True,
+        "visual_acceptance_verified": False,
+        "quality_status": "needs_visual_review" if verdict["pass"] else "assembly_failed",
+    }
+    manifest_file.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     return blueprint, result, root

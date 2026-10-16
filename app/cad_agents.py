@@ -9,7 +9,10 @@ import asyncio
 import base64
 import json
 import math
+from io import BytesIO
 from pathlib import Path
+
+from PIL import Image
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -141,9 +144,6 @@ def assembly_report(plan: DesignPlan, groups: dict[str, list[CadPart]]) -> dict:
 
 def _reference_image(path: Path) -> str:
     """Keep multimodal calls bounded, even when Wikimedia supplies large images."""
-    from io import BytesIO
-    from PIL import Image
-
     with Image.open(path) as img:
         img = img.convert("RGB")
         img.thumbnail((768, 768))

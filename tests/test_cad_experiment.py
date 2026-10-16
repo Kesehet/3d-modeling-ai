@@ -88,6 +88,7 @@ def test_cpu_build_creates_real_step_stl_and_named_glb(tmp_path):
 def test_cad_preview_renders_three_real_geometry_views(tmp_path):
     """Headless render path works on CPU and is nonempty."""
     from PIL import Image
+
     from app.cad_preview import render_cad_views
 
     plan = CadBlueprint.model_validate(BLUEPRINT)

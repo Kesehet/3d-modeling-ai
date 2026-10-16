@@ -9,6 +9,7 @@ import asyncio
 import base64
 import json
 import math
+import shutil
 from io import BytesIO
 from pathlib import Path
 
@@ -19,6 +20,7 @@ from .cad_engine import CAD_SYSTEM_PROMPT, CadBlueprint, CadPart, build_cad
 from .config import REASONING_MODEL, VISION_MODEL
 from .ollama import OllamaProxyClient
 from .research import research_web_references
+from .cad_visual import inspect_candidate
 
 
 class VisualFinding(BaseModel):
@@ -294,53 +296,143 @@ async def generate_agent_cad(prompt: str, model: str = REASONING_MODEL,
         for name, parts in zip(level, results, strict=True):
             groups[name] = parts
 
+    # The first pass handles measured detachment before spending vision inference.
     verdict = assembly_report(plan, groups)
-    # Bound cost and scope: repair at most two failed attachments; preserve good groups.
-    repairs = 0
-    for failure in verdict["measurements"][:]:
-        if failure["gap_mm"] <= next(
-            r.tolerance_mm for r in plan.relationships
-            if r.a == failure["a"] and r.b == failure["b"] and r.relationship == "attached"
-        ):
+    spatial_repairs = 0
+    for failure in verdict["measurements"]:
+        limit = next(r.tolerance_mm for r in plan.relationships
+                     if r.a == failure["a"] and r.b == failure["b"]
+                     and r.relationship == "attached")
+        if failure["gap_mm"] <= limit or spatial_repairs >= 2:
             continue
         target = failure["b"]
-        if repairs >= 2:
-            break
-        original = groups[target]
+        previous = groups[target]
         try:
-            groups[target] = await build_group(
+            proposed = await build_group(
                 tasks[target],
-                correction=(f"Fix detached attachment to {failure['a']}. "
-                            f"Measured gap={failure['gap_mm']} mm. "
-                            f"Previous attempted parts: {[p.model_dump() for p in original]}. "
-                            "Keep world proportions and other components unchanged."),
+                correction=(f"Fix attachment to {failure['a']} with measured AABB gap "
+                            f"{failure['gap_mm']} mm and tolerance {limit} mm. "
+                            "Preserve all other components. "
+                            f"Your previous geometry: {[p.model_dump() for p in previous]}"),
             )
-        except (ValueError, RuntimeError):
-            groups[target] = original
-        repairs += 1
-    verdict = assembly_report(plan, groups)
-    parts = [part for task in plan.components for part in groups[task.id]]
-    if len(parts) > 32:
-        raise ValueError("CAD worker supports at most 32 primitives; reduce component complexity")
-    blueprint = CadBlueprint(title=plan.title, parts=parts)
-    result = await asyncio.to_thread(build_cad, blueprint, root)
-    result["assembly_validation"] = verdict
+            groups[target] = proposed
+            if not assembly_report(plan, groups)["pass"]:
+                # Reject a repair that does not resolve the assembly.
+                groups[target] = previous
+        except (ValueError, RuntimeError, OSError):
+            groups[target] = previous
+        spatial_repairs += 1
+
+    best_snapshot = None
+    best_score = -1.0
+    best_visual = None
+    review_history: list[dict] = []
+    accepted = False
+    latest_export = None
+    # Each round uses a fresh directory; rejected geometry never overwrites accepted exports.
+    for round_number in range(1, 4):
+        verdict = assembly_report(plan, groups)
+        parts = [p for task in plan.components for p in groups[task.id]]
+        if len(parts) > 32:
+            raise ValueError("CAD worker supports at most 32 parts; reduce component complexity")
+        blueprint = CadBlueprint(title=plan.title, parts=parts)
+        candidate_root = root / "candidates" / f"round-{round_number}"
+        result = await asyncio.to_thread(build_cad, blueprint, candidate_root)
+        latest_export = candidate_root
+        item = {"round": round_number, "assembly": verdict, "export_valid": result["ok"]}
+        if not verdict["pass"]:
+            item["reason"] = "Assembly gaps unresolved; visual acceptance blocked"
+            review_history.append(item)
+            break
+        try:
+            critic = await inspect_candidate(
+                client=client, prompt=prompt, plan=plan, research=evidence,
+                model_dir=candidate_root, root=root, round_number=round_number,
+            )
+        except (ValueError, RuntimeError, OSError) as exc:
+            # Keep export artifacts and flag the missing independent comparison.
+            item["reason"] = f"Visual review unavailable: {type(exc).__name__}"
+            review_history.append(item)
+            break
+        score = (critic.subject_match_score + critic.silhouette_match_score) / 2
+        item.update({
+            "visual_score": round(score, 3),
+            "recognizable": critic.recognizable,
+            "visual_accepted": critic.accepted,
+            "missing_features": critic.missing_features,
+            "defects": critic.defects,
+        })
+        review_history.append(item)
+        if score > best_score:
+            best_score = score
+            best_visual = critic
+            best_snapshot = (blueprint, result, candidate_root)
+        if critic.accepted:
+            accepted = True
+            best_snapshot = (blueprint, result, candidate_root)
+            break
+        if round_number == 3 or not critic.repair_component_ids:
+            break
+        # A vision critic repairs at most two selected component jobs, not the whole object.
+        # Preserve other accepted subassemblies and never accept regressions without review.
+        previous_groups = {name: list(parts) for name, parts in groups.items()}
+        for target in critic.repair_component_ids[:2]:
+            try:
+                groups[target] = await build_group(
+                    tasks[target], correction=json.dumps({
+                        "visual_failure": critic.explanation,
+                        "missing_features": critic.missing_features,
+                        "defects": critic.defects,
+                        "preserve_all_other_component_jobs": True,
+                        "previous_parts": [p.model_dump() for p in groups[target]],
+                    }, ensure_ascii=False),
+                )
+            except (ValueError, RuntimeError, OSError):
+                groups[target] = previous_groups[target]
+        if not assembly_report(plan, groups)["pass"]:
+            groups = previous_groups
+            review_history[-1]["repair_reverted_due_to_assembly"] = True
+            break
+
+    selected = best_snapshot
+    if selected is None and latest_export is not None:
+        # A geometrically invalid candidate remains inspectable but cannot succeed.
+        selected = (blueprint, result, latest_export)
+    if selected is None:
+        raise ValueError("No CAD candidate was generated")
+    chosen_blueprint, chosen_result, chosen_root = selected
+    for name in ("assembly.step", "assembly.stl", "assembly.glb", "manifest.json"):
+        shutil.copy2(chosen_root / name, root / name)
+    result = dict(chosen_result)
+    result["assembly_validation"] = assembly_report(
+        plan, {task.id: [
+            p for p in chosen_blueprint.parts if p.name.startswith(task.id + "_")
+        ] for task in plan.components},
+    )
     result["research_verified"] = True
-    result["visual_acceptance_verified"] = False
+    result["visual_acceptance_verified"] = accepted
+    result["visual_model_score"] = best_score if best_score >= 0 else None
+    result["visual_review"] = best_visual.model_dump() if best_visual else None
+    result["review_history"] = review_history
     result["agent_workflow"] = {
         "mode": "research-first", "component_jobs": len(plan.components),
-        "parallelism_limit": min(max_parallel, 3), "assembly_passed": verdict["pass"],
+        "parallelism_limit": max(1, min(max_parallel, 3)),
+        "rounds": len(review_history), "assembly_passed": result["assembly_validation"]["pass"],
     }
-    # Fail closed for downstream promotion without destroying evidence.
-    result["ok"] = bool(result["ok"] and verdict["pass"])
+    result["quality_scope"] = (
+        "Export and conservative assembly checks plus Ollama vision judgment; "
+        "not independently human-verified"
+    )
+    result["ok"] = bool(result["ok"] and result["assembly_validation"]["pass"] and accepted)
     (root / "agent-report.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
     manifest_file = root / "manifest.json"
     manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
     manifest["agent_assessment"] = {
-        "assembly": verdict,
+        "assembly": result["assembly_validation"],
         "research_verified": True,
-        "visual_acceptance_verified": False,
-        "quality_status": "needs_visual_review" if verdict["pass"] else "assembly_failed",
+        "visual_acceptance_verified": accepted,
+        "quality_status": "vision_model_accepted" if result["ok"] else "needs_refinement",
+        "rounds": len(review_history),
     }
     manifest_file.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
-    return blueprint, result, root
+    return chosen_blueprint, result, root

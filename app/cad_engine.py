@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import math
+from itertools import pairwise
 from pathlib import Path
 from typing import Literal
 
@@ -66,7 +67,7 @@ class CadPart(BaseModel):
                     raise ValueError("Loft section contains invalid coordinates")
                 if min(section.width_mm, section.depth_mm) <= 0:
                     raise ValueError("Loft cross-section must have positive dimensions")
-            if any(a.at_mm >= b.at_mm for a, b in zip(sections, sections[1:])):
+            if any(a.at_mm >= b.at_mm for a, b in pairwise(sections)):
                 raise ValueError("Loft section positions must be strictly increasing")
             sizes = ()
         else:

@@ -56,6 +56,10 @@ def test_invalid_cycle_or_foreign_relation_rejected():
     data["relationships"][0]["b"] = "not_in_plan"
     with pytest.raises(ValueError, match="missing"):
         DesignPlan.model_validate(data)
+    data = _plan().model_dump()
+    data["relationships"] = []
+    with pytest.raises(ValueError, match="explicit assembly relationship"):
+        DesignPlan.model_validate(data)
 
 
 def test_detects_realistic_disconnected_attachment_instead_of_export_only():

@@ -1,9 +1,17 @@
 name: CPU CAD Experiment (no GPU)
 on:
+  push:
+    branches:
+      - experiment/research-first-cad-agents-20261016
+    paths:
+      - "scripts/cad_agent_live_benchmark.py"
+      - "app/cad_*.py"
+      - ".github/workflows/cad-cpu-experiment.yml"
   pull_request:
     paths:
       - "app/cad_*.py"
       - "scripts/cad_ci_benchmark.py"
+      - "scripts/cad_agent_live_benchmark.py"
       - "tests/test_cad_experiment.py"
       - "tests/test_cad_agents.py"
       - "tests/test_cad_spatial_regressions.py"
@@ -22,6 +30,7 @@ permissions:
   contents: read
 jobs:
   cad-cpu-e2e:
+    if: github.event_name != 'push'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -52,6 +61,7 @@ jobs:
           if-no-files-found: warn
 
   cad-container:
+    if: github.event_name != 'push'
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
@@ -72,10 +82,10 @@ jobs:
         run: docker run --rm --entrypoint python 3d-ai-cad:ci -c "from build123d import Box; assert Box(10,10,10).volume > 0"
 
   cad-real-ollama:
-    # One-shot branch probe: only an explicitly tagged push consumes real proxy credits.
+    # Opt-in one-shot experiment only; no secrets spent by ordinary PR checks.
     if: (github.event_name == 'workflow_dispatch' && inputs.live_ollama == true) || (github.event_name == 'push' && contains(github.event.head_commit.message, '[cad-live]'))
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
@@ -92,7 +102,7 @@ jobs:
           REASONING_MODEL: ${{ vars.REASONING_MODEL || 'gpt-oss:120b' }}
         run: |
           test -n "$OLLAMA_PROXY_API_KEY"
-          python scripts/cad_ci_benchmark.py --live --output cad-live-artifacts
+          python scripts/cad_agent_live_benchmark.py --prompt Prius --output cad-live-artifacts
       - name: Upload real Ollama-driven models and reports
         if: always()
         uses: actions/upload-artifact@v4

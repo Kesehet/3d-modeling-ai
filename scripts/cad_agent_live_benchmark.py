@@ -2,6 +2,7 @@
 
 Run in GitHub Actions only with explicit [cad-live] opt-in.
 A CI success requires actual vision-model subject acceptance, not just STEP export.
+The result is a live benchmark, not a general production-readiness guarantee.
 """
 from __future__ import annotations
 

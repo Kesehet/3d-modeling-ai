@@ -7,6 +7,7 @@ services:
     image: 3d-modeling-ai-cad:experiment
     environment:
       CAD_EXPERIMENT_ENABLED: "1"
+      CAD_AGENT_WORKFLOW_ENABLED: ${CAD_AGENT_WORKFLOW_ENABLED:-0}
       JOBS_ROOT: /data/jobs
       THREED_API_TOKEN_B64: ${THREED_API_TOKEN_B64:?must be configured}
       OLLAMA_PROXY_API_KEY_B64: ${OLLAMA_PROXY_API_KEY_B64:?must be configured}

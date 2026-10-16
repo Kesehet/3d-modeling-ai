@@ -16,6 +16,7 @@ from app.cad_agents import (
     topological_levels,
 )
 from app.cad_engine import CadBlueprint
+from app.cad_visual import VisualAssessment
 
 
 def _plan():
@@ -128,9 +129,12 @@ def test_research_precedes_component_agents_and_repair_preserves_other_work(tmp_
 
     def fake_builder(blueprint, root):
         calls.append(("export", [p.name for p in blueprint.parts]))
+        root.mkdir(parents=True, exist_ok=True)
         (root / "manifest.json").write_text(json.dumps({
             "blueprint": blueprint.model_dump(), "validation": {"ok": True},
         }))
+        for name in ("assembly.step", "assembly.stl", "assembly.glb"):
+            (root / name).write_bytes(b"fake-geometry-for-unit-test")
         return {"ok": True, "step_reimport_valid": True,
                 "part_count": len(blueprint.parts), "parts": [],
                 "quality_scope": "geometry-only"}
@@ -159,22 +163,32 @@ def test_research_precedes_component_agents_and_repair_preserves_other_work(tmp_
                           "position_mm": [110 if correction else 300, 0, 0]}]
             return SimpleNamespace(data={"title": task, "parts": parts})
 
+    async def fake_inspect_candidate(**kwargs):
+        calls.append(("visual", kwargs["round_number"]))
+        return VisualAssessment(
+            recognizable=True, confidence=0.92, subject_match_score=0.9,
+            silhouette_match_score=0.86, missing_features=[], defects=[],
+            repair_component_ids=[], explanation="All required structural parts present",
+        )
+
     monkeypatch.setattr(cad_agents, "research_web_references", fake_research)
     monkeypatch.setattr(cad_agents, "build_cad", fake_builder)
+    monkeypatch.setattr(cad_agents, "inspect_candidate", fake_inspect_candidate)
     bp, result, path = asyncio.run(cad_agents.generate_agent_cad(
         "A generic mechanical device", root=tmp_path, client=FakeClient(),
     ))
     assert bp.title == _plan().title
     assert result["ok"] and result["assembly_validation"]["pass"]
-    assert not result["visual_acceptance_verified"]
+    assert result["visual_acceptance_verified"]
     assert calls == [
         ("vision", None), ("plan", None), ("part", "base", False),
         ("part", "aux", False), ("part", "aux", True),
         ("export", ["base_body", "aux_body"]),
+        ("visual", 1),
     ]
     assert (path / "design-plan.json").is_file()
     manifest = json.loads((path / "manifest.json").read_text())
-    assert manifest["agent_assessment"]["quality_status"] == "needs_visual_review"
+    assert manifest["agent_assessment"]["quality_status"] == "vision_model_accepted"
 
 
 def test_research_failure_stops_agent_geometry_generation(tmp_path, monkeypatch):

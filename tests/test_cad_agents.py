@@ -9,7 +9,6 @@ import pytest
 
 from app import cad_agents
 from app.cad_agents import (
-    AssemblyRelation,
     ComponentJob,
     DesignPlan,
     assembly_report,

@@ -51,7 +51,7 @@ async def run_cad_job(job_id: str, version: int, *, model: str | None = None) ->
             if not response.is_success:
                 raise RuntimeError(f"CAD worker returned {response.status_code}: {response.text[:350]}")
             payload = response.json()
-            if not payload.get("ok") or not payload.get("step_reimport_valid"):
+            if not payload.get("step_reimport_valid"):
                 raise RuntimeError("CAD worker reported invalid STEP geometry")
             artifact_id = uuid.UUID(str(payload["id"])).hex
             api._write_status(root, state="running", stage="cad_exporting")
@@ -74,10 +74,19 @@ async def run_cad_job(job_id: str, version: int, *, model: str | None = None) ->
             temp = export_dir / f".model-v{version}{suffix}.tmp"
             temp.write_bytes(content)
             temp.replace(dest)
+        is_agent = payload.get("agent_workflow", {}).get("mode") == "research-first"
+        rejected = is_agent and not payload.get("ok")
+        accepted = is_agent and payload.get("ok") and payload.get("visual_acceptance_verified")
         quality = {
-            "status": "geometric_integrity_only",
-            "recognizable": None,
-            "summary": "STEP and per-part mesh checks passed. Visual subject match and mechanical attachments are not yet verified.",
+            "status": ("vision_model_accepted" if accepted else
+                       "cad_qa_rejected" if rejected else "geometric_integrity_only"),
+            "recognizable": (bool(accepted) if is_agent else None),
+            "summary": ("The autonomous CAD candidate was rejected by assembly or visual QA."
+                        if rejected else
+                        "Vision model accepted the candidate; independent review still advised."
+                        if accepted else
+                        "STEP checks passed. Visual subject match and attachment quality "
+                        "have not been verified."),
         }
         qa = {
             "engine": "cpu_cad",
@@ -86,24 +95,36 @@ async def run_cad_job(job_id: str, version: int, *, model: str | None = None) ->
             "parts": payload["parts"],
             "step_reimport_valid": True,
             "review_required": True,
+            "agent_workflow": payload.get("agent_workflow"),
+            "assembly_validation": payload.get("assembly_validation"),
+            "visual_review": payload.get("visual_review"),
+            "review_history": payload.get("review_history"),
             "note": payload.get("quality_scope"),
         }
         (export_dir / f"model-v{version}-qa.json").write_text(
             json.dumps(qa, indent=2), encoding="utf-8"
         )
-        api._write_status(
-            root,
-            state="ready",
-            stage="cad_needs_visual_review",
-            modeling_strategy="cpu_cad",
-            cad={"version": version, "part_count": payload["part_count"], "attempts": payload.get("attempts"),
-                 "engine": "build123d", "visual_review_required": True},
-            generic_model={"version": version},
-            quality_gate=quality,
-            error=None,
-        )
-        append_history(root, "cad_generation_exported", version=version,
-                       part_count=payload["part_count"], formats=list(exports))
+        update = {
+            "state": "failed" if rejected else "ready",
+            "stage": "cad_qa_rejected" if rejected else "cad_needs_visual_review",
+            "modeling_strategy": "cpu_cad",
+            "cad": {
+                "version": version, "part_count": payload["part_count"],
+                "attempts": payload.get("attempts"), "engine": "build123d",
+                "visual_review_required": True,
+                "review_status": quality["status"],
+            },
+            "quality_gate": quality,
+            "error": "CAD quality gate rejected this candidate; review artifacts are preserved."
+            if rejected else None,
+        }
+        # Never promote a rejected candidate over the previous accepted model.
+        if not rejected:
+            update["generic_model"] = {"version": version}
+        api._write_status(root, **update)
+        append_history(root, "cad_generation_rejected" if rejected else "cad_generation_exported",
+                       version=version, part_count=payload["part_count"],
+                       formats=list(exports), qa_status=quality["status"])
     except (httpx.HTTPError, ValueError, RuntimeError, OSError, KeyError, TypeError) as exc:
         # Do not override a prior accepted model when a new CAD attempt fails.
         api._write_status(root, state="failed", stage="cad_failed",
@@ -133,8 +154,8 @@ async def start_cad_generation(job_id: str, request: CadGenerateRequest) -> dict
     if status.get("state") == "running":
         raise HTTPException(status_code=409, detail="Job already running another model-generation action")
     source_request = json.loads((root / "request.json").read_text(encoding="utf-8"))
-    if not 10 <= len(str(source_request.get("prompt") or "")) <= 4000:
-        raise HTTPException(status_code=422, detail="CPU CAD requires a 10-4000 character text prompt")
+    if not 1 <= len(str(source_request.get("prompt") or "").strip()) <= 4000:
+        raise HTTPException(status_code=422, detail="CPU CAD requires a 1-4000 character text prompt")
     version = reserve_model_version(root)
     api._write_status(root, state="running", stage="cad_queued",
                       modeling_strategy="cpu_cad", error=None)

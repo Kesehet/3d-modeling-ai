@@ -1,7 +1,7 @@
 """Research-first, bounded multi-agent CAD prototype.
 
 Uses trusted CAD operations, never executes code suggested by an LLM.
-This workflow is opt-in, keeps failures as evidence, and is not a visual acceptance gate.
+This workflow is opt-in, and accepts only candidates passing measured assembly and vision review.
 """
 from __future__ import annotations
 
@@ -315,15 +315,22 @@ async def generate_agent_cad(prompt: str, model: str = REASONING_MODEL,
                             "Preserve all other components. "
                             f"Your previous geometry: {[p.model_dump() for p in previous]}"),
             )
+            before = assembly_report(plan, groups)
             groups[target] = proposed
-            if not assembly_report(plan, groups)["pass"]:
-                # Reject a repair that does not resolve the assembly.
+            after = assembly_report(plan, groups)
+            previous_gap = next(m["gap_mm"] for m in before["measurements"]
+                                if m["a"] == failure["a"] and m["b"] == failure["b"])
+            next_gap = next(m["gap_mm"] for m in after["measurements"]
+                            if m["a"] == failure["a"] and m["b"] == failure["b"])
+            if next_gap >= previous_gap or len(after["failures"]) > len(before["failures"]):
+                # Accept incremental progress, but never trade one defect for more.
                 groups[target] = previous
         except (ValueError, RuntimeError, OSError):
             groups[target] = previous
         spatial_repairs += 1
 
     best_snapshot = None
+    best_groups = None
     best_score = -1.0
     best_visual = None
     review_history: list[dict] = []
@@ -367,6 +374,10 @@ async def generate_agent_cad(prompt: str, model: str = REASONING_MODEL,
             best_score = score
             best_visual = critic
             best_snapshot = (blueprint, result, candidate_root)
+            best_groups = {name: list(parts) for name, parts in groups.items()}
+        elif best_groups is not None:
+            # Subsequent corrections start from the best candidate, not a regression.
+            groups = {name: list(parts) for name, parts in best_groups.items()}
         if critic.accepted:
             accepted = True
             best_snapshot = (blueprint, result, candidate_root)

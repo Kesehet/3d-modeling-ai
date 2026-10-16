@@ -69,6 +69,10 @@ class DesignPlan(BaseModel):
         for relation in self.relationships:
             if relation.a == relation.b or relation.a not in lookup or relation.b not in lookup:
                 raise ValueError("Assembly relation refers to missing or same component")
+        if len(lookup) > 1:
+            related = {name for edge in self.relationships for name in (edge.a, edge.b)}
+            if related != lookup:
+                raise ValueError("Each component must have an explicit assembly relationship")
         levels = topological_levels(self.components)
         if sum(map(len, levels)) != len(self.components):
             raise ValueError("Cyclic component dependencies")

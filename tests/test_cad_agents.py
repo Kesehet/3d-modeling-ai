@@ -89,6 +89,23 @@ def test_rotations_affect_world_space_bounds():
     assert hi[1] - lo[1] == pytest.approx(200)
 
 
+def test_loft_sections_contribute_to_world_space_spatial_qa():
+    part = CadBlueprint.model_validate({
+        "title": "Loft body",
+        "parts": [{
+            "name": "shell", "kind": "loft", "loft_axis": "x",
+            "loft_sections": [
+                {"at_mm": -100, "width_mm": 20, "depth_mm": 15},
+                {"at_mm": 100, "width_mm": 80, "depth_mm": 40},
+            ], "rotation_deg": [0, 0, 90],
+        }],
+    }).parts[0]
+    lower, upper = part_aabb(part)
+    assert upper[0] - lower[0] == pytest.approx(80)
+    assert upper[1] - lower[1] == pytest.approx(200)
+    assert upper[2] - lower[2] == pytest.approx(40)
+
+
 def test_research_precedes_component_agents_and_repair_preserves_other_work(tmp_path, monkeypatch):
     calls = []
 

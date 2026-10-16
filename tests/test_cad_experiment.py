@@ -95,6 +95,43 @@ def test_parametric_tube_export(tmp_path):
     assert build_cad(plan, tmp_path)["step_reimport_valid"]
 
 
+def test_generic_loft_is_real_reimportable_open_cascade_geometry(tmp_path):
+    """The agent can create tapered freeform-ish bodies, not only box stacks."""
+    plan = CadBlueprint.model_validate({
+        "title": "Generic lofted fuselage",
+        "parts": [{
+            "name": "shell", "kind": "loft", "loft_axis": "x",
+            "loft_sections": [
+                {"at_mm": 0, "width_mm": 30, "depth_mm": 15},
+                {"at_mm": 70, "width_mm": 90, "depth_mm": 30},
+                {"at_mm": 140, "width_mm": 55, "depth_mm": 20},
+            ],
+        }],
+    })
+    report = build_cad(plan, tmp_path)
+    assert report["step_reimport_valid"] and report["part_count"] == 1
+    assert report["parts"][0]["mesh_watertight"]
+    shape = trimesh.load(tmp_path / "assembly.glb", force="scene")
+    assert shape.extents[0] == pytest.approx(140, rel=0.02)
+    assert shape.extents[1] >= 85
+    assert shape.extents[2] >= 28
+
+
+def test_rejects_inverted_or_degenerate_loft_sections():
+    for sections in [
+        [{"at_mm": 5, "width_mm": 50, "depth_mm": 20}],
+        [{"at_mm": 5, "width_mm": 50, "depth_mm": 20},
+         {"at_mm": 4, "width_mm": 50, "depth_mm": 20}],
+        [{"at_mm": 4, "width_mm": 50, "depth_mm": 20},
+         {"at_mm": 9, "width_mm": 0, "depth_mm": 20}],
+    ]:
+        with pytest.raises(ValueError):
+            CadBlueprint.model_validate({
+                "title": "Invalid loft",
+                "parts": [{"name": "shell", "kind": "loft", "loft_sections": sections}],
+            })
+
+
 @pytest.mark.parametrize("bad", [
     {"title": "missing parts", "parts": []},
     {"title": "duplicate", "parts": [

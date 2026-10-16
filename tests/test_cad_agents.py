@@ -204,3 +204,76 @@ def test_research_failure_stops_agent_geometry_generation(tmp_path, monkeypatch)
         asyncio.run(cad_agents.generate_agent_cad(
             "An unknown named object", root=tmp_path, client=NoPlanningClient(),
         ))
+
+
+def test_visual_review_repairs_only_named_component_and_stops_when_accepted(tmp_path, monkeypatch):
+    """Two real workflow rounds; all unrelated geometry stays unchanged."""
+    calls = []
+
+    async def known_research(prompt, root, client):
+        calls.append("research")
+        return {"verified_visual_references": [{"stored_name": "known.jpg"}], "text_sources": []}
+
+    async def inspected(**kwargs):
+        calls.append(("visual", kwargs["round_number"]))
+        if kwargs["round_number"] == 1:
+            return VisualAssessment(
+                recognizable=False, confidence=0.92, subject_match_score=0.22,
+                silhouette_match_score=0.3, missing_features=["top silhouette"],
+                defects=["Main body shape is too small"],
+                repair_component_ids=["base"],
+                explanation="Base shape is too short relative to the object references",
+            )
+        return VisualAssessment(
+            recognizable=True, confidence=0.9, subject_match_score=0.89,
+            silhouette_match_score=0.85, missing_features=[], defects=[],
+            repair_component_ids=[], explanation="Good match to documented geometry",
+        )
+
+    def fake_builder(blueprint, root):
+        root.mkdir(parents=True, exist_ok=True)
+        calls.append(("export", {p.name: p.model_dump() for p in blueprint.parts}))
+        for name in ("assembly.step", "assembly.stl", "assembly.glb"):
+            (root / name).write_bytes(b"test-model-placeholder")
+        (root / "manifest.json").write_text(json.dumps({
+            "blueprint": blueprint.model_dump(), "validation": {"ok": True},
+        }))
+        return {"ok": True, "step_reimport_valid": True,
+                "part_count": len(blueprint.parts), "parts": []}
+
+    class DesignClient:
+        async def chat_json(self, *, system, prompt, **kwargs):
+            if "chief CAD designer" in system:
+                calls.append("chief")
+                return SimpleNamespace(data=_plan().model_dump())
+            info = json.loads(prompt)
+            task = info["component"]["id"]
+            repair = bool(info["repair_feedback"])
+            calls.append(("component", task, repair))
+            if task == "base":
+                response = {"name": "base_body", "kind": "box",
+                            "dimensions_mm": [210 if repair else 200, 80, 50]}
+            else:
+                response = {"name": "aux_body", "kind": "box",
+                            "dimensions_mm": [20, 20, 20],
+                            "position_mm": [110, 0, 0]}
+            return SimpleNamespace(data={"title": task, "parts": [response]})
+
+    monkeypatch.setattr(cad_agents, "gather_research", known_research)
+    monkeypatch.setattr(cad_agents, "build_cad", fake_builder)
+    monkeypatch.setattr(cad_agents, "inspect_candidate", inspected)
+    plan, result, output = asyncio.run(cad_agents.generate_agent_cad(
+        "A generic mechanical device", root=tmp_path, client=DesignClient(),
+    ))
+    assert result["ok"] and result["visual_acceptance_verified"]
+    assert result["agent_workflow"]["rounds"] == 2
+    assert [event for event in calls if event[:1] == ("component",)] == [
+        ("component", "base", False), ("component", "aux", False),
+        ("component", "base", True),
+    ]
+    assert [p.name for p in plan.parts] == ["base_body", "aux_body"]
+    assert plan.parts[0].dimensions_mm[0] == 210
+    assert plan.parts[1].position_mm == (110, 0, 0)
+    assert (output / "assembly.glb").exists()
+    assert (output / "candidates" / "round-1" / "assembly.glb").exists()
+    assert (output / "candidates" / "round-2" / "assembly.glb").exists()

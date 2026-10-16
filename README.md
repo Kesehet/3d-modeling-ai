@@ -131,7 +131,6 @@ The existing Ollama-backed CAD implementation is unchanged when the flag is abse
   do not pass the quality gate.
 
 **Not yet production-ready:** This is coarse, conservative attachment screening,
-not exact surface distance or subject recognizability. Its CAD vocabulary is
-still box/cylinder/cone/sphere/tube, not the lofted surfaces in the manually
-directed Prius prototype. A real unmocked prompt-to-model benchmark and
+not exact surface distance or subject recognizability. Its CAD vocabulary now includes bounded rectangular lofts alongside
+basic primitives, but not arbitrary body panels, fillets or freeform meshes. A real unmocked prompt-to-model benchmark and
 independent visual QA are required before promoting the feature.

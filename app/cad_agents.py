@@ -17,10 +17,10 @@ from PIL import Image
 from pydantic import BaseModel, Field, model_validator
 
 from .cad_engine import CAD_SYSTEM_PROMPT, CadBlueprint, CadPart, build_cad
+from .cad_visual import inspect_candidate
 from .config import REASONING_MODEL, VISION_MODEL
 from .ollama import OllamaProxyClient
 from .research import research_web_references
-from .cad_visual import inspect_candidate
 
 
 class VisualFinding(BaseModel):

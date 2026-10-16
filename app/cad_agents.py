@@ -93,13 +93,40 @@ def topological_levels(components: list[ComponentJob]) -> list[list[str]]:
 
 
 def part_aabb(part: CadPart) -> tuple[tuple[float, ...], tuple[float, ...]]:
-    """Conservative world AABB, including all three Euler rotations."""
-    if part.kind == "box":
-        half = [v / 2 for v in part.dimensions_mm]
-    elif part.kind == "sphere":
-        half = [part.radius_mm] * 3
+    """Conservative world AABB including local loft offsets and Euler rotation."""
+    if part.kind == "loft":
+        points = []
+        for sec in part.loft_sections:
+            if part.loft_axis == "x":
+                points.extend([
+                    (sec.at_mm, sec.center_u_mm + u * sec.width_mm / 2,
+                     sec.center_v_mm + v * sec.depth_mm / 2)
+                    for u in (-1, 1) for v in (-1, 1)
+                ])
+            elif part.loft_axis == "y":
+                points.extend([
+                    (sec.center_u_mm + u * sec.width_mm / 2, sec.at_mm,
+                     sec.center_v_mm + v * sec.depth_mm / 2)
+                    for u in (-1, 1) for v in (-1, 1)
+                ])
+            else:
+                points.extend([
+                    (sec.center_u_mm + u * sec.width_mm / 2,
+                     sec.center_v_mm + v * sec.depth_mm / 2, sec.at_mm)
+                    for u in (-1, 1) for v in (-1, 1)
+                ])
+        lower = [min(p[i] for p in points) for i in range(3)]
+        upper = [max(p[i] for p in points) for i in range(3)]
+        center = [(lower[i] + upper[i]) / 2 for i in range(3)]
+        half = [(upper[i] - lower[i]) / 2 for i in range(3)]
     else:
-        half = [part.radius_mm, part.radius_mm, part.height_mm / 2]
+        center = [0.0, 0.0, 0.0]
+        if part.kind == "box":
+            half = [v / 2 for v in part.dimensions_mm]
+        elif part.kind == "sphere":
+            half = [part.radius_mm] * 3
+        else:
+            half = [part.radius_mm, part.radius_mm, part.height_mm / 2]
     ax, ay, az = (math.radians(a) for a in part.rotation_deg)
     cx, cy, cz = math.cos(ax), math.cos(ay), math.cos(az)
     sx, sy, sz = math.sin(ax), math.sin(ay), math.sin(az)
@@ -109,11 +136,14 @@ def part_aabb(part: CadPart) -> tuple[tuple[float, ...], tuple[float, ...]]:
         (-sy, cy * sx, cy * cx),
     )
     extent = [sum(abs(rotation[i][j]) * half[j] for j in range(3)) for i in range(3)]
+    world_center = [
+        part.position_mm[i] + sum(rotation[i][j] * center[j] for j in range(3))
+        for i in range(3)
+    ]
     return (
-        tuple(part.position_mm[i] - extent[i] for i in range(3)),
-        tuple(part.position_mm[i] + extent[i] for i in range(3)),
+        tuple(world_center[i] - extent[i] for i in range(3)),
+        tuple(world_center[i] + extent[i] for i in range(3)),
     )
-
 
 def aabb_gap(a, b) -> float:
     return math.sqrt(sum(max(a[0][i] - b[1][i], b[0][i] - a[1][i], 0) ** 2 for i in range(3)))
@@ -231,7 +261,7 @@ async def generate_agent_cad(prompt: str, model: str = REASONING_MODEL,
                 model=model,
                 system=(CAD_SYSTEM_PROMPT + "\nYou are ONE component specialist. "
                         "Respect the chief designer's shared world coordinates. "
-                        "Produce only your assigned component, max EIGHT simple parts. "
+                        "Produce only your assigned component, max EIGHT parts using the allowed CAD shapes. "
                         "Do not modify other specialists' work. "
                         "Use name prefix 'COMPONENTID_' for every part."),
                 prompt=json.dumps({

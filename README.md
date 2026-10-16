@@ -110,27 +110,45 @@ The AI chooses profiles, paths, dimensions and placement from the request and re
 contain no subject-specific geometry. Generated candidates still require visual comparison and strict feature
 review; successful export alone does not certify a finished model.
 
-## Experimental research-first multi-agent CAD
+## Experimental research-first Ollama CAD agents (PR #155)
 
-The optional CPU CAD sidecar can run a **research -> design -> component agents ->
-assembly measurement -> targeted repair** workflow instead of one-shot primitives.
-Set `CAD_AGENT_WORKFLOW_ENABLED=1` **only inside the CAD service** to enable it.
-The existing Ollama-backed CAD implementation is unchanged when the flag is absent.
+This opt-in workflow builds **research -> chief design -> dependency-aware
+component agents -> assembly measurement -> CAD export -> three CPU previews ->
+vision critique -> targeted component repair**. It is not enabled on production.
+To enable only inside the CAD sidecar, set `CAD_AGENT_WORKFLOW_ENABLED=1`; the
+existing one-shot CAD engine continues unchanged when the flag is absent.
 
-- The research stage uses the existing Wikimedia candidate-fetcher and a **vision-model
-  pixel check**; if no image is visually verified, it stops instead of guessing.
-- One chief planner emits a bounded, generic design brief containing global millimetre
-  coordinates, component dependencies and intended attachment relationships.
-- Up to three independent component jobs run concurrently; dependency edges form a
-  DAG. Each specialist can create at most eight named primitive parts.
-- An independent world-space AABB screening measures unexpected gaps at declared
-  attachments. At most two failing subassemblies are rebuilt with the measured
-  defect and existing successful parts preserved.
-- The workflow persists `research.json`, `design-plan.json`, `agent-report.json`,
-  `manifest.json`, STEP, STL and GLB. Missing references and bad assembly geometry
-  do not pass the quality gate.
+- The research agent finds Wikimedia images, then checks actual pixels with the
+  vision model. Missing verified references stop generation instead of inventing
+  a subject.
+- The chief designer emits a bounded, generic 3D plan with shared millimetre
+  coordinates and component attachment relationships. No car/fan templates.
+- Up to three independently assigned component jobs run concurrently, respecting
+  explicit dependencies. Each can use bounded loft cross-sections and solids;
+  the overall blueprint is still limited to 32 named parts.
+- The assembly reviewer measures world-space AABB gaps, preserving working
+  subassemblies and passing defect measurements to limited repairs. This is a
+  conservative broad-phase check, not exact surface contact or collision QA.
+- The engine builds real STEP/STL/GLB geometry and generates three CPU-only
+  orthographic GLB previews. The Ollama vision critic compares these actual
+  previews to pixel-verified reference photos.
+- Up to three rounds in total: a failed review can request changes to at most
+  two specific components, not an unbounded rewrite. Better candidates are
+  preserved; rejected geometry cannot replace an existing dashboard model.
+- `research.json`, `design-plan.json`, `agent-report.json`,
+  `visual-round-N.json`, preview PNGs and each candidate's exports persist.
+  Dashboard export copies also preserve failed CAD QA evidence.
+- Quality status distinguishes export validity, assembly screening and
+  **Ollama vision-model acceptance**; none imply independent human certification.
 
-**Not yet production-ready:** This is coarse, conservative attachment screening,
-not exact surface distance or subject recognizability. Its CAD vocabulary now includes bounded rectangular lofts alongside
-basic primitives, but not arbitrary body panels, fillets or freeform meshes. A real unmocked prompt-to-model benchmark and
-independent visual QA are required before promoting the feature.
+Unmocked test (explicitly opt-in using CI with required Ollama credentials):
+
+```sh
+python scripts/cad_agent_live_benchmark.py --prompt Prius --output cad-agent-live-artifacts
+```
+
+**Still experimental:** Wikimedia coverage may be insufficient for very specific
+models; the preview renderer is an approximate software rasterizer, not Blender
+or a true z-buffer; the CAD vocabulary doesn't cover arbitrary freeform meshes,
+fillets, mechanical constraints or vehicle-grade surface design. Live
+prompt-to-model results must be reviewed before merging or deploying.

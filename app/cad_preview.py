@@ -8,12 +8,11 @@ from __future__ import annotations
 import math
 from pathlib import Path
 
-import numpy as np
-import trimesh
 from PIL import Image, ImageDraw
 
 
-def _unit(vector: np.ndarray) -> np.ndarray:
+def _unit(vector):
+    import numpy as np
     length = float(np.linalg.norm(vector))
     if not math.isfinite(length) or length < 1e-8:
         raise ValueError("Invalid camera direction")
@@ -23,6 +22,9 @@ def _unit(vector: np.ndarray) -> np.ndarray:
 def render_cad_views(glb: Path, output_dir: Path, *,
                      size: int = 480, max_faces: int = 16000) -> list[Path]:
     """Create three labeled CPU previews with shared framing from the true mesh."""
+    import numpy as np
+    import trimesh
+
     scene = trimesh.load(str(glb), force="scene")
     meshes = [mesh for mesh in scene.dump() if not mesh.is_empty]
     if not meshes:

@@ -285,9 +285,12 @@ async def generate_agent_cad(prompt: str, model: str = REASONING_MODEL,
             for part in blueprint.parts:
                 if not part.name.startswith(f"{task.id}_"):
                     raise ValueError(f"{task.id}: specialist emitted foreign part: {part.name}")
+                lo, hi = part_aabb(part)
                 for idx in range(3):
-                    if abs(part.position_mm[idx] - task.center_mm[idx]) > task.size_mm[idx]:
-                        raise ValueError(f"{task.id}: part position outside assigned envelope")
+                    limit_low = task.center_mm[idx] - task.size_mm[idx] / 2
+                    limit_high = task.center_mm[idx] + task.size_mm[idx] / 2
+                    if lo[idx] < limit_low - 1 or hi[idx] > limit_high + 1:
+                        raise ValueError(f"{task.id}: solid extends outside assigned envelope")
             return blueprint.parts
 
     for level in topological_levels(plan.components):

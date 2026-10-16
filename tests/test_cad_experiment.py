@@ -85,6 +85,22 @@ def test_cpu_build_creates_real_step_stl_and_named_glb(tmp_path):
     assert (tmp_path / "manifest.json").exists()
 
 
+def test_cad_preview_renders_three_real_geometry_views(tmp_path):
+    """Headless render path works on CPU and is nonempty."""
+    from PIL import Image
+    from app.cad_preview import render_cad_views
+
+    plan = CadBlueprint.model_validate(BLUEPRINT)
+    build_cad(plan, tmp_path / "model")
+    views = render_cad_views(tmp_path / "model" / "assembly.glb",
+                             tmp_path / "previews", size=192)
+    assert {path.stem for path in views} == {"isometric", "side", "top"}
+    for path in views:
+        with Image.open(path) as img:
+            assert img.size == (192, 192)
+            assert len(img.getcolors(maxcolors=100000) or []) > 2
+
+
 def test_parametric_tube_export(tmp_path):
     plan = CadBlueprint.model_validate({
         "title": "Hollow spacer", "parts": [

@@ -78,6 +78,53 @@ def test_cpu_cad_job_status_and_viewer_exports(tmp_path, monkeypatch):
         assert (root / "exports" / f"model-v1{suffix}").is_file()
 
 
+def test_rejected_agent_model_keeps_exports_without_replacing_previous_model(tmp_path, monkeypatch):
+    ident, root = create_job_in_root(tmp_path, monkeypatch)
+    original = root / "exports" / "model-v1.glb"
+    original.write_bytes(b"previous-accepted-model")
+    main._write_status(root, state="ready", generic_model={"version": 1})
+    artifact_id = uuid.uuid4().hex
+
+    class Worker:
+        def __init__(self, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def post(self, url, **kwargs):
+            return httpx.Response(200, request=httpx.Request("POST", url), json={
+                "id": artifact_id, "ok": False, "step_reimport_valid": True,
+                "part_count": 2, "parts": [{"name": "shell"}, {"name": "wheel"}],
+                "agent_workflow": {"mode": "research-first", "assembly_passed": True},
+                "visual_acceptance_verified": False,
+                "visual_review": {"recognizable": False, "subject_match_score": 0.1},
+            })
+
+        async def get(self, url, **kwargs):
+            return httpx.Response(200, request=httpx.Request("GET", url),
+                                  content=b"model-check-data" * 16)
+
+        async def delete(self, url, **kwargs):
+            return httpx.Response(200, request=httpx.Request("DELETE", url),
+                                  json={"deleted": True})
+
+    monkeypatch.setattr(cad_jobs.httpx, "AsyncClient", Worker)
+    asyncio.run(cad_jobs.run_cad_job(ident, 2))
+    status = main._read_status(root)
+    assert status["state"] == "failed" and status["stage"] == "cad_qa_rejected"
+    assert status["generic_model"]["version"] == 1
+    assert status["quality_gate"]["recognizable"] is False
+    assert original.read_bytes() == b"previous-accepted-model"
+    for suffix in (".glb", ".step", ".stl", "-cad.json", "-qa.json"):
+        assert (root / "exports" / f"model-v2{suffix}").is_file()
+    qa = json.loads((root / "exports" / "model-v2-qa.json").read_text())
+    assert qa["agent_workflow"]["mode"] == "research-first"
+
+
 def test_cpu_cad_worker_failure_is_visible_and_existing_model_is_preserved(tmp_path, monkeypatch):
     ident, root = create_job_in_root(tmp_path, monkeypatch)
     original = root / "exports" / "model-v1.glb"

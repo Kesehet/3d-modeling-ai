@@ -132,15 +132,15 @@ def build_cad(blueprint: CadBlueprint, output_dir: Path) -> dict:
         Compound,
         Cone,
         Cylinder,
+        Plane,
         Pos,
+        Rectangle,
         Rot,
         Sphere,
-        Plane,
-        Rectangle,
-        loft,
         export_step,
         export_stl,
         import_step,
+        loft,
     )
 
     output_dir.mkdir(parents=True, exist_ok=True)

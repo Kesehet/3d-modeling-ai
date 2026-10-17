@@ -27,9 +27,11 @@ CAD_MAX_WAIT_SECONDS = 840.0
 
 class CadGenerateRequest(BaseModel):
     model: str | None = Field(default=None, min_length=2, max_length=120)
+    agent_mode: bool = False
 
 
-async def run_cad_job(job_id: str, version: int, *, model: str | None = None) -> None:
+async def run_cad_job(job_id: str, version: int, *, model: str | None = None,
+                      agent_mode: bool = False) -> None:
     from . import main as api
 
     root = api._require_job(job_id)
@@ -45,7 +47,8 @@ async def run_cad_job(job_id: str, version: int, *, model: str | None = None) ->
         ) as client:
             response = await client.post(
                 f"{CAD_WORKER_URL}/v1/cad-experiments",
-                json={"prompt": request["prompt"], **({"model": model} if model else {})},
+                json={"prompt": request["prompt"], "agent_mode": agent_mode,
+                      **({"model": model} if model else {})},
                 headers=auth,
             )
             if not response.is_success:
@@ -159,7 +162,8 @@ async def start_cad_generation(job_id: str, request: CadGenerateRequest) -> dict
     version = reserve_model_version(root)
     api._write_status(root, state="running", stage="cad_queued",
                       modeling_strategy="cpu_cad", error=None)
-    task = asyncio.create_task(run_cad_job(job_id, version, model=request.model))
+    task = asyncio.create_task(run_cad_job(job_id, version, model=request.model,
+                                           agent_mode=request.agent_mode))
     CAD_JOBS[job_id] = task
     task.add_done_callback(lambda done, job_id=job_id: CAD_JOBS.pop(job_id, None)
                            if CAD_JOBS.get(job_id) is done else None)

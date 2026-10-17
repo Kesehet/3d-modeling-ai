@@ -198,6 +198,16 @@ def test_api_end_to_end_with_fake_ollama(tmp_path, monkeypatch):
             assert reply.status_code == 200 and len(reply.content) > 100
 
 
+def test_agent_mode_needs_explicit_feature_flag(monkeypatch):
+    monkeypatch.setenv("CAD_EXPERIMENT_ENABLED", "1")
+    monkeypatch.setenv("CAD_AGENT_WORKFLOW_ENABLED", "0")
+    with TestClient(app) as client:
+        resp = client.post("/v1/cad-experiments",
+                           json={"prompt": "Prius", "agent_mode": True})
+        assert resp.status_code == 404
+        assert "agents are disabled" in resp.json()["detail"]
+
+
 def test_disabled_by_default(monkeypatch):
     monkeypatch.delenv("CAD_EXPERIMENT_ENABLED", raising=False)
     with TestClient(app) as client:

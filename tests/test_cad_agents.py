@@ -253,8 +253,10 @@ def test_visual_review_repairs_only_named_component_and_stops_when_accepted(tmp_
             repair = bool(info["repair_feedback"])
             calls.append(("component", task, repair))
             if task == "base":
+                first_attempt = not repair and calls.count(("component", "base", False)) == 1
                 response = {"name": "base_body", "kind": "box",
-                            "dimensions_mm": [210 if repair else 200, 80, 50]}
+                            "dimensions_mm": [210 if repair else 800 if first_attempt else 200,
+                                              80, 50]}
             else:
                 response = {"name": "aux_body", "kind": "box",
                             "dimensions_mm": [20, 20, 20],
@@ -270,8 +272,8 @@ def test_visual_review_repairs_only_named_component_and_stops_when_accepted(tmp_
     assert result["ok"] and result["visual_acceptance_verified"]
     assert result["agent_workflow"]["rounds"] == 2
     assert [event for event in calls if event[:1] == ("component",)] == [
-        ("component", "base", False), ("component", "aux", False),
-        ("component", "base", True),
+        ("component", "base", False), ("component", "base", False),
+        ("component", "aux", False), ("component", "base", True),
     ]
     assert [p.name for p in plan.parts] == ["base_body", "aux_body"]
     assert plan.parts[0].dimensions_mm[0] == 210

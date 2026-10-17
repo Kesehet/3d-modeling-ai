@@ -294,7 +294,7 @@ def test_reference_research_handles_html_gateway_block_without_crashing():
 
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
             legacy, error = await _try_search_json(client, "https://en.wikipedia.org/w/api.php")
-            assert legacy == {} and "ValueError" in error
+            assert legacy == {} and "JSONDecodeError" in error
             rest, error = await _try_search_json(
                 client, "https://en.wikipedia.org/w/rest.php/v1/search/page"
             )

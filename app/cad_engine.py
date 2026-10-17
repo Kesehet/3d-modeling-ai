@@ -7,15 +7,26 @@ from __future__ import annotations
 
 import json
 import math
+from itertools import pairwise
 from pathlib import Path
 from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
 
 
+class CadLoftSection(BaseModel):
+    """A bounded transverse rectangular profile in local coordinates."""
+
+    at_mm: float
+    width_mm: float
+    depth_mm: float
+    center_u_mm: float = 0
+    center_v_mm: float = 0
+
+
 class CadPart(BaseModel):
     name: str = Field(min_length=1, max_length=60, pattern=r"^[A-Za-z][A-Za-z0-9_.-]*$")
-    kind: Literal["box", "cylinder", "cone", "sphere", "tube"]
+    kind: Literal["box", "cylinder", "cone", "sphere", "tube", "loft"]
     position_mm: tuple[float, float, float] = (0, 0, 0)
     rotation_deg: tuple[float, float, float] = (0, 0, 0)
     dimensions_mm: tuple[float, float, float] | None = None
@@ -23,6 +34,8 @@ class CadPart(BaseModel):
     top_radius_mm: float | None = None
     inner_radius_mm: float | None = None
     height_mm: float | None = None
+    loft_axis: Literal["x", "y", "z"] = "z"
+    loft_sections: list[CadLoftSection] | None = None
 
     @model_validator(mode="after")
     def check_geometry(self) -> CadPart:
@@ -43,6 +56,20 @@ class CadPart(BaseModel):
             sizes = (self.radius_mm, self.top_radius_mm, self.height_mm)
         elif self.kind == "tube":
             sizes = (self.radius_mm, self.inner_radius_mm, self.height_mm)
+        elif self.kind == "loft":
+            sections = self.loft_sections or []
+            if not 2 <= len(sections) <= 12:
+                raise ValueError("Loft requires between two and twelve sections")
+            for section in sections:
+                measures = (section.at_mm, section.width_mm, section.depth_mm,
+                            section.center_u_mm, section.center_v_mm)
+                if not all(math.isfinite(v) and abs(v) <= 20_000 for v in measures):
+                    raise ValueError("Loft section contains invalid coordinates")
+                if min(section.width_mm, section.depth_mm) <= 0:
+                    raise ValueError("Loft cross-section must have positive dimensions")
+            if any(a.at_mm >= b.at_mm for a, b in pairwise(sections)):
+                raise ValueError("Loft section positions must be strictly increasing")
+            sizes = ()
         else:
             sizes = (self.radius_mm, self.height_mm)
         if any(v is None or not math.isfinite(v) or v <= 0 or v > 20_000 for v in sizes):
@@ -56,7 +83,7 @@ class CadPart(BaseModel):
 class CadBlueprint(BaseModel):
     title: str = Field(min_length=1, max_length=160)
     units: Literal["mm"] = "mm"
-    parts: list[CadPart] = Field(min_length=1, max_length=32)
+    parts: list[CadPart] = Field(min_length=1, max_length=48)
 
     @model_validator(mode="after")
     def unique_part_names(self) -> CadBlueprint:
@@ -77,6 +104,9 @@ cylinder: radius_mm and height_mm (along local Z).
 cone: radius_mm (bottom), top_radius_mm (top), height_mm (local Z).
 sphere: radius_mm.
 tube: radius_mm outer, inner_radius_mm inner, height_mm (local Z).
+loft: loft_axis=x/y/z, loft_sections=[{at_mm,width_mm,depth_mm,center_u_mm,center_v_mm}, ...].
+Loft sections are transverse RECTANGLES perpendicular to chosen local axis, with strictly increasing at_mm.
+Use loft for tapered/sloping/curved overall silhouettes where primitive boxes would be misleading.
 Every part may have position_mm=[x,y,z] and rotation_deg=[rx,ry,rz].
 Compose separate components with sane proportions and correct contact/overlap at joints.
 Think in physical assembly relationships BEFORE choosing numeric positions:
@@ -103,12 +133,15 @@ def build_cad(blueprint: CadBlueprint, output_dir: Path) -> dict:
         Compound,
         Cone,
         Cylinder,
+        Plane,
         Pos,
+        Rectangle,
         Rot,
         Sphere,
         export_step,
         export_stl,
         import_step,
+        loft,
     )
 
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -127,6 +160,22 @@ def build_cad(blueprint: CadBlueprint, output_dir: Path) -> dict:
             outer = Cylinder(part.radius_mm, part.height_mm)
             bore = Cylinder(part.inner_radius_mm, part.height_mm + 2)
             solid = outer - bore
+        elif part.kind == "loft":
+            profiles = []
+            for section in part.loft_sections:
+                if part.loft_axis == "x":
+                    plane = Plane(origin=(section.at_mm, section.center_u_mm,
+                                          section.center_v_mm),
+                                  x_dir=(0, 1, 0), z_dir=(1, 0, 0))
+                elif part.loft_axis == "y":
+                    plane = Plane(origin=(section.center_u_mm, section.at_mm,
+                                          section.center_v_mm),
+                                  x_dir=(1, 0, 0), z_dir=(0, 1, 0))
+                else:
+                    plane = Plane(origin=(section.center_u_mm, section.center_v_mm,
+                                          section.at_mm))
+                profiles.append(plane * Rectangle(section.width_mm, section.depth_mm))
+            solid = loft(profiles)
         else:
             solid = Sphere(part.radius_mm)
         solid = Pos(*part.position_mm) * Rot(*part.rotation_deg) * solid

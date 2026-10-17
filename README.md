@@ -109,3 +109,49 @@ The same declarative part vocabulary is available to scene generation and loft/c
 The AI chooses profiles, paths, dimensions and placement from the request and references. These operations
 contain no subject-specific geometry. Generated candidates still require visual comparison and strict feature
 review; successful export alone does not certify a finished model.
+
+## Experimental research-first Ollama CAD agents (PR #155)
+
+This opt-in workflow builds **research -> chief design -> dependency-aware
+component agents -> assembly measurement -> CAD export -> three CPU previews ->
+vision critique -> targeted component repair**. It is not enabled on production.
+To enable only inside the CAD sidecar, set `CAD_AGENT_WORKFLOW_ENABLED=1`; the
+existing one-shot CAD engine continues unchanged when the flag is absent.
+
+- The research agent finds Wikimedia images, then checks actual pixels with the
+  vision model. Missing verified references stop generation instead of inventing
+  a subject.
+- The chief designer emits a bounded, generic 3D plan with shared millimetre
+  coordinates and component attachment relationships. No car/fan templates.
+- Up to three independently assigned component jobs run concurrently, respecting
+  explicit dependencies. Each can use bounded loft cross-sections and solids;
+  the overall blueprint is limited to 48 named parts.
+- The assembly reviewer measures world-space AABB gaps, preserving working
+  subassemblies and passing defect measurements to limited repairs. This is a
+  conservative broad-phase check, not exact surface contact or collision QA.
+- The engine builds real STEP/STL/GLB geometry and generates three CPU-only
+  orthographic GLB previews. The Ollama vision critic compares these actual
+  previews to pixel-verified reference photos.
+- Up to three rounds in total: a failed review can request changes to at most
+  two specific components, not an unbounded rewrite. Better candidates are
+  preserved; rejected geometry cannot replace an existing dashboard model.
+- `research.json`, `design-plan.json`, `agent-report.json`,
+  `visual-round-N.json`, preview PNGs and each candidate's exports persist.
+  Dashboard export copies also preserve failed CAD QA evidence.
+- Quality status distinguishes export validity, assembly screening and
+  **Ollama vision-model acceptance**; none imply independent human certification.
+
+Unmocked test (explicitly opt-in using CI with required Ollama credentials):
+
+```sh
+python scripts/cad_agent_live_benchmark.py --prompt Prius --output cad-agent-live-artifacts
+```
+
+**Still experimental:** Wikimedia coverage may be insufficient for very specific
+models; the preview renderer is an approximate software rasterizer, not Blender
+or a true z-buffer; the CAD vocabulary doesn't cover arbitrary freeform meshes,
+fillets, mechanical constraints or vehicle-grade surface design. Live
+prompt-to-model results must be reviewed before merging or deploying.
+
+The explicitly tagged experiment runs a **real Ollama** test from GitHub Actions and
+uploads its source references, CAD exports, renders, and review reports for inspection.

@@ -85,6 +85,23 @@ def test_cpu_build_creates_real_step_stl_and_named_glb(tmp_path):
     assert (tmp_path / "manifest.json").exists()
 
 
+def test_cad_preview_renders_three_real_geometry_views(tmp_path):
+    """Headless render path works on CPU and is nonempty."""
+    from PIL import Image
+
+    from app.cad_preview import render_cad_views
+
+    plan = CadBlueprint.model_validate(BLUEPRINT)
+    build_cad(plan, tmp_path / "model")
+    views = render_cad_views(tmp_path / "model" / "assembly.glb",
+                             tmp_path / "previews", size=192)
+    assert {path.stem for path in views} == {"isometric", "side", "top"}
+    for path in views:
+        with Image.open(path) as img:
+            assert img.size == (192, 192)
+            assert len(img.getcolors(maxcolors=100000) or []) > 2
+
+
 def test_parametric_tube_export(tmp_path):
     plan = CadBlueprint.model_validate({
         "title": "Hollow spacer", "parts": [
@@ -93,6 +110,55 @@ def test_parametric_tube_export(tmp_path):
         ],
     })
     assert build_cad(plan, tmp_path)["step_reimport_valid"]
+
+
+def test_generic_loft_is_real_reimportable_open_cascade_geometry(tmp_path):
+    """The agent can create tapered freeform-ish bodies, not only box stacks."""
+    plan = CadBlueprint.model_validate({
+        "title": "Generic lofted fuselage",
+        "parts": [{
+            "name": "shell", "kind": "loft", "loft_axis": "x",
+            "loft_sections": [
+                {"at_mm": 0, "width_mm": 30, "depth_mm": 15},
+                {"at_mm": 70, "width_mm": 90, "depth_mm": 30},
+                {"at_mm": 140, "width_mm": 55, "depth_mm": 20},
+            ],
+        }],
+    })
+    report = build_cad(plan, tmp_path)
+    assert report["step_reimport_valid"] and report["part_count"] == 1
+    assert report["parts"][0]["mesh_watertight"]
+    shape = trimesh.load(tmp_path / "assembly.glb", force="scene")
+    assert shape.extents[0] == pytest.approx(140, rel=0.02)
+    assert shape.extents[1] >= 85
+    assert shape.extents[2] >= 28
+
+
+def test_cad_part_budget_matches_six_parallel_component_jobs():
+    parts = [{"name": f"p{i}", "kind": "sphere", "radius_mm": 5}
+             for i in range(48)]
+    plan = CadBlueprint.model_validate({"title": "Large generic assembly", "parts": parts})
+    assert len(plan.parts) == 48
+    with pytest.raises(ValueError):
+        CadBlueprint.model_validate({
+            "title": "Out of budget",
+            "parts": [*parts, {"name": "extra", "kind": "sphere", "radius_mm": 5}],
+        })
+
+
+def test_rejects_inverted_or_degenerate_loft_sections():
+    for sections in [
+        [{"at_mm": 5, "width_mm": 50, "depth_mm": 20}],
+        [{"at_mm": 5, "width_mm": 50, "depth_mm": 20},
+         {"at_mm": 4, "width_mm": 50, "depth_mm": 20}],
+        [{"at_mm": 4, "width_mm": 50, "depth_mm": 20},
+         {"at_mm": 9, "width_mm": 0, "depth_mm": 20}],
+    ]:
+        with pytest.raises(ValueError):
+            CadBlueprint.model_validate({
+                "title": "Invalid loft",
+                "parts": [{"name": "shell", "kind": "loft", "loft_sections": sections}],
+            })
 
 
 @pytest.mark.parametrize("bad", [
@@ -142,6 +208,16 @@ def test_api_end_to_end_with_fake_ollama(tmp_path, monkeypatch):
         for suffix in ("step", "stl", "glb", "json"):
             reply = client.get(body["files"][suffix])
             assert reply.status_code == 200 and len(reply.content) > 100
+
+
+def test_agent_mode_needs_explicit_feature_flag(monkeypatch):
+    monkeypatch.setenv("CAD_EXPERIMENT_ENABLED", "1")
+    monkeypatch.setenv("CAD_AGENT_WORKFLOW_ENABLED", "0")
+    with TestClient(app) as client:
+        resp = client.post("/v1/cad-experiments",
+                           json={"prompt": "Prius", "agent_mode": True})
+        assert resp.status_code == 404
+        assert "agents are disabled" in resp.json()["detail"]
 
 
 def test_disabled_by_default(monkeypatch):

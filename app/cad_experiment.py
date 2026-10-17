@@ -24,8 +24,9 @@ EXPORTS = {"step": "assembly.step", "stl": "assembly.stl",
 
 
 class CadRequest(BaseModel):
-    prompt: str = Field(min_length=10, max_length=4000)
+    prompt: str = Field(min_length=1, max_length=4000)
     model: str | None = Field(default=None, min_length=2, max_length=120)
+    agent_mode: bool = False
 
 
 def _enabled() -> None:
@@ -86,7 +87,19 @@ async def create_experiment(payload: CadRequest) -> dict:
         raise HTTPException(429, "CPU CAD worker busy; retry later")
     async with CAD_SEMAPHORE:
         try:
-            _, report, _ = await generate_cad(payload.prompt, payload.model or REASONING_MODEL)
+            if payload.agent_mode and os.getenv("CAD_AGENT_WORKFLOW_ENABLED") != "1":
+                raise HTTPException(404, "Research-first CAD agents are disabled")
+            if payload.agent_mode:
+                from .cad_agents import generate_agent_cad
+
+                ident = uuid.uuid4().hex
+                _, report, _ = await generate_agent_cad(
+                    payload.prompt, payload.model or REASONING_MODEL,
+                    root=_root() / ident,
+                )
+                report["id"] = ident
+            else:
+                _, report, _ = await generate_cad(payload.prompt, payload.model or REASONING_MODEL)
         except (OllamaProxyError, ValueError, RuntimeError, OSError) as exc:
             raise HTTPException(422, detail=str(exc)[:1000]) from exc
     ident = report["id"]

@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from io import BytesIO
 from pathlib import Path
 from typing import Any
+from urllib.parse import urljoin
 
 import httpx
 from PIL import Image, UnidentifiedImageError
@@ -213,6 +214,23 @@ def _candidate_relevance_score(query: str, candidate: dict[str, Any]) -> float:
     return score
 
 
+async def _try_search_json(client: httpx.AsyncClient, url: str, *, params: dict | None = None
+                           ) -> tuple[dict[str, Any], str | None]:
+    """Tolerate bot blocks/HTML errors without poisoning the whole research job.
+
+    The failure hint is returned in diagnostics; it contains no secrets or body content.
+    """
+    try:
+        response = await client.get(url, params=params)
+        response.raise_for_status()
+        data = response.json()
+        if not isinstance(data, dict):
+            raise TypeError("Expected JSON object")
+        return data, None
+    except (httpx.HTTPError, ValueError, TypeError) as exc:
+        return {}, f"{url.split('/')[2]}: {type(exc).__name__}"
+
+
 async def research_web_references(
     query: str,
     target_dir: Path,
@@ -232,6 +250,7 @@ async def research_web_references(
     target_dir.mkdir(parents=True, exist_ok=True)
     pages: list[dict[str, Any]] = []
     candidates: list[dict[str, Any]] = []
+    provider_errors: list[str] = []
 
     candidate_limit = min(24, max(12, max_images * 3))
     headers = {"User-Agent": USER_AGENT, "Accept": "application/json"}
@@ -252,7 +271,9 @@ async def research_web_references(
             "pithumbsize": "1400",
             "pilicense": "free",
         }
-        wiki = (await client.get(WIKIPEDIA_API, params=wiki_params)).json()
+        wiki, wiki_error = await _try_search_json(client, WIKIPEDIA_API, params=wiki_params)
+        if wiki_error:
+            provider_errors.append(wiki_error)
         for rank, page in enumerate((wiki.get("query") or {}).get("pages") or [], start=1):
             page_record = {
                 "provider": "wikipedia",
@@ -276,6 +297,40 @@ async def research_web_references(
                         "search_rank": rank,
                     }
                 )
+
+        # The legacy action API is sometimes blocked or returns HTML from hosted runners.
+        # Use the official MediaWiki REST search endpoint as an independent fallback.
+        if not candidates:
+            rest, rest_error = await _try_search_json(
+                client, "https://en.wikipedia.org/w/rest.php/v1/search/page",
+                params={"q": query, "limit": 8},
+            )
+            if rest_error:
+                provider_errors.append(rest_error)
+            for rank, page in enumerate(rest.get("pages") or [], start=1):
+                title = page.get("title") or ""
+                if not title:
+                    continue
+                item = {
+                    "provider": "wikipedia_rest",
+                    "title": title,
+                    "url": "https://en.wikipedia.org/wiki/" + title.replace(" ", "_"),
+                    "extract": str(page.get("description") or "")[:1200],
+                    "search_rank": rank,
+                }
+                pages.append(item)
+                image = page.get("thumbnail") or {}
+                img_url = image.get("url")
+                if img_url:
+                    candidates.append({
+                        "provider": "wikipedia_rest",
+                        "title": title, "source_title": title,
+                        "description": item["extract"],
+                        "image_url": urljoin("https://en.wikipedia.org", img_url),
+                        "source_url": item["url"],
+                        "license": "wikipedia-page-thumbnail",
+                        "search_rank": rank,
+                    })
 
         # Search both an exact phrase and the ordinary full-text query. Exact phrase tends
         # to keep specific products/vehicles/characters together; the fallback preserves
@@ -302,7 +357,11 @@ async def research_web_references(
                 # like ordinary wiki pages.
                 "mediasearch": "true",
             }
-            commons = (await client.get(COMMONS_API, params=commons_params)).json()
+            commons, commons_error = await _try_search_json(
+                client, COMMONS_API, params=commons_params,
+            )
+            if commons_error:
+                provider_errors.append(commons_error)
             for rank, page in enumerate((commons.get("query") or {}).get("pages") or [], start=1):
                 title = str(page.get("title") or "")
                 if not title or title in seen_commons_titles:
@@ -338,6 +397,30 @@ async def research_web_references(
                         "search_rank": rank + (search_round * 5),
                     }
                 )
+
+        # Openverse offers independently hosted fallback images when Wikimedia
+        # thumbnails are unavailable, blocked or below minimum resolution.
+        # Metadata is never enough: vision must still inspect pixels.
+        if not candidates:
+            openverse, ov_error = await _try_search_json(
+                client, "https://api.openverse.org/v1/images/",
+                params={"q": query, "page_size": 16},
+            )
+            if ov_error:
+                provider_errors.append(ov_error)
+            for rank, item in enumerate(openverse.get("results") or [], start=1):
+                source = item.get("url") or item.get("thumbnail")
+                if not source or not str(source).startswith("https://"):
+                    continue
+                candidates.append({
+                    "provider": "openverse", "title": item.get("title") or query,
+                    "source_title": item.get("title") or query,
+                    "description": str(item.get("title") or ""),
+                    "image_url": source,
+                    "source_url": item.get("foreign_landing_url"),
+                    "license": item.get("license") or "unknown",
+                    "search_rank": rank,
+                })
 
         # Full-text search can surface biographies, buildings or documents that
         # merely mention the requested object. Do not download those obvious spillovers
@@ -412,7 +495,8 @@ async def research_web_references(
 
     return {
         "query": query,
-        "provider": "wikimedia",
+        "provider": "wikimedia_and_openverse",
+        "provider_errors": sorted(set(provider_errors)),
         "created_at": datetime.now(UTC).isoformat(),
         "pages": pages,
         "candidate_count": len(references),

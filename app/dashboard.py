@@ -462,7 +462,7 @@ header{display:flex;align-items:center;justify-content:space-between;gap:16px;ma
   <div class="dialog">
     <h2>New model</h2>
     <div class="field"><label for="jobPrompt">What should we make?</label><textarea id="jobPrompt" placeholder="Describe the object or character..."></textarea></div>
-    <div class="field"><label for="jobEngine">Modeling engine</label><select id="jobEngine"><option value="cpu_cad">CPU CAD · fast parametric STEP/STL/GLB</option><option value="blender">Blender AI · iterative visual modeling</option></select></div>
+    <div class="field"><label for="jobEngine">Modeling engine</label><select id="jobEngine"><option value="cpu_cad">CPU CAD · fast parametric STEP/STL/GLB</option><option value="cpu_agents">Ollama CAD Agents · research + parallel modeling (experimental)</option><option value="blender">Blender AI · iterative visual modeling</option></select></div>
     <div class="field"><label for="jobUse">Use</label><select id="jobUse"><option value="rendering">Rendering</option><option value="3d_printing">3D printing</option><option value="game_asset">Game asset</option></select></div>
     <div class="field"><label for="jobWidth">Width in mm (optional)</label><input id="jobWidth" type="number" min="0.01" max="10000" step="0.1"></div>
     <div class="actions"><button class="btn" id="cancelNew">Cancel</button><button class="btn primary" id="createModel">Create model</button></div>
@@ -651,8 +651,8 @@ async function createModel(){
     els.dialog.classList.remove("show");
     await refresh();
     openJob(created.job_id);
-    const cad=els.engine.value==="cpu_cad";
-    response=await fetch("/dashboard/jobs/"+encodeURIComponent(created.job_id)+(cad?"/cad":"/generate"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(cad?{}:{auto_research:true,auto_improve_rounds:30})});
+    const cad=els.engine.value==="cpu_cad"||els.engine.value==="cpu_agents";
+    response=await fetch("/dashboard/jobs/"+encodeURIComponent(created.job_id)+(cad?"/cad":"/generate"),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(cad?{agent_mode:els.engine.value==="cpu_agents"}:{auto_research:true,auto_improve_rounds:30})});
     if(!response.ok){
       await refresh();
       return;

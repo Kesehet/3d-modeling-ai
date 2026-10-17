@@ -17,8 +17,8 @@ from app.cad_agents import (
     topological_levels,
 )
 from app.cad_engine import CadBlueprint
-from app.research import _try_search_json
 from app.cad_visual import VisualAssessment
+from app.research import _try_search_json
 
 
 def _plan():

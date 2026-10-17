@@ -83,7 +83,7 @@ class CadPart(BaseModel):
 class CadBlueprint(BaseModel):
     title: str = Field(min_length=1, max_length=160)
     units: Literal["mm"] = "mm"
-    parts: list[CadPart] = Field(min_length=1, max_length=32)
+    parts: list[CadPart] = Field(min_length=1, max_length=48)
 
     @model_validator(mode="after")
     def unique_part_names(self) -> CadBlueprint:

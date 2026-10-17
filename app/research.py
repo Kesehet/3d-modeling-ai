@@ -398,28 +398,28 @@ async def research_web_references(
                     }
                 )
 
-        # Openverse indexes openly licensed media on multiple hosts and is used
-        # only as a fallback. Metadata is never enough: vision must inspect pixels.
-        if not candidates:
-            openverse, ov_error = await _try_search_json(
-                client, "https://api.openverse.org/v1/images/",
-                params={"q": query, "page_size": 16},
-            )
-            if ov_error:
-                provider_errors.append(ov_error)
-            for rank, item in enumerate(openverse.get("results") or [], start=1):
-                source = item.get("url") or item.get("thumbnail")
-                if not source or not str(source).startswith("https://"):
-                    continue
-                candidates.append({
-                    "provider": "openverse", "title": item.get("title") or query,
-                    "source_title": item.get("title") or query,
-                    "description": str(item.get("title") or ""),
-                    "image_url": source,
-                    "source_url": item.get("foreign_landing_url"),
-                    "license": item.get("license") or "unknown",
-                    "search_rank": rank,
-                })
+        # Openverse offers independently hosted fallback images when Wikimedia
+        # thumbnails are unavailable, blocked or below minimum resolution.
+        # Metadata is never enough: vision must still inspect pixels.
+        openverse, ov_error = await _try_search_json(
+            client, "https://api.openverse.org/v1/images/",
+            params={"q": query, "page_size": 16},
+        )
+        if ov_error:
+            provider_errors.append(ov_error)
+        for rank, item in enumerate(openverse.get("results") or [], start=1):
+            source = item.get("url") or item.get("thumbnail")
+            if not source or not str(source).startswith("https://"):
+                continue
+            candidates.append({
+                "provider": "openverse", "title": item.get("title") or query,
+                "source_title": item.get("title") or query,
+                "description": str(item.get("title") or ""),
+                "image_url": source,
+                "source_url": item.get("foreign_landing_url"),
+                "license": item.get("license") or "unknown",
+                "search_rank": rank,
+            })
 
         # Full-text search can surface biographies, buildings or documents that
         # merely mention the requested object. Do not download those obvious spillovers

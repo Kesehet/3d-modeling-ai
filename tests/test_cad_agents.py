@@ -157,10 +157,10 @@ def test_research_precedes_component_agents_and_repair_preserves_other_work(tmp_
             correction = json.loads(prompt)["repair_feedback"]
             calls.append(("part", task, bool(correction)))
             if task == "base":
-                parts = [{"name": "base_body", "kind": "box",
+                parts = [{"name": "COMPONENTID_base_body", "kind": "box",
                           "dimensions_mm": [200, 80, 50]}]
             else:
-                parts = [{"name": "aux_body", "kind": "box",
+                parts = [{"name": "COMPONENTID_aux_body", "kind": "box",
                           "dimensions_mm": [20, 20, 20],
                           "position_mm": [110 if correction else 220, 0, 0]}]
             return SimpleNamespace(data={"title": task, "parts": parts})

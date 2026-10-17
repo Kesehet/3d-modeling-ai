@@ -5,6 +5,7 @@ import asyncio
 import json
 from types import SimpleNamespace
 
+import httpx
 import pytest
 
 from app import cad_agents
@@ -16,6 +17,7 @@ from app.cad_agents import (
     topological_levels,
 )
 from app.cad_engine import CadBlueprint
+from app.research import _try_search_json
 from app.cad_visual import VisualAssessment
 
 
@@ -277,3 +279,22 @@ def test_visual_review_repairs_only_named_component_and_stops_when_accepted(tmp_
     assert (output / "assembly.glb").exists()
     assert (output / "candidates" / "round-1" / "assembly.glb").exists()
     assert (output / "candidates" / "round-2" / "assembly.glb").exists()
+
+
+def test_reference_research_handles_html_gateway_block_without_crashing():
+    """An HTML bot block must not become an uncaught JSONDecodeError."""
+    async def check():
+        def handler(req):
+            if req.url.path.endswith("/api.php"):
+                return httpx.Response(200, text="<html>bot block</html>")
+            return httpx.Response(200, json={"pages": [{"title": "Sample"}]})
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            legacy, error = await _try_search_json(client, "https://en.wikipedia.org/w/api.php")
+            assert legacy == {} and "ValueError" in error
+            rest, error = await _try_search_json(
+                client, "https://en.wikipedia.org/w/rest.php/v1/search/page"
+            )
+            assert not error and rest["pages"][0]["title"] == "Sample"
+
+    asyncio.run(check())

@@ -6,6 +6,7 @@ on:
     paths:
       - "scripts/cad_agent_live_benchmark.py"
       - "app/cad_*.py"
+      - "app/research.py"
       - ".github/workflows/cad-cpu-experiment.yml"
   pull_request:
     paths:

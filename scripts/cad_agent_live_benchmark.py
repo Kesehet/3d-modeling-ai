@@ -49,7 +49,7 @@ async def run(prompt: str, output: Path) -> int:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--prompt", default="Prius")
+    parser.add_argument("--prompt", default="Prius")  # Deliberately unqualified subject test
     parser.add_argument("--output", type=Path, default=Path("cad-agent-live-artifacts"))
     arguments = parser.parse_args()
     sys.exit(asyncio.run(run(arguments.prompt, arguments.output)))

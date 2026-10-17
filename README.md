@@ -125,7 +125,7 @@ existing one-shot CAD engine continues unchanged when the flag is absent.
   coordinates and component attachment relationships. No car/fan templates.
 - Up to three independently assigned component jobs run concurrently, respecting
   explicit dependencies. Each can use bounded loft cross-sections and solids;
-  the overall blueprint is still limited to 32 named parts.
+  the overall blueprint is limited to 48 named parts.
 - The assembly reviewer measures world-space AABB gaps, preserving working
   subassemblies and passing defect measurements to limited repairs. This is a
   conservative broad-phase check, not exact surface contact or collision QA.

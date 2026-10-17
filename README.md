@@ -152,3 +152,6 @@ models; the preview renderer is an approximate software rasterizer, not Blender
 or a true z-buffer; the CAD vocabulary doesn't cover arbitrary freeform meshes,
 fillets, mechanical constraints or vehicle-grade surface design. Live
 prompt-to-model results must be reviewed before merging or deploying.
+
+The explicitly tagged experiment runs a **real Ollama** test from GitHub Actions and
+uploads its source references, CAD exports, renders, and review reports for inspection.

@@ -6,8 +6,8 @@ import re
 from datetime import UTC, datetime
 from io import BytesIO
 from pathlib import Path
-from urllib.parse import urljoin
 from typing import Any
+from urllib.parse import urljoin
 
 import httpx
 from PIL import Image, UnidentifiedImageError
@@ -225,9 +225,9 @@ async def _try_search_json(client: httpx.AsyncClient, url: str, *, params: dict 
         response.raise_for_status()
         data = response.json()
         if not isinstance(data, dict):
-            raise ValueError("Expected JSON object")
+            raise TypeError("Expected JSON object")
         return data, None
-    except (httpx.HTTPError, ValueError) as exc:
+    except (httpx.HTTPError, ValueError, TypeError) as exc:
         return {}, f"{url.split('/')[2]}: {type(exc).__name__}"
 
 

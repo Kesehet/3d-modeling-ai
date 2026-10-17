@@ -21,6 +21,7 @@ async def run(prompt: str, output: Path) -> int:
     report = {
         "prompt": prompt, "started_at_utc": datetime.now(UTC).isoformat(),
         "benchmark": "unmocked Ollama research-first multi-agent CAD",
+        "quality_requirement": "subject recognized, assembly acceptable, actual previews reviewed",
     }
     try:
         _, result, root = await generate_agent_cad(

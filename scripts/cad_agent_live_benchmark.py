@@ -1,6 +1,6 @@
 """Single, bounded, unmocked research-first Ollama CAD benchmark.
 
-Run in GitHub Actions only with explicit [cad-live] opt-in.
+Run in GitHub Actions only with an explicit opt-in live-inference test.
 A CI success requires actual vision-model subject acceptance, not just STEP export.
 The result is a live benchmark, not a general production-readiness guarantee.
 """

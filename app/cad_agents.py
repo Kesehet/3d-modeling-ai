@@ -269,7 +269,8 @@ async def generate_agent_cad(prompt: str, model: str = REASONING_MODEL,
                         "Respect the chief designer's shared world coordinates. "
                         "Produce only your assigned component, max EIGHT parts using the allowed CAD shapes. "
                         "Do not modify other specialists' work. "
-                        "Use name prefix 'COMPONENTID_' for every part."),
+                        f"Prefix each part name with EXACTLY '{task.id}_'. "
+                        "Do not write literal placeholders such as COMPONENTID."),
                 prompt=json.dumps({
                     "full_request": prompt, "overall_silhouette": plan.silhouette,
                     "overall_dimensions_mm": plan.dimensions_mm,
@@ -280,6 +281,11 @@ async def generate_agent_cad(prompt: str, model: str = REASONING_MODEL,
                 schema=CadBlueprint.model_json_schema(), temperature=0.1,
             )
             blueprint = CadBlueprint.model_validate(reply.data)
+            # Repair formatting-only placeholder echoes; never invent geometry.
+            for part in blueprint.parts:
+                if part.name.startswith("COMPONENTID_"):
+                    suffix = part.name[len("COMPONENTID_"):]
+                    part.name = suffix if suffix.startswith(f"{task.id}_") else f"{task.id}_{suffix}"
             if len(blueprint.parts) > 8 or not blueprint.parts:
                 raise ValueError(f"{task.id}: invalid subjob part count")
             for part in blueprint.parts:

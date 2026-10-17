@@ -374,8 +374,8 @@ async def generate_agent_cad(prompt: str, model: str = REASONING_MODEL,
     for round_number in range(1, 4):
         verdict = assembly_report(plan, groups)
         parts = [p for task in plan.components for p in groups[task.id]]
-        if len(parts) > 32:
-            raise ValueError("CAD worker supports at most 32 parts; reduce component complexity")
+        if len(parts) > 48:
+            raise ValueError("CAD worker supports at most 48 parts; reduce component complexity")
         blueprint = CadBlueprint(title=plan.title, parts=parts)
         candidate_root = root / "candidates" / f"round-{round_number}"
         result = await asyncio.to_thread(build_cad, blueprint, candidate_root)

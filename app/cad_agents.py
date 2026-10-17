@@ -258,46 +258,71 @@ async def generate_agent_cad(prompt: str, model: str = REASONING_MODEL,
     semaphore = asyncio.Semaphore(max(1, min(max_parallel, 3)))
 
     async def build_group(task: ComponentJob, correction: str = "") -> list[CadPart]:
+        """Bounded model-guided retry on invalid CAD JSON, names or actual solid extents."""
         async with semaphore:
-            fixed = {
-                name: [p.model_dump() for p in parts]
-                for name, parts in groups.items()
-            }
-            reply = await client.chat_json(
-                model=model,
-                system=(CAD_SYSTEM_PROMPT + "\nYou are ONE component specialist. "
-                        "Respect the chief designer's shared world coordinates. "
-                        "Produce only your assigned component, max EIGHT parts using the allowed CAD shapes. "
-                        "Do not modify other specialists' work. "
-                        f"Prefix each part name with EXACTLY '{task.id}_'. "
-                        "Do not write literal placeholders such as COMPONENTID."),
-                prompt=json.dumps({
-                    "full_request": prompt, "overall_silhouette": plan.silhouette,
-                    "overall_dimensions_mm": plan.dimensions_mm,
-                    "component": task.model_dump(), "other_completed_parts": fixed,
-                    "repair_feedback": correction, "verified_reference_descriptions":
-                        evidence["verified_visual_references"],
-                }),
-                schema=CadBlueprint.model_json_schema(), temperature=0.1,
-            )
-            blueprint = CadBlueprint.model_validate(reply.data)
-            # Repair formatting-only placeholder echoes; never invent geometry.
-            for part in blueprint.parts:
-                if part.name.startswith("COMPONENTID_"):
-                    suffix = part.name[len("COMPONENTID_"):]
-                    part.name = suffix if suffix.startswith(f"{task.id}_") else f"{task.id}_{suffix}"
-            if len(blueprint.parts) > 8 or not blueprint.parts:
-                raise ValueError(f"{task.id}: invalid subjob part count")
-            for part in blueprint.parts:
-                if not part.name.startswith(f"{task.id}_"):
-                    raise ValueError(f"{task.id}: specialist emitted foreign part: {part.name}")
-                lo, hi = part_aabb(part)
-                for idx in range(3):
-                    limit_low = task.center_mm[idx] - task.size_mm[idx] / 2
-                    limit_high = task.center_mm[idx] + task.size_mm[idx] / 2
-                    if lo[idx] < limit_low - 1 or hi[idx] > limit_high + 1:
-                        raise ValueError(f"{task.id}: solid extends outside assigned envelope")
-            return blueprint.parts
+            feedback = correction
+            error = ""
+            for attempt in range(1, 4):
+                fixed = {
+                    name: [p.model_dump() for p in parts]
+                    for name, parts in groups.items()
+                }
+                reply = await client.chat_json(
+                    model=model,
+                    system=(CAD_SYSTEM_PROMPT + "\nYou are ONE component specialist. "
+                            "Respect the chief designer's shared world coordinates. "
+                            "Produce only your assigned component, max EIGHT parts "
+                            "using the allowed CAD shapes. Do not modify other jobs. "
+                            f"Prefix every part name with exactly '{task.id}_'. "
+                            "No literal placeholders or code. "
+                            "All geometry including radii and extents must fit "
+                            "inside the component's assigned size_mm bounding box."),
+                    prompt=json.dumps({
+                        "full_request": prompt, "overall_silhouette": plan.silhouette,
+                        "overall_dimensions_mm": plan.dimensions_mm,
+                        "component": task.model_dump(), "other_completed_parts": fixed,
+                        "repair_feedback": feedback, "try": attempt,
+                        "verified_reference_descriptions": evidence["verified_visual_references"],
+                    }),
+                    schema=CadBlueprint.model_json_schema(), temperature=0.1,
+                )
+                try:
+                    blueprint = CadBlueprint.model_validate(reply.data)
+                    for part in blueprint.parts:
+                        if part.name.startswith("COMPONENTID_"):
+                            suffix = part.name[len("COMPONENTID_"):]
+                            part.name = (suffix if suffix.startswith(f"{task.id}_")
+                                         else f"{task.id}_{suffix}")
+                    if len(blueprint.parts) > 8:
+                        raise ValueError(f"8-part subjob limit exceeded: {len(blueprint.parts)}")
+                    if len({p.name.lower() for p in blueprint.parts}) != len(blueprint.parts):
+                        raise ValueError("Duplicate names after placeholder normalization")
+                    for part in blueprint.parts:
+                        if not part.name.startswith(f"{task.id}_"):
+                            raise ValueError(f"Foreign part name {part.name!r}")
+                        lo, hi = part_aabb(part)
+                        for idx in range(3):
+                            low = task.center_mm[idx] - task.size_mm[idx] / 2
+                            high = task.center_mm[idx] + task.size_mm[idx] / 2
+                            if lo[idx] < low - 1 or hi[idx] > high + 1:
+                                axis = ("x", "y", "z")[idx]
+                                raise ValueError(
+                                    f"{part.name} {axis}-range [{lo[idx]:.1f}, {hi[idx]:.1f}] mm "
+                                    f"exceeds allowed [{low:.1f}, {high:.1f}] mm; "
+                                    "reduce size or move toward assigned center"
+                                )
+                except (ValueError, TypeError) as exc:
+                    error = str(exc)[:850]
+                    feedback = (
+                        f"Previous attempt {attempt} was rejected on measured contract: "
+                        f"{error}. Correct only this component; do not change its "
+                        "design-plan envelope or other components. "
+                        f"Previous proposal: {str(reply.data)[:2200]}. "
+                        f"Original repair instruction: {correction[:500]}"
+                    )
+                    continue
+                return blueprint.parts
+            raise ValueError(f"{task.id}: 3 bounded attempts failed; {error}")
 
     for level in topological_levels(plan.components):
         # No group is allowed to read an uncompleted dependency; independent jobs run in parallel.

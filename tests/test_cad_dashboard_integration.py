@@ -28,6 +28,7 @@ def test_dashboard_has_cpu_cad_choice_and_step_download():
     html = dashboard_page().body.decode()
     assert 'id="jobEngine"' in html
     assert 'value="cpu_cad"' in html
+    assert 'value="cpu_agents"' in html
     assert '/cad' in html
     assert 'glb|obj|stl|step' in html
     assert 'CAD model ready for visual review' in html
@@ -227,7 +228,7 @@ def test_dashboard_cad_route_creates_trackable_job(tmp_path, monkeypatch):
     ident, root = create_job_in_root(tmp_path, monkeypatch)
     invocations = []
 
-    async def fake_cad_runner(job_id, version, *, model=None):
+    async def fake_cad_runner(job_id, version, *, model=None, agent_mode=False):
         invocations.append((job_id, version))
 
     monkeypatch.setattr(cad_jobs, "run_cad_job", fake_cad_runner)

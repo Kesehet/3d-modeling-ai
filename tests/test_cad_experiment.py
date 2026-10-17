@@ -134,6 +134,18 @@ def test_generic_loft_is_real_reimportable_open_cascade_geometry(tmp_path):
     assert shape.extents[2] >= 28
 
 
+def test_cad_part_budget_matches_six_parallel_component_jobs():
+    parts = [{"name": f"p{i}", "kind": "sphere", "radius_mm": 5}
+             for i in range(48)]
+    plan = CadBlueprint.model_validate({"title": "Large generic assembly", "parts": parts})
+    assert len(plan.parts) == 48
+    with pytest.raises(ValueError):
+        CadBlueprint.model_validate({
+            "title": "Out of budget",
+            "parts": [*parts, {"name": "extra", "kind": "sphere", "radius_mm": 5}],
+        })
+
+
 def test_rejects_inverted_or_degenerate_loft_sections():
     for sections in [
         [{"at_mm": 5, "width_mm": 50, "depth_mm": 20}],
